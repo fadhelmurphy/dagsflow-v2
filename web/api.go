@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 		{"POST /api/v1/dags/{dag}/reparse", U, s.reparse},
 		{"POST /api/v1/dags/{dag}/dagRuns/{run}/mark", U, s.markRun},
 		{"POST /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/mark", U, s.markTask},
+		{"GET /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/rendered", V, s.rendered},
 		{"GET /api/v1/eventLogs", V, s.eventLogs},
 		{"GET /api/v1/roles", V, s.roles},
 		{"GET /api/v1/users", A, s.listUsers},

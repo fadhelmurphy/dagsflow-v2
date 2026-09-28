@@ -482,6 +482,9 @@ func (p *proxy) build(s DagSpec) *dag.DAG {
 		o := []dag.TaskOption{dag.WithTriggerRule(dag.TriggerRule(ts.TriggerRule)), dag.WithRetries(ts.Retries, ts.RetryDelay),
 			dag.WithTimeout(ts.Timeout), dag.WithPool(ts.Pool), dag.WithPoolSlots(ts.PoolSlots),
 			dag.WithPriorityWeight(ts.Priority), dag.WithSLA(ts.SLA), dag.WithOutlets(ts.Outlets...)}
+		if len(ts.Templates) > 0 {
+			o = append(o, dag.WithTemplateFields(ts.Templates...))
+		}
 		if ts.Map != nil {
 			o = append(o, dag.Expand(*ts.Map))
 		}

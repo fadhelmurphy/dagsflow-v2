@@ -3,6 +3,7 @@ package dag
 import (
 	"bufio"
 	"dagsflow-go/operator"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,22 +24,27 @@ func (d *DAG) NewEmptyTask(id string, opts ...TaskOption) *Task {
 // Special params: project_id, location, gcp_conn_id (default google_cloud_default),
 // sql (inline query instead of sqlPath).
 func (d *DAG) NewBigQueryTask(id, sqlPath string, params map[string]any, opts ...TaskOption) *Task {
+	sqlField := TemplateField{Name: "sql", File: sqlPath, Raw: str(params["sql"]), Lang: "sql", Vars: params}
+	fields := []TemplateField{sqlField}
+	for _, k := range []string{"project_id", "location"} {
+		if s := str(params[k]); s != "" {
+			fields = append(fields, TemplateField{Name: k, Raw: s, Lang: "text"})
+		}
+	}
+	opts = append([]TaskOption{WithTemplateFields(fields...)}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
 		rendered, err := renderMap(ctx, params)
 		if err != nil {
 			return err
 		}
-		raw := str(rendered["sql"])
-		if sqlPath != "" {
-			b, err := os.ReadFile(sqlPath)
-			if err != nil {
-				return fmt.Errorf("read %s: %w", sqlPath, err)
+		for _, k := range []string{"project_id", "location"} {
+			if s := str(rendered[k]); s != "" {
+				ctx.RecordRendered(k, s)
 			}
-			raw = string(b)
 		}
-		query, err := ctx.Render(raw, rendered)
+		query, err := ctx.RenderTemplateField("sql")
 		if err != nil {
-			return fmt.Errorf("render sql: %w", err)
+			return err
 		}
 		connID := firstNonEmpty(str(rendered["gcp_conn_id"]), "google_cloud_default")
 		conn, _ := GetConnection(connID)
@@ -58,10 +64,17 @@ func (d *DAG) NewBigQueryTask(id, sqlPath string, params map[string]any, opts ..
 
 // NewTriggerDagRunTask ~ TriggerDagRunOperator. String values in conf are templated.
 func (d *DAG) NewTriggerDagRunTask(id, targetDagID string, conf map[string]any, waitForCompletion bool, opts ...TaskOption) *Task {
+	if conf == nil {
+		conf = map[string]any{}
+	}
+	opts = append([]TaskOption{WithTemplateFields(TemplateField{Name: "conf", Map: conf, Lang: "json"})}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
 		c, err := renderMap(ctx, conf)
 		if err != nil {
 			return err
+		}
+		if b, err := json.MarshalIndent(c, "", "  "); err == nil {
+			ctx.RecordRendered("conf", string(b))
 		}
 		runID, err := ctx.TriggerDagRun(targetDagID, c, waitForCompletion)
 		if err != nil {
@@ -78,10 +91,22 @@ func (d *DAG) NewTriggerDagRunTask(id, targetDagID string, conf map[string]any, 
 // to the task log; the last stdout line is pushed as XCom "return_value".
 // The process (group) is killed on timeout / scheduler shutdown.
 func (d *DAG) NewBashTask(id, command string, env map[string]string, opts ...TaskOption) *Task {
+	fields := []TemplateField{{Name: "bash_command", Raw: command, Lang: "bash"}}
+	if len(env) > 0 {
+		m := map[string]any{}
+		for k, v := range env {
+			m[k] = v
+		}
+		fields = append(fields, TemplateField{Name: "env", Map: m, Lang: "json"})
+	}
+	opts = append([]TaskOption{WithTemplateFields(fields...)}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
-		cmdStr, err := ctx.Render(command, nil)
+		cmdStr, err := ctx.RenderTemplateField("bash_command")
 		if err != nil {
 			return err
+		}
+		if len(env) > 0 {
+			_, _ = ctx.RenderTemplateField("env")
 		}
 		cmd := shellCommand(ctx, cmdStr)
 		cmd.Env = append(os.Environ(),
@@ -140,6 +165,7 @@ type HTTPRequest struct {
 
 // NewHTTPTask sends a request; the response body (max 64KB) is XCom "return_value".
 func (d *DAG) NewHTTPTask(id string, req HTTPRequest, opts ...TaskOption) *Task {
+	opts = append([]TaskOption{WithTemplateFields(httpTemplateFields(req)...)}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
 		code, body, err := doHTTP(ctx, req)
 		if err != nil {
@@ -151,6 +177,26 @@ func (d *DAG) NewHTTPTask(id string, req HTTPRequest, opts ...TaskOption) *Task 
 		}
 		return ctx.XComPush("return_value", body)
 	}, opts...)
+}
+
+func httpTemplateFields(req HTTPRequest) []TemplateField {
+	var f []TemplateField
+	if req.ConnID != "" {
+		f = append(f, TemplateField{Name: "endpoint", Raw: req.Endpoint, Lang: "text"})
+	} else {
+		f = append(f, TemplateField{Name: "url", Raw: req.URL, Lang: "text"})
+	}
+	if req.Body != "" {
+		f = append(f, TemplateField{Name: "data", Raw: req.Body, Lang: "json"})
+	}
+	if len(req.Headers) > 0 {
+		m := map[string]any{}
+		for k, v := range req.Headers {
+			m[k] = v
+		}
+		f = append(f, TemplateField{Name: "headers", Map: m, Lang: "json"})
+	}
+	return f
 }
 
 func doHTTP(ctx *TaskContext, req HTTPRequest) (int, string, error) {
@@ -168,9 +214,17 @@ func doHTTP(ctx *TaskContext, req HTTPRequest) (int, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
+	if req.ConnID != "" {
+		ctx.RecordRendered("endpoint", strings.TrimPrefix(url, strings.TrimRight(conn.String("host"), "/")+"/"))
+	} else {
+		ctx.RecordRendered("url", url)
+	}
 	body, err := ctx.Render(req.Body, nil)
 	if err != nil {
 		return 0, "", err
+	}
+	if req.Body != "" {
+		ctx.RecordRendered("data", body)
 	}
 	method := firstNonEmpty(strings.ToUpper(req.Method), http.MethodGet)
 	hreq, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(body))
@@ -180,12 +234,19 @@ func doHTTP(ctx *TaskContext, req HTTPRequest) (int, string, error) {
 	if tok := conn.String("token"); tok != "" {
 		hreq.Header.Set("Authorization", "Bearer "+tok)
 	}
+	rendered := map[string]string{}
 	for k, v := range req.Headers {
 		rv, err := ctx.Render(v, nil)
 		if err != nil {
 			return 0, "", err
 		}
 		hreq.Header.Set(k, rv)
+		rendered[k] = rv
+	}
+	if len(rendered) > 0 {
+		if b, err := json.MarshalIndent(rendered, "", "  "); err == nil {
+			ctx.RecordRendered("headers", string(b))
+		}
 	}
 	client := &http.Client{Timeout: req.Timeout}
 	if client.Timeout == 0 {

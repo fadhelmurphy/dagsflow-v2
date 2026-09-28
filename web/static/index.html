@@ -198,10 +198,14 @@ svg .edge{fill:none;stroke:#9AA5B1;stroke-width:1.4}
 .codeHead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
 .codeHead .sub{font-size:12px}
 .fname{font:12px var(--code);color:var(--muted);margin:10px 0 4px}
+.fname b{font:600 13px var(--code);color:var(--ink)}
+.rsrc{font-size:12px;font-weight:600;border-radius:3px;padding:2px 8px;background:#E3EEFB;color:#1B4F9C;white-space:nowrap}
+.rsrc.on_the_fly{background:#FFF4E0;color:#8A5A00}
 .codebox{border:1px solid var(--line);border-radius:4px;background:#F7F8F9;overflow:auto;max-height:calc(100vh - 430px);min-height:200px;font:13px/1.55 var(--code);padding:6px 0}
 .codebox .ln{display:flex;white-space:pre}
 .codebox .no{flex:none;width:52px;text-align:right;padding-right:14px;color:#8A96A3;font-style:italic;user-select:none;position:sticky;left:0;background:#F7F8F9}
 .codebox .tx{padding-right:16px}
+.codebox.fit{min-height:0;max-height:60vh;margin-bottom:6px}
 .codebox.wrap .ln{white-space:pre-wrap;word-break:break-all}
 .codebox .k{color:#A626A4}.codebox .s{color:#2E8B57}.codebox .c{color:#8A96A3;font-style:italic}.codebox .n{color:#B35C00}.codebox .f{color:#1B4F9C}
 .dchart{display:flex;height:220px;margin-top:8px}
@@ -525,11 +529,12 @@ const PI = { // small inline icons
   logs:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 3.5h12M2 6.5h12M2 9.5h12M2 12.5h8"/></svg>',
   xcom:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 5h11l-3-3M14 11H3l3 3"/></svg>',
   duration:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 1.5h8M4 14.5h8M5 1.5c0 4 6 4 6 6.5S5 10.5 5 14.5M11 1.5c0 4-6 4-6 6.5s6 2.5 6 6.5"/></svg>',
+  rendered:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9.5 1.5H3.5v13h9V4.5z"/><path d="M9.5 1.5v3h3"/><path d="M6.6 7.2c-.9 0-.9.6-.9 1.2s-.4.8-.8.8c.4 0 .8.2.8.8s0 1.2.9 1.2M9.4 7.2c.9 0 .9.6.9 1.2s.4.8.8.8c-.4 0-.8.2-.8.8s0 1.2-.9 1.2"/></svg>',
   mapped:'<svg viewBox="0 0 16 16" fill="currentColor"><rect x="1.5" y="2" width="4" height="4" rx=".8"/><rect x="6.5" y="2" width="4" height="4" rx=".8"/><rect x="11.5" y="2" width="3" height="4" rx=".8"/><rect x="1.5" y="9" width="13" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>',
   reparse:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9.5 1.5H3.5v13h9V4.5z"/><path d="M9.5 1.5v3h3"/><path d="M10.4 10.3a2.6 2.6 0 1 1-.6-2.8M10.2 6.4v1.5H8.7"/></svg>',
   caret:'<svg viewBox="0 0 10 10" width="9" height="9"><path d="M1.5 3.5 5 7l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>',
 };
-const TAB_LABEL = {details:"Details", graph:"Graph", gantt:"Gantt", code:"Code", events:"Event Log", logs:"Logs", xcom:"XCom", duration:"Task Duration", mapped:"Mapped Tasks"};
+const TAB_LABEL = {rendered:"Rendered Template", details:"Details", graph:"Graph", gantt:"Gantt", code:"Code", events:"Event Log", logs:"Logs", xcom:"XCom", duration:"Task Duration", mapped:"Mapped Tasks"};
 
 function selection(q){
   const run = q.get("run")||"", task = q.get("task")||"", mi = q.get("mi")!=null && q.get("mi")!=="" ? +q.get("mi") : -1;
@@ -544,7 +549,7 @@ function tabsFor(sel, taskDef, ti){
   }
   const t = ["details","graph","gantt","code","events"];
   const expanded = (DV.run?.mapped_task_instances?.[sel.task]||[]).length > 0;
-  if(taskDef?.is_mapped && sel.mi < 0 && expanded) t.splice(1,0,"mapped"); else t.push("logs","xcom");
+  if(taskDef?.is_mapped && sel.mi < 0 && expanded) t.splice(1,0,"mapped"); else t.push("logs","xcom","rendered");
   t.push("duration");
   return t;
 }
@@ -687,7 +692,7 @@ async function renderPane(d, q){
   }
   document.getElementById("paneHead").innerHTML = paneHead(d, sel, run, ti, taskDef);
   const body = document.getElementById("pbody"), y = body.scrollTop;
-  if(!fresh && (tab==="code" || (tab==="xcom" && !LIVE.includes(ti?.state)))) return; // static: keep scroll/selection
+  if(!fresh && (tab==="code" || ((tab==="xcom" || tab==="rendered") && !LIVE.includes(ti?.state)))) return; // static: keep scroll/selection
   if(tab==="logs"){ await renderLogs(d, sel, run, ti, q, fresh); return; }
   let html = "";
   switch(tab){
@@ -697,6 +702,7 @@ async function renderPane(d, q){
     case "code": html = await codeTab(d); break;
     case "events": html = await eventsTab(d, sel); break;
     case "xcom": html = xcomTab(run, sel); break;
+    case "rendered": html = await renderedTab(d, sel); break;
     case "duration": html = durationTab(d, sel); break;
     case "mapped": html = mappedTab(run, sel); break;
   }
@@ -838,6 +844,43 @@ function ganttTab(d, run, sel){
 
 // ---- tab: code --------------------------------------------------------------------
 const GO_KW = new Set("break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var nil true false".split(" "));
+const SQL_KW = new Set("select from where and or not in is null as join left right inner outer full cross on group by order having limit offset union all distinct insert into values update set delete merge using when matched then else end case create replace table view with partition cluster struct array cast safe_cast if exists true false interval date datetime timestamp current_date current_timestamp between like qualify over window declare begin commit rollback truncate drop alter add column temp temporary unnest".split(" "));
+const SH_KW = new Set("if then else elif fi for while until do done case esac in function return exit echo export local set unset true false source cd".split(" "));
+function hlOther(line, lang){
+  const out = []; const push = (cls, txt) => out.push(cls ? `<span class="${cls}">${esc(txt)}</span>` : esc(txt));
+  let rx, last = 0, m;
+  if(lang==="json") rx = /("(?:[^"\\]|\\.)*")(\s*:)?|\b(true|false|null)\b|(-?\b\d+(?:\.\d+)?)/g;
+  else if(lang==="sql") rx = /(--.*$)|('(?:[^']|'')*'?|`[^`]*`?)|\b([A-Za-z_]\w*)\b|\b(\d+(?:\.\d+)?)\b/g;
+  else rx = /((?:^|\s)#.*$)|("(?:[^"\\]|\\.)*"|'[^']*')|(\$\{?\w+\}?)|\b([A-Za-z_][\w-]*)\b/g;
+  while((m = rx.exec(line))){
+    push("", line.slice(last, m.index));
+    if(lang==="json"){ if(m[1]){ push(m[2] ? "k" : "s", m[1]); if(m[2]) push("", m[2]); } else push("n", m[3]||m[4]); }
+    else if(lang==="sql"){ if(m[1]) push("c", m[1]); else if(m[2]) push("s", m[2]); else if(m[3]) push(SQL_KW.has(m[3].toLowerCase()) ? "k" : line[m.index+m[3].length]==="(" ? "f" : "", m[3]); else push("n", m[4]); }
+    else { if(m[1]) push("c", m[1]); else if(m[2]) push("s", m[2]); else if(m[3]) push("n", m[3]); else push(SH_KW.has(m[4]) ? "k" : "", m[4]); }
+    last = rx.lastIndex; if(m[0]==="") rx.lastIndex++;
+  }
+  push("", line.slice(last));
+  return out.join("");
+}
+function codeBox(text, lang, fit){
+  const wrap = localStorage.getItem("dagsflow.wrap")==="on", state = {raw:false};
+  const lines = String(text).replace(/\n$/,"").split("\n");
+  const hl = l => lang==="go"||lang==="yaml" ? hlLine(l, lang, state) : lang==="text" ? esc(l) : hlOther(l, lang);
+  return `<div class="codebox ${wrap?"wrap":""} ${fit?"fit":""}">${lines.map((l,i)=>`<div class="ln"><span class="no">${i+1}</span><span class="tx">${hl(l)||" "}</span></div>`).join("")}</div>`;
+}
+async function renderedTab(d, sel){
+  const v = await api(`/dags/${enc(d.dag_id)}/dagRuns/${enc(sel.run)}/taskInstances/${enc(sel.task)}/rendered${sel.mi>=0?`?map_index=${sel.mi}`:""}`);
+  if(v.source==="none") return `<div class="empty">${esc(v.note)}</div>`;
+  const wrap = localStorage.getItem("dagsflow.wrap")==="on";
+  let h = `<div class="codeHead"><span class="rsrc ${v.source}">${v.source==="recorded"?"Recorded at run time":"Rendered on the fly"}</span>
+    <span class="sub">${v.source==="recorded"?"The values this task instance used when it ran.":esc(v.note||"")}</span><span class="grow"></span>
+    <button class="btn outline" data-act="wrap" aria-pressed="${wrap}">Toggle Wrap</button></div>`;
+  if(!v.fields.length) return h + `<div class="empty">This task has no templated fields.<br><span class="sub">Custom Go tasks can declare one with <code>dag.WithTemplateField("sql", raw, "sql")</code> and render it with <code>ctx.RenderTemplateField("sql")</code>.</span></div>`;
+  for(const f of v.fields){
+    h += `<div class="fname"><b>${esc(f.name)}</b></div>` + (f.error ? `<pre class="err">${esc(f.error)}</pre>` : codeBox(f.value, f.lang||"text", true));
+  }
+  return h;
+}
 function hlLine(line, lang, state){
   const out = []; let i = 0;
   const push = (cls, txt) => out.push(cls ? `<span class="${cls}">${esc(txt)}</span>` : esc(txt));
@@ -871,10 +914,7 @@ async function codeTab(d){
     <span class="grow"></span><button class="btn outline" data-act="wrap" aria-pressed="${wrap}">Toggle Wrap</button></div>`;
   if(src.error) return h + `<div class="banner warn">${esc(src.error)}</div>`;
   for(const f of src.files){
-    const lang = /\.ya?ml$/.test(f.path) ? "yaml" : "go", state = {raw:false};
-    const lines = f.content.replace(/\n$/,"").split("\n");
-    h += (src.files.length>1 ? `<div class="fname">${esc(f.path)}</div>` : `<div class="fname">${esc(f.path)}</div>`) +
-      `<div class="codebox ${wrap?"wrap":""}">${lines.map((l,i)=>`<div class="ln"><span class="no">${i+1}</span><span class="tx">${hlLine(l, lang, state)||" "}</span></div>`).join("")}</div>`;
+    h += `<div class="fname">${esc(f.path)}</div>` + codeBox(f.content, /\.ya?ml$/.test(f.path) ? "yaml" : /\.sql$/.test(f.path) ? "sql" : "go");
   }
   return h;
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"dagsflow-go/dag"
@@ -140,6 +141,10 @@ func tasksCmd() *cobra.Command {
 				b, _ := json.Marshal(mem.xcom)
 				fmt.Println("xcom:", string(b))
 			}
+			if len(mem.rendered) > 0 {
+				fmt.Println("rendered template fields:")
+				fmt.Println(strings.Join(mem.rendered, "\n"))
+			}
 			if err != nil {
 				exitf("task failed: %v", err)
 			}
@@ -178,7 +183,37 @@ func tasksCmd() *cobra.Command {
 	logs.Flags().BoolP("follow", "f", false, "follow the log")
 	logs.Flags().Int("map-index", -1, "map index of a mapped task")
 
-	c.AddCommand(list, states, clear, test, logs)
+	render := &cobra.Command{
+		Use: "render <dag_id> <task_id> <run_id>", Short: "Show the rendered template fields of a task instance", Args: cobra.ExactArgs(3),
+		Run: func(cmd *cobra.Command, args []string) {
+			d := mustDAG(args[0])
+			r, err := newStore().LoadRun(d.ID, args[2])
+			if err != nil {
+				exitf("%v", err)
+			}
+			idx, _ := cmd.Flags().GetInt("map-index")
+			v, err := engine.RenderedFields(newStore(), d, r, args[1], idx)
+			if err != nil {
+				exitf("%v", err)
+			}
+			if v.Note != "" {
+				fmt.Fprintln(os.Stderr, "#", v.Note)
+			}
+			if len(v.Fields) == 0 {
+				fmt.Println("(no template fields)")
+			}
+			for _, f := range v.Fields {
+				fmt.Printf("# ----------------------------------------------------------\n# property: %s\n# ----------------------------------------------------------\n", f.Name)
+				if f.Error != "" {
+					fmt.Println("ERROR:", f.Error)
+					continue
+				}
+				fmt.Println(f.Value)
+			}
+		},
+	}
+	render.Flags().Int("map-index", -1, "map index of a mapped task")
+	c.AddCommand(list, states, clear, test, logs, render)
 	return c
 }
 
@@ -204,7 +239,15 @@ func tail(path string, follow bool) {
 }
 
 // memRun is an in-memory RunState for `tasks test`.
-type memRun struct{ xcom map[string]map[string]any }
+type memRun struct {
+	xcom     map[string]map[string]any
+	rendered []string
+}
+
+func (m *memRun) SetRendered(taskID string, _ int, field, value string) error {
+	m.rendered = append(m.rendered, fmt.Sprintf("--- %s ---\n%s", field, value))
+	return nil
+}
 
 func (m *memRun) ExternalTaskState(dagID, taskID string, _ time.Time) (dag.State, bool, error) {
 	return "", false, fmt.Errorf("external task lookup is not supported in `tasks test`")

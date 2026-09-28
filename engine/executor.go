@@ -240,7 +240,29 @@ func (rc *runCtx) XComPull(taskID, k string) (any, bool) {
 }
 
 func (rc *runCtx) ExternalTaskState(dagID, taskID string, logical time.Time) (dag.State, bool, error) {
-	runs, err := rc.e.Store.ListRuns(dagID)
+	return externalTaskState(rc.e.Store, dagID, taskID, logical)
+}
+
+func (rc *runCtx) SetRendered(taskID string, idx int, field, value string) error {
+	slot := taskID
+	if idx >= 0 {
+		slot = mappedKey(taskID, idx)
+	}
+	rc.mu.Lock()
+	if rc.r.Rendered == nil {
+		rc.r.Rendered = map[string]map[string]string{}
+	}
+	if rc.r.Rendered[slot] == nil {
+		rc.r.Rendered[slot] = map[string]string{}
+	}
+	rc.r.Rendered[slot][field] = value
+	rc.mu.Unlock()
+	rc.save()
+	return nil
+}
+
+func externalTaskState(s *Store, dagID, taskID string, logical time.Time) (dag.State, bool, error) {
+	runs, err := s.ListRuns(dagID)
 	if err != nil {
 		return "", false, err
 	}

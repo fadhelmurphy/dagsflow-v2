@@ -129,6 +129,7 @@ type Task struct {
 	sla         time.Duration
 	outlets     []string
 	mapSource   *MapSource
+	templates   []TemplateField
 	onSuccess   []Callback
 	onFailure   []Callback
 	onRetry     []Callback

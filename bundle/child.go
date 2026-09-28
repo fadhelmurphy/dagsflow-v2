@@ -67,6 +67,11 @@ func (r *rpcClient) ExternalTaskState(dagID, taskID string, logical time.Time) (
 	return dag.State(rep.Str), rep.Found, err
 }
 
+func (r *rpcClient) SetRendered(taskID string, mapIndex int, field, value string) error {
+	_, err := r.call("SetRendered", Args{TaskID: taskID, MapIndex: mapIndex, Name: field, Value: value})
+	return err
+}
+
 func (r *rpcClient) Name() string { return "scheduler" }
 
 func (r *rpcClient) GetVariable(key string) (string, bool, error) {

@@ -46,8 +46,9 @@ func (d *DAG) NewSensor(id string, poke SensorFunc, cfg SensorConfig, opts ...Ta
 
 // NewFileSensor waits until a (templated) path exists. Glob patterns allowed.
 func (d *DAG) NewFileSensor(id, pathTmpl string, cfg SensorConfig, opts ...TaskOption) *Task {
+	opts = append([]TaskOption{WithTemplateField("filepath", pathTmpl, "text")}, opts...)
 	return d.NewSensor(id, func(ctx *TaskContext) (bool, error) {
-		p, err := ctx.Render(pathTmpl, nil)
+		p, err := ctx.RenderTemplateField("filepath")
 		if err != nil {
 			return false, err
 		}
@@ -99,6 +100,7 @@ func (d *DAG) NewExternalTaskSensor(id, externalDagID, externalTaskID string, cf
 
 // NewHTTPSensor pokes an endpoint until it returns an expected status.
 func (d *DAG) NewHTTPSensor(id string, req HTTPRequest, cfg SensorConfig, opts ...TaskOption) *Task {
+	opts = append([]TaskOption{WithTemplateFields(httpTemplateFields(req)...)}, opts...)
 	return d.NewSensor(id, func(ctx *TaskContext) (bool, error) {
 		code, _, err := doHTTP(ctx, req)
 		if err != nil {

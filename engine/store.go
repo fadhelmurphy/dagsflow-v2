@@ -57,6 +57,8 @@ type DagRun struct {
 	// Mapped holds the expanded instances of mapped tasks; Tasks[id] is their aggregate.
 	Mapped    map[string][]*TaskInstance `json:"mapped_task_instances,omitempty"`
 	SLAMisses []SLAMiss                  `json:"sla_misses,omitempty"`
+	// Rendered template fields per task instance slot (task or task#mapIndex).
+	Rendered map[string]map[string]string `json:"rendered_fields,omitempty"`
 }
 
 type SLAMiss struct {
@@ -266,8 +268,10 @@ func ClearTasks(d *dag.DAG, r *DagRun, taskIDs []string, upstream, downstream, o
 		}
 		ti.State, ti.StartDate, ti.EndDate, ti.Error = dag.StateNone, nil, nil, ""
 		delete(r.XCom, t.ID)
+		delete(r.Rendered, t.ID)
 		for i := range r.Mapped[t.ID] {
 			delete(r.XCom, mappedKey(t.ID, i))
+			delete(r.Rendered, mappedKey(t.ID, i))
 		}
 		delete(r.Mapped, t.ID)
 		cleared = append(cleared, t.ID)

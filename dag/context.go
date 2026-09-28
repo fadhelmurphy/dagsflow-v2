@@ -21,6 +21,8 @@ type RunState interface {
 	// ExternalTaskState: state of taskID (or of the whole run when "") in the run
 	// of dagID with the given logical date.
 	ExternalTaskState(dagID, taskID string, logical time.Time) (State, bool, error)
+	// SetRendered records a rendered template field (Rendered Template view).
+	SetRendered(taskID string, mapIndex int, field, value string) error
 }
 
 // RunInfo is the per-run metadata exposed to tasks (Airflow's context / macros).

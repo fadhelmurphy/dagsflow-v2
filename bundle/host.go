@@ -136,6 +136,16 @@ func (x *Host) ExternalTaskState(a *Args, r *Reply) error {
 	return err
 }
 
+func (x *Host) SetRendered(a *Args, r *Reply) error {
+	t, err := x.task(a)
+	if err != nil {
+		return err
+	}
+	s, _ := a.Value.(string)
+	t.RecordRendered(a.Name, s)
+	return nil
+}
+
 func (x *Host) GetVariable(a *Args, r *Reply) error {
 	if _, err := x.h.get(a.Token); err != nil {
 		return err

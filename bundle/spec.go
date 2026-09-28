@@ -40,23 +40,24 @@ type DagSpec struct {
 }
 
 type TaskSpec struct {
-	ID          string            `json:"task_id"`
-	Upstream    []string          `json:"upstream"`
-	TriggerRule string            `json:"trigger_rule"`
-	Retries     int               `json:"retries"`
-	RetryDelay  time.Duration     `json:"retry_delay"`
-	Timeout     time.Duration     `json:"timeout"`
-	Pool        string            `json:"pool"`
-	PoolSlots   int               `json:"pool_slots"`
-	Priority    int               `json:"priority_weight"`
-	SLA         time.Duration     `json:"sla"`
-	Outlets     []string          `json:"outlets"`
-	Branch      bool              `json:"branch"`
-	Sensor      *dag.SensorConfig `json:"sensor,omitempty"`
-	Map         *dag.MapSource    `json:"map,omitempty"`
-	OnSuccess   int               `json:"on_success"`
-	OnFailure   int               `json:"on_failure"`
-	OnRetry     int               `json:"on_retry"`
+	ID          string              `json:"task_id"`
+	Upstream    []string            `json:"upstream"`
+	TriggerRule string              `json:"trigger_rule"`
+	Retries     int                 `json:"retries"`
+	RetryDelay  time.Duration       `json:"retry_delay"`
+	Timeout     time.Duration       `json:"timeout"`
+	Pool        string              `json:"pool"`
+	PoolSlots   int                 `json:"pool_slots"`
+	Priority    int                 `json:"priority_weight"`
+	SLA         time.Duration       `json:"sla"`
+	Outlets     []string            `json:"outlets"`
+	Branch      bool                `json:"branch"`
+	Sensor      *dag.SensorConfig   `json:"sensor,omitempty"`
+	Map         *dag.MapSource      `json:"map,omitempty"`
+	Templates   []dag.TemplateField `json:"template_fields,omitempty"`
+	OnSuccess   int                 `json:"on_success"`
+	OnFailure   int                 `json:"on_failure"`
+	OnRetry     int                 `json:"on_retry"`
 }
 
 type Describe struct {
@@ -77,7 +78,7 @@ func describe() Describe {
 			ts := TaskSpec{ID: t.ID, TriggerRule: string(t.TriggerRule()), Retries: t.Retries(),
 				RetryDelay: t.RetryDelay(), Timeout: t.Timeout(), Pool: t.Pool(), PoolSlots: t.PoolSlots(),
 				Priority: t.PriorityWeight(), SLA: t.SLA(), Outlets: t.Outlets(), Branch: t.IsBranch(),
-				Map: t.MapSource(), OnSuccess: len(t.OnSuccessCallbacks()),
+				Map: t.MapSource(), Templates: t.TemplateFields(), OnSuccess: len(t.OnSuccessCallbacks()),
 				OnFailure: len(t.OnFailureCallbacks()), OnRetry: len(t.OnRetryCallbacks())}
 			if sn := t.Sensor(); sn != nil {
 				cfg := sn.SensorConfig

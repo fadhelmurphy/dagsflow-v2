@@ -63,6 +63,25 @@ func (s *Server) reparse(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, resp)
 }
 
+// ---- rendered template ----------------------------------------------------------------
+
+func (s *Server) rendered(w http.ResponseWriter, r *http.Request) {
+	d, run, ok := s.runOr404(w, r)
+	if !ok {
+		return
+	}
+	idx := -1
+	if v := r.URL.Query().Get("map_index"); v != "" {
+		idx, _ = strconv.Atoi(v)
+	}
+	v, err := engine.RenderedFields(s.Store, d, run, r.PathValue("task"), idx)
+	if err != nil {
+		fail(w, 404, "%v", err)
+		return
+	}
+	writeJSON(w, 200, v)
+}
+
 // ---- event log -----------------------------------------------------------------------
 
 func (s *Server) eventLogs(w http.ResponseWriter, r *http.Request) {

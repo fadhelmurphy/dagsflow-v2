@@ -108,8 +108,10 @@ func resetTI(r *DagRun, id string) {
 	ti := r.Tasks[id]
 	ti.State, ti.StartDate, ti.EndDate, ti.Error = dag.StateNone, nil, nil, ""
 	delete(r.XCom, id)
+	delete(r.Rendered, id)
 	for i := range r.Mapped[id] {
 		delete(r.XCom, mappedKey(id, i))
+		delete(r.Rendered, mappedKey(id, i))
 	}
 	delete(r.Mapped, id)
 }
