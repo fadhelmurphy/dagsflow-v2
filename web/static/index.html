@@ -13,6 +13,7 @@
   --code: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
 }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{margin:0}
 body{background:var(--canvas);color:var(--ink);font:14px/1.45 var(--sans);font-variant-numeric:tabular-nums}
 a{color:var(--action);text-decoration:none}
@@ -90,7 +91,7 @@ select,input,textarea{font:inherit;border:1px solid #CED4DA;border-radius:4px;pa
 .dagTitle span{color:#B5BDC6}
 .hbadge{background:#E9ECEF;border-radius:3px;padding:3px 9px;font-size:13px;color:#495057;white-space:nowrap}
 .hbadge b{color:var(--ink);font-weight:600}
-.dagTop .acts button{width:36px;height:36px}
+.dagTop .acts button,.dagTop .acts .off{width:36px;height:36px}
 .fbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#E9ECEF;border-radius:4px;padding:12px 14px}
 .fbar input,.fbar select{height:38px;background:#fff}
 .fbar #fBase{width:215px}
@@ -289,6 +290,8 @@ a.circ:hover{text-decoration:none;box-shadow:0 0 0 2px #CFE0F7}
 .acts :last-child{border-radius:0 4px 4px 0}
 .acts button:hover,.acts a:hover{background:#F0F4FA}
 .acts .del{color:#D32F2F}
+.acts .off{width:32px;height:32px;border:1px solid #CED4DA;background:#F3F5F7;margin-left:-1px;display:flex;align-items:center;justify-content:center;color:#B5BDC6;cursor:not-allowed}
+.acts .off svg{width:15px;height:15px}
 .acts svg{width:15px;height:15px}
 .dd>button.dots3{border:0;background:none;font-size:18px;letter-spacing:1px;padding:2px 8px;color:var(--ink);height:auto}
 .dd>button.dots3::after{display:none}
@@ -461,7 +464,7 @@ function renderListTable(){
     h += `<tr>
       <td><button class="toggle needs-User" role="switch" aria-checked="${!d.is_paused}" aria-label="${d.is_paused?"Unpause":"Pause"} ${esc(d.dag_id)}" data-pause="${esc(d.dag_id)}" data-paused="${d.is_paused}"></button></td>
       <td class="dagcell"><a class="dagname" href="#/dags/${id}">${esc(d.dag_id)}</a>
-        <div class="tags">${d.source!=="go"?`<span class="badge grey" title="${esc(d.source)}">${/\.ya?ml$/.test(d.source)?"yaml":"go"}</span>`:""}${d.tags.map(t=>`<a class="badge" href="${listHref({tags:t})}">${esc(t)}</a>`).join("")}</div></td>
+        <div class="tags">${d.source!=="go"?`<span class="badge grey" title="${esc(d.source)}">${/\.ya?ml$/.test(d.source)?"yaml":"go"}</span>`:`<span class="badge grey" title="builtin_dags/: compiled into the binary">built-in</span>`}${d.tags.map(t=>`<a class="badge" href="${listHref({tags:t})}">${esc(t)}</a>`).join("")}</div></td>
       <td class="hideMd"><span class="badge grey">${esc(d.owner)}</span></td>
       <td><div class="circles">${RUN_STATES.map(s=>circ(s, d.run_counts[s]||0, s, `#/dags/${id}?tab=runs`)).join("")}</div></td>
       <td><span class="badge code" title="${esc(d.schedule)}">${esc(d.schedule.startsWith("datasets")?"Dataset":d.schedule)}</span></td>
@@ -470,7 +473,9 @@ function renderListTable(){
       <td class="hideMd"><div class="circles">${TASK_STATES.map(s=>circ(s, d.recent_task_counts[s]||0, s)).join("")}</div></td>
       <td><div class="acts" style="justify-content:center">
         <button class="needs-User" data-trigger="${esc(d.dag_id)}" title="Trigger DAG" aria-label="Trigger ${esc(d.dag_id)}">${ICON.play}</button>
-        <a href="#/dags/${id}?tab=grid" title="Grid view" aria-label="Grid view of ${esc(d.dag_id)}">${ICON.grid}</a>
+        ${d.source!=="go"
+          ? `<button class="needs-User" data-reparse="${esc(d.dag_id)}" title="Reparse DAG" aria-label="Reparse ${esc(d.dag_id)}">${PI.reparse}</button>`
+          : `<span class="off" title="Compiled into the binary: rebuild to change it">${PI.reparse}</span>`}
         <button class="del needs-Op" data-deldag="${esc(d.dag_id)}" title="Delete DAG runs and logs" aria-label="Delete ${esc(d.dag_id)} metadata">${ICON.trash}</button></div></td>
       <td><div class="dd"><button type="button" class="dots3" aria-haspopup="true" aria-label="Links for ${esc(d.dag_id)}">···</button>
         <div class="ddm right"><a href="#/dags/${id}?tab=grid">Grid</a><a href="#/dags/${id}?tab=graph">Graph</a><a href="#/dags/${id}?tab=runs">Runs</a><a href="#/dags/${id}?tab=details">Details</a></div></div></td>
@@ -586,6 +591,7 @@ function dagSkeleton(d, q){
       <div class="acts">
         <button class="needs-User" data-trigger="${esc(d.dag_id)}" title="Trigger DAG" aria-label="Trigger DAG">${ICON.play}</button>
         <button class="needs-User" id="reparseBtn" title="Reparse DAG" aria-label="Reparse DAG">${PI.reparse}</button>
+        <span class="off needs-User" id="reparseOff" title="Compiled into the binary (builtin_dags/): rebuild to change it" hidden>${PI.reparse}</span>
         <button class="del needs-Op" data-deldag="${esc(d.dag_id)}" title="Delete DAG runs and logs" aria-label="Delete DAG metadata">${ICON.trash}</button>
       </div>
     </div>
@@ -622,6 +628,7 @@ function renderDagHeader(d){
   const next = d.schedule.startsWith("datasets") ? "On dataset update" : d.next_data_interval_start && !d.is_paused ? fmtZ(d.next_data_interval_start) : "None";
   document.getElementById("hNext").innerHTML = `Next Run: <b>${esc(next)}</b>`;
   document.getElementById("reparseBtn").hidden = !d.is_file_source;
+  document.getElementById("reparseOff").hidden = d.is_file_source;
 }
 
 // ---- grid -------------------------------------------------------------------------
@@ -1196,6 +1203,10 @@ document.addEventListener("click", async e=>{
   if(e.target.closest("#autoRef")){ const on=!autoRefresh(); localStorage.setItem("dagsflow.autorefresh", on?"on":"off"); e.target.closest("#autoRef").setAttribute("aria-checked", on); toast(on?"Auto-refresh on":"Auto-refresh off"); return; }
   if(e.target.closest("#refreshBtn")){ render(); health(); return; }
   if(e.target.closest("#logoutBtn")){ try{ await api("/logout",{method:"POST"}); }catch{} location.href="/login"; return; }
+  const rp = e.target.closest("[data-reparse]");
+  if(rp){ rp.disabled = true;
+    try{ const r = await post(`/dags/${enc(rp.dataset.reparse)}/reparse`, {}); toast(`Reparsed ${rp.dataset.reparse} at ${(fmt(r.parsed_at).split(", ")[1]||"")}`); render(); }
+    catch(x){ toast(x.message); rp.disabled = false; } return; }
   const del = e.target.closest("[data-deldag]");
   if(del){ const id=del.dataset.deldag;
     if(!confirm(`Delete all runs, task instances and logs of ${id}? The DAG definition stays and will show up again with no history.`)) return;
