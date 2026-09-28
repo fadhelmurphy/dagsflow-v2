@@ -40,6 +40,67 @@ type TaskInstance struct {
 	EndDate   *time.Time `json:"end_date,omitempty"`
 	Error     string     `json:"error,omitempty"`
 	Note      string     `json:"note,omitempty"`
+	// MaxTries is the last try number allowed for the current attempt series.
+	// 0 = retries+1. Clearing extends it (Airflow: max_tries = try_number + retries),
+	// so the try number keeps growing across clears instead of restarting at 1.
+	MaxTries int `json:"max_tries,omitempty"`
+}
+
+// MaxTriesFor returns the effective max tries of a task instance.
+func (ti *TaskInstance) MaxTriesFor(retries int) int {
+	if ti.MaxTries > 0 {
+		return ti.MaxTries
+	}
+	return retries + 1
+}
+
+// clearTI resets a task instance so it runs again, keeping its try number.
+func clearTI(r *DagRun, ti *TaskInstance, retries int) {
+	ti.State, ti.StartDate, ti.EndDate, ti.Error = dag.StateNone, nil, nil, ""
+	if ti.TryNumber > 0 {
+		ti.MaxTries = ti.TryNumber + retries + 1
+	}
+	slot := ti.TaskID
+	if ti.MapIndex >= 0 {
+		slot = mappedKey(ti.TaskID, ti.MapIndex)
+	}
+	delete(r.XCom, slot)
+	delete(r.Rendered, slot)
+}
+
+// clearTask clears a task; for a mapped task either every instance or only
+// mapIndex. The expansion is kept so instances keep their try numbers.
+// Returns false when nothing matched (onlyFailed).
+func clearTask(r *DagRun, t *dag.Task, mapIndex int, onlyFailed bool) bool {
+	ti := r.Tasks[t.ID]
+	if ti == nil {
+		ti = &TaskInstance{TaskID: t.ID, MapIndex: -1}
+		r.Tasks[t.ID] = ti
+	}
+	failed := func(s dag.State) bool { return s == dag.StateFailed || s == dag.StateUpstreamFailed }
+	kids := r.Mapped[t.ID]
+	if len(kids) == 0 {
+		if onlyFailed && !failed(ti.State) {
+			return false
+		}
+		clearTI(r, ti, t.Retries())
+		return true
+	}
+	any := false
+	for i, k := range kids {
+		if (mapIndex >= 0 && i != mapIndex) || (onlyFailed && !failed(k.State)) {
+			continue
+		}
+		clearTI(r, k, t.Retries())
+		any = true
+	}
+	if !any && !(onlyFailed && failed(ti.State)) {
+		return false
+	}
+	// the aggregate reruns: the executor re-expands (keeping instances) and
+	// launches only the instances that are no longer finished
+	ti.State, ti.StartDate, ti.EndDate, ti.Error = dag.StateNone, nil, nil, ""
+	return true
 }
 
 type DagRun struct {
@@ -243,6 +304,32 @@ func NewDagRun(d *dag.DAG, runType, runID string, logical, start, end time.Time,
 // ClearTasks resets the given tasks (and optionally their upstream/downstream)
 // to state none and re-queues the run, like `airflow tasks clear`.
 func ClearTasks(d *dag.DAG, r *DagRun, taskIDs []string, upstream, downstream, onlyFailed bool) ([]string, error) {
+	return ClearTaskInstances(d, r, ClearOptions{TaskIDs: taskIDs, Upstream: upstream, Downstream: downstream, OnlyFailed: onlyFailed, MapIndex: -1})
+}
+
+// ClearOptions ~ Airflow's clear dialog. MapIndex >= 0 clears a single mapped
+// instance of the (single) task in TaskIDs; related upstream/downstream tasks
+// are cleared entirely.
+type ClearOptions struct {
+	TaskIDs                          []string
+	Upstream, Downstream, OnlyFailed bool
+	MapIndex                         int
+}
+
+func ClearTaskInstances(d *dag.DAG, r *DagRun, o ClearOptions) ([]string, error) {
+	taskIDs, upstream, downstream, onlyFailed := o.TaskIDs, o.Upstream, o.Downstream, o.OnlyFailed
+	if o.MapIndex >= 0 {
+		if len(taskIDs) != 1 {
+			return nil, fmt.Errorf("map_index needs exactly one task id")
+		}
+		t, ok := d.Task(taskIDs[0])
+		if !ok {
+			return nil, fmt.Errorf("task %s not found in dag %s", taskIDs[0], d.ID)
+		}
+		if o.MapIndex >= len(r.Mapped[t.ID]) {
+			return nil, fmt.Errorf("task %s has no mapped instance %d in this run", t.ID, o.MapIndex)
+		}
+	}
 	if r.State == RunRunning {
 		return nil, fmt.Errorf("run %s is still running", r.RunID)
 	}
@@ -286,23 +373,18 @@ func ClearTasks(d *dag.DAG, r *DagRun, taskIDs []string, upstream, downstream, o
 		if !selected[t.ID] {
 			continue
 		}
-		ti := r.Tasks[t.ID]
-		if ti == nil {
-			ti = &TaskInstance{TaskID: t.ID, MapIndex: -1}
-			r.Tasks[t.ID] = ti
+		idx := -1
+		if o.MapIndex >= 0 && t.ID == taskIDs[0] {
+			idx = o.MapIndex
 		}
-		if onlyFailed && ti.State != dag.StateFailed && ti.State != dag.StateUpstreamFailed {
+		if !clearTask(r, t, idx, onlyFailed) {
 			continue
 		}
-		ti.State, ti.StartDate, ti.EndDate, ti.Error = dag.StateNone, nil, nil, ""
-		delete(r.XCom, t.ID)
-		delete(r.Rendered, t.ID)
-		for i := range r.Mapped[t.ID] {
-			delete(r.XCom, mappedKey(t.ID, i))
-			delete(r.Rendered, mappedKey(t.ID, i))
+		if idx >= 0 {
+			cleared = append(cleared, fmt.Sprintf("%s[%d]", t.ID, idx))
+		} else {
+			cleared = append(cleared, t.ID)
 		}
-		delete(r.Mapped, t.ID)
-		cleared = append(cleared, t.ID)
 	}
 	if len(cleared) > 0 {
 		r.State, r.EndDate, r.QueuedAt = RunQueued, nil, time.Now()

@@ -519,28 +519,35 @@ func (rc *runCtx) resolveItems(t *dag.Task) ([]any, error) {
 	return toList(v)
 }
 
+// expand resolves the items and (re)builds the mapped instances. Existing
+// instances are kept (resume, or a re-run after clear) so their state and
+// try numbers survive; if the upstream list changed length, instances are
+// added or dropped at the end (Airflow revises map indexes the same way).
 func (rc *runCtx) expand(t *dag.Task) ([]any, error) {
 	items, err := rc.resolveItems(t)
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
-	if kids, ok := rc.r.Mapped[t.ID]; ok && len(kids) > 0 { // resume: keep existing expansion
-		if err != nil || len(items) != len(kids) {
-			items = make([]any, len(kids))
-		}
-		return items, nil
-	}
 	if err != nil {
 		return nil, err
 	}
 	if len(items) > 1024 {
 		return nil, fmt.Errorf("%d items exceeds max_map_length (1024)", len(items))
 	}
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
 	if rc.r.Mapped == nil {
 		rc.r.Mapped = map[string][]*TaskInstance{}
 	}
+	old := rc.r.Mapped[t.ID]
 	kids := make([]*TaskInstance, len(items))
 	for i := range items {
-		kids[i] = &TaskInstance{TaskID: t.ID, MapIndex: i}
+		if i < len(old) {
+			kids[i] = old[i]
+		} else {
+			kids[i] = &TaskInstance{TaskID: t.ID, MapIndex: i}
+		}
+	}
+	for i := len(items); i < len(old); i++ {
+		delete(rc.r.XCom, mappedKey(t.ID, i))
+		delete(rc.r.Rendered, mappedKey(t.ID, i))
 	}
 	rc.r.Mapped[t.ID] = kids
 	return items, nil
@@ -721,6 +728,7 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 			Conf: rc.r.Conf, TryNumber: try, MapIndex: k.idx, Item: item,
 		}
 		ti.StartDate = nil // new attempt
+		maxT := ti.MaxTriesFor(t.Retries())
 		rc.mu.Unlock()
 		rc.setState(k, dag.StateRunning, "")
 
@@ -730,7 +738,7 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 			out = logF
 		}
 		fmt.Fprintf(out, "=== %s.%s run_id=%s map_index=%d try=%d/%d pool=%s priority=%d ===\n",
-			rc.r.DagID, t.ID, rc.r.RunID, k.idx, try, t.Retries()+1, t.Pool(), prio)
+			rc.r.DagID, t.ID, rc.r.RunID, k.idx, try, maxT, t.Pool(), prio)
 
 		tctx, cancel := context.WithCancel(base)
 		if t.Timeout() > 0 {
@@ -798,7 +806,10 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 			rc.setState(k, dag.StateSkipped, err.Error())
 			return
 		}
-		if try <= t.Retries() {
+		rc.mu.Lock()
+		maxTries := rc.tiLocked(k).MaxTriesFor(t.Retries())
+		rc.mu.Unlock()
+		if try < maxTries {
 			rc.setState(k, dag.StateUpForRetry, err.Error())
 			e.callbacks(t.OnRetryCallbacks(), cc("task_retry", dag.StateUpForRetry, err, try, logPath))
 			select {
@@ -984,7 +995,7 @@ func (rc *runCtx) applyMarkLive(m MarkRequest) {
 		}
 		for _, id := range descendantsOf(rc.d, sel) {
 			if s := rc.r.Tasks[id].State; s == dag.StateFailed || s == dag.StateUpstreamFailed {
-				resetTI(rc.r, id)
+				resetTI(rc.d, rc.r, id)
 			}
 		}
 	}
@@ -1009,11 +1020,12 @@ func (rc *runCtx) failBeforeStart(k tiKey, cause error) (int, string) {
 	ti.TryNumber++
 	ti.Pool = t.Pool()
 	try := ti.TryNumber
+	maxT := ti.MaxTriesFor(t.Retries())
 	rc.mu.Unlock()
 	f, logPath := openTaskLog(rc.e.Store, rc.r.DagID, rc.r.RunID, t.ID, k.idx, try)
 	if f != nil {
 		fmt.Fprintf(f, "=== %s.%s run_id=%s map_index=%d try=%d/%d pool=%s ===\n",
-			rc.r.DagID, t.ID, rc.r.RunID, k.idx, try, t.Retries()+1, t.Pool())
+			rc.r.DagID, t.ID, rc.r.RunID, k.idx, try, maxT, t.Pool())
 		fmt.Fprintf(f, "%s ERROR - Task could not start: %v\n", time.Now().Format("2006/01/02 15:04:05"), cause)
 		fmt.Fprintf(f, "Task failed before running (configuration error); retries are not used.\n")
 		closeLog(f)

@@ -848,7 +848,7 @@ function tiDetails(d, r, ti, t, sel){
     ["Map Index", sel.mi],
     ["Operator", esc(t.operator)], ["Trigger Rule", esc(t.trigger_rule)],
     ["Started", fmtZ(ti.start_date)], ["Ended", fmtZ(ti.end_date)], ["Duration", ti.start_date ? hms(secs(ti.start_date, ti.end_date)) : "–"],
-    ["Try Number", ti.try_number||0], ["Max Tries", t.retries+1], ["Pool", esc(ti.pool||t.pool)], ["Priority Weight", t.priority_weight],
+    ["Try Number", ti.try_number||0], ["Max Tries", ti.max_tries || t.retries+1], ["Pool", esc(ti.pool||t.pool)], ["Priority Weight", t.priority_weight],
   ].filter(Boolean).map(([k,v])=>`<tr><th>${k}</th><td>${v}</td></tr>`).join("") + `</tbody></table>`;
   return h;
 }
@@ -1074,11 +1074,12 @@ function clearAction(){
   }
   const upd = dlg => { const ids = affectedPreview(d, sel, dlg.querySelector("#optUp").checked, dlg.querySelector("#optDown").checked);
     dlg.querySelector("#affected").innerHTML = ids.map(x=>`<code>${esc(x)}</code>`).join(" "); };
-  openActDlg({title:`Clear <code>${esc(sel.task)}</code>`, confirm:"Clear", body:`${note}<p>Clear the task instance in <code>${esc(sel.run)}</code> so it runs again${sel.mi>=0?" (all mapped instances are cleared)":""}.</p>
+  openActDlg({title:`Clear <code>${esc(sel.task)}${sel.mi>=0?`[${sel.mi}]`:""}</code>`, confirm:"Clear", body:`${note}<p>Clear ${sel.mi>=0?`mapped instance <b>${sel.mi}</b> of`:"the task instance"} <code>${esc(sel.task)}</code> in <code>${esc(sel.run)}</code> so it runs again. The try number continues from the last attempt.</p>
     <div class="chkrow"><label class="chk"><input type="checkbox" id="optDown" checked> Downstream</label><label class="chk"><input type="checkbox" id="optUp"> Upstream</label><label class="chk"><input type="checkbox" id="optFailed"> Only failed</label></div>
     <p class="sub">Affected tasks: <span id="affected"></span></p>`,
     onConfirm: async dlg => { const r = await post(`/dags/${enc(d.dag_id)}/dagRuns/${enc(sel.run)}/clear`, {task_ids:[sel.task],
-        include_downstream:dlg.querySelector("#optDown").checked, include_upstream:dlg.querySelector("#optUp").checked, only_failed:dlg.querySelector("#optFailed").checked});
+        include_downstream:dlg.querySelector("#optDown").checked, include_upstream:dlg.querySelector("#optUp").checked, only_failed:dlg.querySelector("#optFailed").checked,
+        ...(sel.mi>=0 ? {map_index: sel.mi} : {})});
       toast(r.cleared.length ? `Cleared ${r.cleared.length} task${r.cleared.length>1?"s":""}` : "Nothing to clear"); render(); }});
   const dlg = document.getElementById("actDlg"); upd(dlg); dlg.querySelectorAll("#optUp,#optDown").forEach(c=>c.onchange=()=>upd(dlg));
 }
@@ -1299,7 +1300,7 @@ function tiFullDetails(d, run, ti, t, sel){
     dag_id: d.dag_id, dag_run: `<DagRun ${d.dag_id} @ ${run.logical_date}: ${run.run_id}, state:${run.state}, queued_at: ${run.queued_at}. run_type: ${run.run_type}>`,
     duration: dur==null ? null : dur.toFixed(6), end_date: ti.end_date ? fmt(ti.end_date) : null, execution_date: fmt(run.logical_date),
     logical_date: fmt(run.logical_date), data_interval_start: fmt(run.data_interval_start), data_interval_end: fmt(run.data_interval_end),
-    log_url: location.origin + "/" + tiHref(d.dag_id, sel.run, sel.task, sel.mi, "logs"), map_index: sel.mi, max_tries: t.retries+1,
+    log_url: location.origin + "/" + tiHref(d.dag_id, sel.run, sel.task, sel.mi, "logs"), map_index: sel.mi, max_tries: ti.max_tries || t.retries+1,
     note: ti.note||null, operator: t.operator, pool: ti.pool||t.pool, pool_slots: t.pool_slots, priority_weight: t.priority_weight,
     run_id: run.run_id, start_date: ti.start_date ? fmt(ti.start_date) : null, state: st(ti.state), task_id: sel.task, try_number: ti.try_number||0,
     error: ti.error||null,

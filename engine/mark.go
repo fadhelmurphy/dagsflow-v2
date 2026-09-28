@@ -117,16 +117,10 @@ func markTI(ti *TaskInstance, s dag.State, user string) {
 	}
 }
 
-func resetTI(r *DagRun, id string) {
-	ti := r.Tasks[id]
-	ti.State, ti.StartDate, ti.EndDate, ti.Error = dag.StateNone, nil, nil, ""
-	delete(r.XCom, id)
-	delete(r.Rendered, id)
-	for i := range r.Mapped[id] {
-		delete(r.XCom, mappedKey(id, i))
-		delete(r.Rendered, mappedKey(id, i))
+func resetTI(d *dag.DAG, r *DagRun, id string) {
+	if t, ok := d.Task(id); ok {
+		clearTask(r, t, -1, false)
 	}
-	delete(r.Mapped, id)
 }
 
 // finalRunState: like Airflow, a finished run fails if any leaf failed.
@@ -251,7 +245,7 @@ func MarkState(d *dag.DAG, r *DagRun, m MarkRequest) ([]string, error) {
 	requeue := false
 	for _, id := range descendantsOf(d, sel) {
 		if s := r.Tasks[id].State; s == dag.StateFailed || s == dag.StateUpstreamFailed {
-			resetTI(r, id)
+			resetTI(d, r, id)
 			changed = append(changed, id)
 			requeue = true
 		}

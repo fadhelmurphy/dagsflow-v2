@@ -244,6 +244,7 @@ Pilihan dan filter disimpan di URL, jadi bisa dibagikan dan tidak hilang saat au
 - **More Details** membuka halaman Task Instance dengan tab Grid · Task Instance Details (Dependencies Blocking Task From Getting Scheduled, Task Instance Attributes, Task Attributes) · Rendered Template · Log · XCom.
 - **List All Instances** / Browse → Task Instances: semua task instance, bisa difilter per DAG, task, dan state.
 - Operator custom bisa punya nama dan extra link sendiri: `dag.WithOperatorName("GcsExportOperator")`, `dag.WithExtraLink("GCS Object", "gcs_url")`, lalu di task: `ctx.XComPush("gcs_url", url)`.
+- **Clear & try number** mengikuti Airflow: try number tidak kembali ke 1 setelah clear, tapi lanjut (attempt 2, 3, ...), dan retry dihitung ulang (`max_tries = try_number + retries`). Setiap attempt punya file log sendiri. Untuk dynamic task mapping, Clear pada satu instance (misalnya `load_branch [1]`) hanya menjalankan ulang instance itu; instance lain dan hasil XCom-nya tetap. CLI: `tasks clear <dag> <run> -t load_branch --map-index 1`.
 - **Clear task** dengan opsi downstream / upstream / only failed, lengkap dengan pratinjau task yang terdampak.
 - **Filter DAG by task**: tampilkan hanya upstream, downstream, atau keduanya dari task terpilih.
 - **Event Log**: setiap aksi (trigger, pause, clear, mark, reparse, login, perubahan user/pool/variable/connection) dicatat ke `state/audit.log`; tersedia per DAG/run/task dan di Browse → Event Log.

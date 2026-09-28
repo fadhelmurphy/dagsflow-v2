@@ -64,7 +64,8 @@ func tasksCmd() *cobra.Command {
 			up, _ := cmd.Flags().GetBool("upstream")
 			down, _ := cmd.Flags().GetBool("downstream")
 			onlyFailed, _ := cmd.Flags().GetBool("only-failed")
-			cleared, err := engine.ClearTasks(d, r, ids, up, down, onlyFailed)
+			mi, _ := cmd.Flags().GetInt("map-index")
+			cleared, err := engine.ClearTaskInstances(d, r, engine.ClearOptions{TaskIDs: ids, Upstream: up, Downstream: down, OnlyFailed: onlyFailed, MapIndex: mi})
 			if err != nil {
 				exitf("%v", err)
 			}
@@ -90,6 +91,7 @@ func tasksCmd() *cobra.Command {
 	clear.Flags().Bool("upstream", false, "also clear upstream tasks")
 	clear.Flags().Bool("downstream", false, "also clear downstream tasks")
 	clear.Flags().Bool("only-failed", false, "only clear failed/upstream_failed tasks")
+	clear.Flags().Int("map-index", -1, "clear only this mapped instance of the (single) --task")
 	clear.Flags().Bool("run-now", false, "execute the cleared tasks in this process instead of via the scheduler")
 
 	test := &cobra.Command{

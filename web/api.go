@@ -638,12 +638,18 @@ func (s *Server) clear(w http.ResponseWriter, r *http.Request) {
 		Upstream   bool     `json:"include_upstream"`
 		Downstream bool     `json:"include_downstream"`
 		OnlyFailed bool     `json:"only_failed"`
+		MapIndex   *int     `json:"map_index"`
 	}
 	if err := readBody(r, &body); err != nil {
 		fail(w, 400, "invalid body: %v", err)
 		return
 	}
-	cleared, err := engine.ClearTasks(d, run, body.TaskIDs, body.Upstream, body.Downstream, body.OnlyFailed)
+	idx := -1
+	if body.MapIndex != nil {
+		idx = *body.MapIndex
+	}
+	cleared, err := engine.ClearTaskInstances(d, run, engine.ClearOptions{TaskIDs: body.TaskIDs, Upstream: body.Upstream,
+		Downstream: body.Downstream, OnlyFailed: body.OnlyFailed, MapIndex: idx})
 	if err != nil {
 		fail(w, 409, "%v", err)
 		return
