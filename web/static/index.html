@@ -543,7 +543,8 @@ function tabsFor(sel, taskDef, ti){
     case "task": return ["details","graph","duration","code","events"];
   }
   const t = ["details","graph","gantt","code","events"];
-  if(taskDef?.is_mapped && sel.mi < 0) t.splice(1,0,"mapped"); else t.push("logs","xcom");
+  const expanded = (DV.run?.mapped_task_instances?.[sel.task]||[]).length > 0;
+  if(taskDef?.is_mapped && sel.mi < 0 && expanded) t.splice(1,0,"mapped"); else t.push("logs","xcom");
   t.push("duration");
   return t;
 }
@@ -895,7 +896,8 @@ async function renderLogs(d, sel, run, ti, q, fresh){
   const body = document.getElementById("pbody");
   if(!ti){ body.innerHTML = `<div class="empty">This task instance does not exist in this run.</div>`; return; }
   const tries = ti.try_number||0, pick = Math.min(tries, +q.get("try")||tries);
-  if(!tries){ body.innerHTML = `<div class="empty">No log yet: the task has not started${ti.state==="skipped"?" (it was skipped)":ti.state==="upstream_failed"?" (an upstream task failed)":""}.</div>`; return; }
+  if(!tries){ body.innerHTML = ti.error ? `<pre class="err">${esc(ti.error)}</pre><p class="sub">The task failed before it started, so there is no log file.</p>`
+    : `<div class="empty">No log yet: the task has not started${ti.state==="skipped"?" (it was skipped)":ti.state==="upstream_failed"?" (an upstream task failed)":""}.</div>`; return; }
   const url = `/dags/${enc(d.dag_id)}/dagRuns/${enc(sel.run)}/taskInstances/${enc(sel.task)}/logs/${pick}${sel.mi>=0?`?map_index=${sel.mi}`:""}`;
   let box = document.getElementById("logBox");
   if(fresh || !box || box.dataset.url !== url || document.querySelectorAll(".tries button").length !== tries){

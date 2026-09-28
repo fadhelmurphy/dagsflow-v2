@@ -381,7 +381,7 @@ func (e *Engine) Execute(ctx context.Context, r *DagRun) error {
 					items, err := rc.expand(t)
 					switch {
 					case err != nil:
-						rc.setState(k, dag.StateFailed, "expand: "+err.Error())
+						rc.failBeforeStart(k, fmt.Errorf("cannot expand mapped task: %w", err))
 					case len(items) == 0:
 						rc.setState(k, dag.StateSkipped, "")
 					default:
@@ -668,8 +668,8 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 			if rc.ctx.Err() != nil {
 				rc.setState(k, dag.StateNone, "")
 			} else {
-				rc.setState(k, dag.StateFailed, err.Error())
-				e.callbacks(t.OnFailureCallbacks(), cc("task_failure", dag.StateFailed, err, 0, ""))
+				try, logPath := rc.failBeforeStart(k, err)
+				e.callbacks(t.OnFailureCallbacks(), cc("task_failure", dag.StateFailed, err, try, logPath))
 			}
 			return
 		}
@@ -964,4 +964,28 @@ func (rc *runCtx) applyMarkLive(m MarkRequest) {
 	if m.Target == "task" && m.MapIndex >= 0 {
 		rc.aggregateMapped(m.TaskID)
 	}
+}
+
+// failBeforeStart fails a task instance that could not even start (e.g. its
+// pool does not exist, or a mapped task cannot be expanded). It still records
+// an attempt with a log file, so the reason shows up in the task's Logs like
+// any other failure. Retries are not used: these are configuration errors.
+func (rc *runCtx) failBeforeStart(k tiKey, cause error) (int, string) {
+	t, _ := rc.d.Task(k.task)
+	rc.mu.Lock()
+	ti := rc.tiLocked(k)
+	ti.TryNumber++
+	ti.Pool = t.Pool()
+	try := ti.TryNumber
+	rc.mu.Unlock()
+	f, logPath := openTaskLog(rc.e.Store, rc.r.DagID, rc.r.RunID, t.ID, k.idx, try)
+	if f != nil {
+		fmt.Fprintf(f, "=== %s.%s run_id=%s map_index=%d try=%d/%d pool=%s ===\n",
+			rc.r.DagID, t.ID, rc.r.RunID, k.idx, try, t.Retries()+1, t.Pool())
+		fmt.Fprintf(f, "%s ERROR - Task could not start: %v\n", time.Now().Format("2006/01/02 15:04:05"), cause)
+		fmt.Fprintf(f, "Task failed before running (configuration error); retries are not used.\n")
+		closeLog(f)
+	}
+	rc.setState(k, dag.StateFailed, fmt.Sprintf("%v (log: %s)", cause, logPath))
+	return try, logPath
 }
