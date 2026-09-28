@@ -141,6 +141,43 @@ Webserver punya halaman login (`/login`) dengan session cookie (HttpOnly, SameSi
 
 Halaman DAG menampilkan filter All/Active/Paused dan Running/Failed, filter tag, pencarian, sorting, pagination, lingkaran status Runs dan Recent Tasks, serta aksi Trigger / Grid / Delete (menghapus riwayat run dan log; definisi DAG tetap ada). Owner diambil dari `DefaultArgs.Owner` (YAML: `default_args.owner`).
 
+### Halaman DAG
+
+Tata letaknya mengikuti Airflow 2: header (toggle pause, Schedule, Next Run, tombol Trigger / Reparse / Delete), bar filter (runs sampai tanggal tertentu, run type, run state, jumlah run), grid di kiri (chart durasi run + kotak status per task), dan panel detail di kanan dengan breadcrumb DAG / Run / Task.
+
+| Pilihan | Tab |
+|---|---|
+| tidak ada | Details, Graph, Code, Event Log |
+| run (klik bar) | Details, Graph, Gantt, Code, Event Log |
+| task (klik nama task) | Details, Graph, Task Duration, Code, Event Log |
+| task instance (klik kotak) | Details, (Mapped Tasks), Graph, Gantt, Code, Event Log, Logs, XCom, Task Duration |
+
+Pilihan dan filter disimpan di URL, jadi bisa dibagikan dan tidak hilang saat auto-refresh. Keyboard: ←/→ pindah run, ↑/↓ pindah task, Esc hapus pilihan.
+
+- **Code**: isi file DAG dengan nomor baris, highlight Go/YAML, Toggle Wrap, dan waktu *Parsed at*. DAG di `builtin_dags/` ikut ditampilkan (source di-embed ke binary).
+- **Reparse DAG** (role User): memuat ulang file DAG saat itu juga, tanpa menunggu rescan. Webserver langsung reload; scheduler menerima permintaannya dalam ±2 detik (lewat `state/reparse_requests.json`, aman untuk container terpisah). CLI: `dagsflow-go dags reparse <dag_id>`. DAG di `builtin_dags/` tidak bisa di-reparse karena ter-compile di binary.
+- **Mark state as success/failed** (role User), untuk task instance (opsi upstream/downstream) atau seluruh run. Seperti `set_task_instance_state` Airflow, task downstream yang `failed`/`upstream_failed` di-clear dan run di-queue lagi supaya lanjut jalan. Kalau run sedang berjalan, permintaan dikirim ke scheduler: task yang sedang jalan dihentikan (process group di-kill) lalu selesai dengan state yang dipilih.
+- **Clear task** dengan opsi downstream / upstream / only failed, lengkap dengan pratinjau task yang terdampak.
+- **Filter DAG by task**: tampilkan hanya upstream, downstream, atau keduanya dari task terpilih.
+- **Event Log**: setiap aksi (trigger, pause, clear, mark, reparse, login, perubahan user/pool/variable/connection) dicatat ke `state/audit.log`; tersedia per DAG/run/task dan di Browse → Event Log.
+
+### Users & RBAC
+
+Security → **List Users** (Admin): tambah, edit (nama, email, role, aktif/nonaktif, reset password), buat API token, hapus. Security → **List Roles** menampilkan izin tiap role:
+
+| Role | Izin |
+|---|---|
+| Viewer | lihat DAG, run, log, XCom, code, pools, datasets, event log |
+| User | + trigger, pause, clear, mark state, reparse |
+| Op | + pools, variables, connections, hapus run/metadata DAG |
+| Admin | + kelola user dan API token |
+
+User nonaktif tidak bisa login dan token API-nya ditolak. Reset password mencabut semua token user itu. Admin aktif terakhir tidak bisa diturunkan, dinonaktifkan, atau dihapus, dan user tidak bisa menghapus akunnya sendiri.
+
+CLI: `users update <username> --role Op --active=false --email x@y --reset-password`, dan `users create` sekarang menerima `--first-name --last-name --email`.
+
+API baru: `POST /dags/{dag}/reparse`, `GET /dags/{dag}/source`, `POST /dags/{dag}/dagRuns/{run}/mark` dan `.../taskInstances/{task}/mark` (body `{"new_state":"success","include_downstream":true,"map_index":0}`), `GET /eventLogs?dag_id=&run_id=&task_id=`, `GET /roles`, `GET|PATCH /users/{user}`. `GET /dags/{dag}` menerima `runs`, `base_date`, `run_type`, `state`.
+
 ## DAG Go tanpa rebuild (compile on the fly)
 
 Taruh file `.go` berisi `package main` di DAG folder. Scheduler dan webserver meng-compile-nya jadi *DAG bundle* (binary terpisah), lalu setiap task dijalankan sebagai subprocess dari bundle itu.

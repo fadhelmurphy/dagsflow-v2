@@ -2,6 +2,7 @@ package dag
 
 import (
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -44,7 +45,9 @@ type DAG struct {
 	OnFailure []Callback // DagRun failed
 	OnSLAMiss []Callback // a task missed its SLA
 
-	Source string // "go" or the YAML file it was loaded from
+	Source   string    // "go" (compiled in), a YAML file, or a Go bundle (file/dir) in the DAG folder
+	File     string    // file that defines the DAG (for the Code view)
+	ParsedAt time.Time // when this definition was (re)loaded
 
 	tasks    []*Task
 	taskMap  map[string]*Task
@@ -78,6 +81,9 @@ func NewDAG(id, schedule string, opts ...DAGOption) *DAG {
 	d := &DAG{
 		ID: id, Schedule: schedule, MaxActiveRuns: 1, Source: "go",
 		Params: map[string]any{}, taskMap: map[string]*Task{},
+	}
+	if _, file, _, ok := runtime.Caller(1); ok {
+		d.File = file
 	}
 	for _, o := range opts {
 		o(d)
@@ -366,6 +372,7 @@ func Register(d *DAG) {
 		importErrors[d.ID] = err
 		return
 	}
+	d.ParsedAt = time.Now()
 	registry[d.ID] = d
 }
 
@@ -394,6 +401,7 @@ func ReplaceSource(source string, dags []*DAG, loadErr error) {
 			continue
 		}
 		d.Source = source
+		d.ParsedAt = time.Now()
 		registry[d.ID] = d
 	}
 }

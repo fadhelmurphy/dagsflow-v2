@@ -14,6 +14,7 @@ package bundle
 
 import (
 	"errors"
+	"path/filepath"
 	"time"
 
 	"dagsflow-go/dag"
@@ -23,6 +24,7 @@ import (
 type DagSpec struct {
 	ID            string         `json:"dag_id"`
 	Owner         string         `json:"owner"`
+	File          string         `json:"file"` // base name of the file that called dag.NewDAG
 	Schedule      string         `json:"schedule"`
 	StartDate     time.Time      `json:"start_date"`
 	Catchup       bool           `json:"catchup"`
@@ -68,7 +70,7 @@ func describe() Describe {
 		out.ImportErrors[id] = err.Error()
 	}
 	for _, d := range dag.List() {
-		ds := DagSpec{ID: d.ID, Owner: d.DefaultArgs.Owner, Schedule: d.Schedule, StartDate: d.StartDate, Catchup: d.Catchup,
+		ds := DagSpec{ID: d.ID, Owner: d.DefaultArgs.Owner, File: filepath.Base(d.File), Schedule: d.Schedule, StartDate: d.StartDate, Catchup: d.Catchup,
 			MaxActiveRuns: d.MaxActiveRuns, Params: d.Params, Description: d.Description, Tags: d.Tags,
 			Datasets: d.Datasets, OnSuccess: len(d.OnSuccess), OnFailure: len(d.OnFailure), OnSLAMiss: len(d.OnSLAMiss)}
 		for _, t := range d.Tasks() {

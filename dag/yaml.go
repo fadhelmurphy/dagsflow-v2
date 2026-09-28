@@ -318,6 +318,13 @@ var (
 	folderStamp = map[string]string{} // path -> modtime|size
 )
 
+// InvalidateYAML forces the file to be re-parsed on the next LoadDagFolder.
+func InvalidateYAML(path string) {
+	folderMu.Lock()
+	delete(folderStamp, path)
+	folderMu.Unlock()
+}
+
 // LoadDagFolder (re)loads every *.yaml / *.yml under dir. Only changed files are
 // re-parsed; deleted files are unregistered. Safe to call repeatedly.
 func LoadDagFolder(dir string) {
@@ -348,6 +355,9 @@ func LoadDagFolder(dir string) {
 			return nil
 		}
 		dags, err := ParseYAML(p, data)
+		for _, d := range dags {
+			d.File = p
+		}
 		ReplaceSource(p, dags, err)
 		return nil
 	})

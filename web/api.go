@@ -35,6 +35,10 @@ type Server struct {
 	authMu    sync.Mutex
 	authCache map[[32]byte]authEntry
 	key       []byte // session signing key
+
+	// Reparse reloads a DAG's source file in this process and asks the other
+	// processes (scheduler) to do the same. Set by the CLI.
+	Reparse func(d *dag.DAG) error
 }
 
 type authEntry struct {
@@ -93,8 +97,16 @@ func (s *Server) Handler() http.Handler {
 		{"POST /api/v1/connections", O, s.putConnection},
 		{"PUT /api/v1/connections", O, s.putConnection},
 		{"DELETE /api/v1/connections/{id}", O, s.deleteConnection},
+		{"GET /api/v1/dags/{dag}/source", V, s.dagSource},
+		{"POST /api/v1/dags/{dag}/reparse", U, s.reparse},
+		{"POST /api/v1/dags/{dag}/dagRuns/{run}/mark", U, s.markRun},
+		{"POST /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/mark", U, s.markTask},
+		{"GET /api/v1/eventLogs", V, s.eventLogs},
+		{"GET /api/v1/roles", V, s.roles},
 		{"GET /api/v1/users", A, s.listUsers},
 		{"POST /api/v1/users", A, s.createUser},
+		{"GET /api/v1/users/{user}", A, s.getUser},
+		{"PATCH /api/v1/users/{user}", A, s.patchUser},
 		{"DELETE /api/v1/users/{user}", A, s.deleteUser},
 		{"POST /api/v1/users/{user}/tokens", A, s.issueToken},
 	}
@@ -274,16 +286,27 @@ type runSummary struct {
 	StartDate   *time.Time           `json:"start_date,omitempty"`
 	EndDate     *time.Time           `json:"end_date,omitempty"`
 	Tasks       map[string]dag.State `json:"task_states,omitempty"`
+	TIs         map[string]tiLite    `json:"task_instances,omitempty"`
 	SLAMisses   int                  `json:"sla_misses,omitempty"`
+}
+
+// tiLite: what the grid, Gantt and Task Duration views need per task instance.
+type tiLite struct {
+	State     dag.State  `json:"state"`
+	StartDate *time.Time `json:"start_date,omitempty"`
+	EndDate   *time.Time `json:"end_date,omitempty"`
+	TryNumber int        `json:"try_number"`
+	Mapped    int        `json:"mapped,omitempty"`
 }
 
 func summarize(r *engine.DagRun, withTasks bool) runSummary {
 	s := runSummary{RunID: r.RunID, RunType: r.RunType, State: r.State, LogicalDate: r.LogicalDate,
 		StartDate: r.StartDate, EndDate: r.EndDate, SLAMisses: len(r.SLAMisses)}
 	if withTasks {
-		s.Tasks = map[string]dag.State{}
+		s.Tasks, s.TIs = map[string]dag.State{}, map[string]tiLite{}
 		for id, ti := range r.Tasks {
 			s.Tasks[id] = ti.State
+			s.TIs[id] = tiLite{ti.State, ti.StartDate, ti.EndDate, ti.TryNumber, len(r.Mapped[id])}
 		}
 	}
 	return s
@@ -393,6 +416,7 @@ func (s *Server) deleteDag(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "%v", err)
 		return
 	}
+	s.audit(r, "delete_dag", d.ID, "", "", "runs, metadata and logs")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -449,21 +473,39 @@ func (s *Server) getDag(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	n, _ := strconv.Atoi(r.URL.Query().Get("runs"))
-	if n <= 0 || n > 200 {
+	q := r.URL.Query()
+	n, _ := strconv.Atoi(q.Get("runs"))
+	if n <= 0 || n > 365 {
 		n = 25
 	}
+	var base time.Time
+	if v := q.Get("base_date"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			base = t
+		}
+	}
 	runs, _ := s.Store.ListRuns(d.ID)
+	counts := map[string]int{}
+	var filtered []*engine.DagRun
+	for _, run := range runs {
+		counts[run.State]++
+		if (base.IsZero() || !run.LogicalDate.After(base)) &&
+			(q.Get("run_type") == "" || run.RunType == q.Get("run_type")) &&
+			(q.Get("state") == "" || run.State == q.Get("state")) {
+			filtered = append(filtered, run)
+		}
+	}
 	rs := []runSummary{}
-	for _, run := range lastN(runs, n) {
+	for _, run := range lastN(filtered, n) {
 		rs = append(rs, summarize(run, true))
 	}
 	m := s.Store.GetDagMeta(d.ID)
 	writeJSON(w, 200, map[string]any{
-		"dag_id": d.ID, "schedule": scheduleLabel(d), "description": d.Description, "tags": d.Tags,
-		"source": d.Source, "catchup": d.Catchup, "max_active_runs": d.MaxActiveRuns, "params": d.Params,
+		"dag_id": d.ID, "owner": d.Owner(), "schedule": scheduleLabel(d), "description": d.Description, "tags": d.Tags,
+		"source": d.Source, "file": d.File, "is_file_source": d.IsFileSource(), "parsed_at": d.ParsedAt,
+		"catchup": d.Catchup, "max_active_runs": d.MaxActiveRuns, "params": d.Params,
 		"datasets": d.Datasets, "is_paused": m.IsPaused, "next_data_interval_start": m.NextDataIntervalStart,
-		"tasks": describeTasks(d), "runs": rs, "total_runs": len(runs),
+		"tasks": describeTasks(d), "runs": rs, "total_runs": len(runs), "filtered_runs": len(filtered), "run_counts": counts,
 	})
 }
 
@@ -485,6 +527,11 @@ func (s *Server) patchDag(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "%v", err)
 		return
 	}
+	ev := "unpause"
+	if m.IsPaused {
+		ev = "pause"
+	}
+	s.audit(r, ev, d.ID, "", "", "")
 	writeJSON(w, 200, map[string]any{"dag_id": d.ID, "is_paused": m.IsPaused})
 }
 
@@ -531,6 +578,12 @@ func (s *Server) trigger(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "%v", err)
 		return
 	}
+	extra := ""
+	if len(body.Conf) > 0 {
+		b, _ := json.Marshal(body.Conf)
+		extra = "conf=" + string(b)
+	}
+	s.audit(r, "trigger", d.ID, run.RunID, "", extra)
 	writeJSON(w, 201, summarize(run, false))
 }
 
@@ -553,6 +606,7 @@ func (s *Server) deleteRun(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "%v", err)
 		return
 	}
+	s.audit(r, "delete_run", d.ID, run.RunID, "", "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -581,6 +635,11 @@ func (s *Server) clear(w http.ResponseWriter, r *http.Request) {
 			fail(w, 500, "%v", err)
 			return
 		}
+		task := ""
+		if len(body.TaskIDs) == 1 {
+			task = body.TaskIDs[0]
+		}
+		s.audit(r, "clear", d.ID, run.RunID, task, strings.Join(cleared, ", "))
 	}
 	writeJSON(w, 200, map[string]any{"cleared": cleared})
 }
@@ -753,6 +812,7 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "%v", err)
 		return
 	}
+	s.audit(r, "pool_set", "", "", "", fmt.Sprintf("%s=%d", name, *body.Slots))
 	writeJSON(w, 200, map[string]any{"name": name, "slots": *body.Slots})
 }
 
@@ -761,6 +821,7 @@ func (s *Server) deletePool(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "%v", err)
 		return
 	}
+	s.audit(r, "pool_delete", "", "", "", r.PathValue("name"))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -812,6 +873,7 @@ func (s *Server) putVariable(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "%v", err)
 		return
 	}
+	s.audit(r, "variable_set", "", "", "", key)
 	writeJSON(w, 200, map[string]any{"key": key})
 }
 
@@ -820,6 +882,7 @@ func (s *Server) deleteVariable(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "%v", err)
 		return
 	}
+	s.audit(r, "variable_delete", "", "", "", r.PathValue("key"))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -880,6 +943,7 @@ func (s *Server) putConnection(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "%v", err)
 		return
 	}
+	s.audit(r, "connection_set", "", "", "", id)
 	writeJSON(w, 200, map[string]any{"conn_id": id})
 }
 
@@ -888,10 +952,23 @@ func (s *Server) deleteConnection(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "%v", err)
 		return
 	}
+	s.audit(r, "connection_delete", "", "", "", r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- users ------------------------------------------------------------------------------
+
+func userJSON(u *engine.User) map[string]any {
+	return map[string]any{"username": u.Username, "first_name": u.FirstName, "last_name": u.LastName,
+		"email": u.Email, "role": u.Role, "active": u.Active(), "api_tokens": len(u.Tokens),
+		"created_at": u.CreatedAt, "changed_at": u.ChangedAt, "last_login": u.LastLogin, "login_count": u.LoginCount}
+}
+
+func (s *Server) dropAuthCache() {
+	s.authMu.Lock()
+	s.authCache = nil
+	s.authMu.Unlock()
+}
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := s.Store.Users()
@@ -901,39 +978,134 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []map[string]any{}
 	for _, u := range users {
-		out = append(out, map[string]any{"username": u.Username, "role": u.Role, "api_tokens": len(u.Tokens), "created_at": u.CreatedAt})
+		out = append(out, userJSON(u))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i]["username"].(string) < out[j]["username"].(string) })
 	writeJSON(w, 200, map[string]any{"users": out})
 }
 
+func (s *Server) getUser(w http.ResponseWriter, r *http.Request) {
+	users, _ := s.Store.Users()
+	u := users[r.PathValue("user")]
+	if u == nil {
+		fail(w, 404, "user %q not found", r.PathValue("user"))
+		return
+	}
+	writeJSON(w, 200, userJSON(u))
+}
+
+type userBody struct {
+	Username  string  `json:"username"`
+	Password  *string `json:"password"`
+	FirstName *string `json:"first_name"`
+	LastName  *string `json:"last_name"`
+	Email     *string `json:"email"`
+	Role      *string `json:"role"`
+	Active    *bool   `json:"active"`
+}
+
+func (b userBody) update() (engine.UserUpdate, error) {
+	up := engine.UserUpdate{FirstName: b.FirstName, LastName: b.LastName, Email: b.Email, Active: b.Active, Password: b.Password}
+	if b.Email != nil && *b.Email != "" && !strings.Contains(*b.Email, "@") {
+		return up, fmt.Errorf("email looks invalid")
+	}
+	if b.Role != nil {
+		role, err := engine.ParseRole(*b.Role)
+		if err != nil {
+			return up, err
+		}
+		up.Role = &role
+	}
+	return up, nil
+}
+
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Username, Password, Role string }
+	var body userBody
 	if err := readBody(r, &body); err != nil {
 		fail(w, 400, "%v", err)
 		return
 	}
-	role, err := engine.ParseRole(body.Role)
+	body.Username = strings.TrimSpace(body.Username)
+	if body.Password == nil || body.Role == nil {
+		fail(w, 400, "username, password and role are required")
+		return
+	}
+	up, err := body.update()
 	if err != nil {
 		fail(w, 400, "%v", err)
 		return
 	}
-	if err := s.Store.CreateUser(body.Username, body.Password, role); err != nil {
+	if err := s.Store.CreateUser(body.Username, *body.Password, *up.Role); err != nil {
 		fail(w, 400, "%v", err)
 		return
 	}
-	writeJSON(w, 201, map[string]any{"username": body.Username, "role": role})
+	up.Password, up.Role = nil, nil
+	if err := s.Store.UpdateUser(body.Username, up); err != nil {
+		fail(w, 400, "%v", err)
+		return
+	}
+	s.audit(r, "user_create", "", "", "", body.Username+" ("+*body.Role+")")
+	users, _ := s.Store.Users()
+	writeJSON(w, 201, userJSON(users[body.Username]))
+}
+
+func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
+	var body userBody
+	if err := readBody(r, &body); err != nil {
+		fail(w, 400, "%v", err)
+		return
+	}
+	up, err := body.update()
+	if err != nil {
+		fail(w, 400, "%v", err)
+		return
+	}
+	name := r.PathValue("user")
+	if err := s.Store.UpdateUser(name, up); err != nil {
+		code := 400
+		if strings.Contains(err.Error(), "not found") {
+			code = 404
+		}
+		fail(w, code, "%v", err)
+		return
+	}
+	s.dropAuthCache()
+	var what []string
+	if up.Role != nil {
+		what = append(what, "role="+string(*up.Role))
+	}
+	if up.Active != nil {
+		what = append(what, fmt.Sprintf("active=%v", *up.Active))
+	}
+	if up.Password != nil {
+		what = append(what, "password reset")
+	}
+	s.audit(r, "user_update", "", "", "", name+" "+strings.Join(what, ", "))
+	users, _ := s.Store.Users()
+	writeJSON(w, 200, userJSON(users[name]))
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
-	if err := s.Store.DeleteUser(r.PathValue("user")); err != nil {
-		fail(w, 404, "%v", err)
+	name := r.PathValue("user")
+	if me := userFrom(r); me != nil && me.Username == name {
+		fail(w, 400, "you cannot delete your own account")
 		return
 	}
-	s.authMu.Lock()
-	s.authCache = nil
-	s.authMu.Unlock()
+	if err := s.Store.DeleteUser(name); err != nil {
+		code := 400
+		if strings.Contains(err.Error(), "not found") {
+			code = 404
+		}
+		fail(w, code, "%v", err)
+		return
+	}
+	s.dropAuthCache()
+	s.audit(r, "user_delete", "", "", "", name)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) roles(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"roles": engine.RolePermissions})
 }
 
 func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {
@@ -942,6 +1114,7 @@ func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "%v", err)
 		return
 	}
+	s.audit(r, "user_token_issued", "", "", "", r.PathValue("user"))
 	writeJSON(w, 201, map[string]any{"token": tok, "note": "shown once; send as Authorization: Bearer <token>"})
 }
 

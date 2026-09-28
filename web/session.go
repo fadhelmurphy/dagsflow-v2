@@ -128,7 +128,7 @@ func (s *Server) sessionUser(r *http.Request) (*engine.User, bool) {
 		return nil, false
 	}
 	u := users[string(name)]
-	if u == nil || userFingerprint(u) != parts[2] {
+	if u == nil || !u.Active() || userFingerprint(u) != parts[2] {
 		return nil, false
 	}
 	return u, true
@@ -151,10 +151,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	u, ok := s.Store.Authenticate(strings.TrimSpace(body.Username), body.Password, "")
 	if !ok {
+		s.Store.Audit(engine.AuditEvent{User: strings.TrimSpace(body.Username), Event: "login_failed", Extra: clientIP(r)})
 		time.Sleep(400 * time.Millisecond) // slow down guessing
 		fail(w, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
+	s.Store.RecordLogin(u.Username)
+	s.Store.Audit(engine.AuditEvent{User: u.Username, Event: "login", Extra: clientIP(r)})
 	if err := s.setSession(w, r, u); err != nil {
 		fail(w, 500, "%v", err)
 		return
@@ -162,7 +165,21 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"username": u.Username, "role": u.Role, "auth_enabled": true})
 }
 
+func clientIP(r *http.Request) string {
+	if f := r.Header.Get("X-Forwarded-For"); f != "" {
+		return strings.TrimSpace(strings.Split(f, ",")[0])
+	}
+	host := r.RemoteAddr
+	if i := strings.LastIndex(host, ":"); i > 0 {
+		host = host[:i]
+	}
+	return host
+}
+
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if u, ok := s.sessionUser(r); ok {
+		s.Store.Audit(engine.AuditEvent{User: u.Username, Event: "logout"})
+	}
 	clearSession(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }

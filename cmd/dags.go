@@ -203,7 +203,22 @@ func dagsCmd() *cobra.Command {
 	_ = backfill.MarkFlagRequired("start")
 	_ = backfill.MarkFlagRequired("end")
 
-	c.AddCommand(list, pause, unpause, trigger, test, graph, listRuns, backfill)
+	reparse := &cobra.Command{
+		Use: "reparse <dag_id>", Short: "Reload the DAG's file now (scheduler/webservers pick it up within seconds)", Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			d := mustDAG(args[0])
+			if err := reparseDag(d); err != nil {
+				exitf("%v", err)
+			}
+			nd, ok := dag.Get(d.ID)
+			if !ok {
+				exitf("%s no longer loads: %v", d.ID, dag.ImportErrors()[d.Source])
+			}
+			newStore().Audit(engine.AuditEvent{User: "cli", Event: "reparse", DagID: d.ID, Extra: d.Source})
+			fmt.Printf("reparsed %s (%s) at %s\n", d.ID, d.Source, nd.ParsedAt.Format(time.DateTime))
+		},
+	}
+	c.AddCommand(list, pause, unpause, trigger, test, graph, listRuns, backfill, reparse)
 	return c
 }
 

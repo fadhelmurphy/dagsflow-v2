@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -362,11 +363,101 @@ func ParseRole(s string) (Role, error) {
 }
 
 type User struct {
-	Username     string    `json:"username"`
-	Role         Role      `json:"role"`
-	PasswordHash string    `json:"password_hash"`
-	Tokens       []string  `json:"api_token_hashes,omitempty"` // sha256 of issued tokens
-	CreatedAt    time.Time `json:"created_at"`
+	Username     string     `json:"username"`
+	FirstName    string     `json:"first_name,omitempty"`
+	LastName     string     `json:"last_name,omitempty"`
+	Email        string     `json:"email,omitempty"`
+	Role         Role       `json:"role"`
+	Disabled     bool       `json:"disabled,omitempty"` // inactive users cannot sign in
+	PasswordHash string     `json:"password_hash"`
+	Tokens       []string   `json:"api_token_hashes,omitempty"` // sha256 of issued tokens
+	CreatedAt    time.Time  `json:"created_at"`
+	ChangedAt    *time.Time `json:"changed_at,omitempty"`
+	LastLogin    *time.Time `json:"last_login,omitempty"`
+	LoginCount   int        `json:"login_count,omitempty"`
+}
+
+func (u *User) Active() bool { return !u.Disabled }
+
+// RolePermissions describes what each role may do (shown on Security → List Roles).
+var RolePermissions = []struct {
+	Role        Role     `json:"role"`
+	Permissions []string `json:"permissions"`
+}{
+	{RoleViewer, []string{"View DAGs, runs, task instances, logs, XComs, code", "View pools, datasets, import errors, event log"}},
+	{RoleUser, []string{"Everything Viewer can do", "Trigger DAGs, pause/unpause", "Clear tasks and runs, mark state as success/failed", "Reparse DAG files"}},
+	{RoleOp, []string{"Everything User can do", "Manage pools, variables, connections", "Delete DAG runs and DAG metadata"}},
+	{RoleAdmin, []string{"Everything Op can do", "Manage users, roles and API tokens"}},
+}
+
+// UserUpdate: nil fields are left unchanged.
+type UserUpdate struct {
+	FirstName, LastName, Email *string
+	Role                       *Role
+	Active                     *bool
+	Password                   *string
+}
+
+func activeAdmins(m map[string]*User, except string) int {
+	n := 0
+	for name, u := range m {
+		if name != except && u.Role == RoleAdmin && u.Active() {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *Store) UpdateUser(username string, up UserUpdate) error {
+	if up.Password != nil && len(*up.Password) < 8 {
+		return errors.New("password must be at least 8 characters")
+	}
+	m := map[string]*User{}
+	return s.updateTable("users", &m, func() error {
+		u, ok := m[username]
+		if !ok {
+			return fmt.Errorf("user %q not found", username)
+		}
+		losesAdmin := (up.Role != nil && *up.Role != RoleAdmin) || (up.Active != nil && !*up.Active)
+		if u.Role == RoleAdmin && u.Active() && losesAdmin && activeAdmins(m, username) == 0 {
+			return errors.New("cannot demote or deactivate the last active Admin")
+		}
+		if up.FirstName != nil {
+			u.FirstName = strings.TrimSpace(*up.FirstName)
+		}
+		if up.LastName != nil {
+			u.LastName = strings.TrimSpace(*up.LastName)
+		}
+		if up.Email != nil {
+			u.Email = strings.TrimSpace(*up.Email)
+		}
+		if up.Role != nil {
+			u.Role = *up.Role
+		}
+		if up.Active != nil {
+			u.Disabled = !*up.Active
+		}
+		if up.Password != nil {
+			u.PasswordHash = hashPassword(*up.Password) // also invalidates web sessions
+			u.Tokens = nil
+		}
+		now := time.Now()
+		u.ChangedAt = &now
+		return nil
+	})
+}
+
+// RecordLogin updates last login / login count after a successful web sign-in.
+func (s *Store) RecordLogin(username string) {
+	m := map[string]*User{}
+	_ = s.updateTable("users", &m, func() error {
+		if u, ok := m[username]; ok {
+			now := time.Now()
+			u.LastLogin = &now
+			u.LoginCount++
+		}
+		return nil
+	})
 }
 
 // PBKDF2-HMAC-SHA256 (stdlib only), 210k iterations as recommended by OWASP.
@@ -443,8 +534,12 @@ func (s *Store) CreateUser(username, password string, role Role) error {
 func (s *Store) DeleteUser(username string) error {
 	m := map[string]*User{}
 	return s.updateTable("users", &m, func() error {
-		if _, ok := m[username]; !ok {
+		u, ok := m[username]
+		if !ok {
 			return fmt.Errorf("user %q not found", username)
+		}
+		if u.Role == RoleAdmin && u.Active() && activeAdmins(m, username) == 0 {
+			return errors.New("cannot delete the last active Admin")
 		}
 		delete(m, username)
 		return nil
@@ -478,14 +573,14 @@ func (s *Store) Authenticate(username, password, token string) (*User, bool) {
 		for _, u := range users {
 			for _, t := range u.Tokens {
 				if subtle.ConstantTimeCompare([]byte(t), []byte(h)) == 1 {
-					return u, true
+					return u, u.Active()
 				}
 			}
 		}
 		return nil, false
 	}
 	u, ok := users[username]
-	if !ok || !checkPassword(u.PasswordHash, password) {
+	if !ok || !u.Active() || !checkPassword(u.PasswordHash, password) {
 		return nil, false
 	}
 	return u, true

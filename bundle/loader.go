@@ -86,6 +86,14 @@ func (l *Loader) LoadFolder(dir string) {
 	l.gc()
 }
 
+// Invalidate forces the bundle (a file or directory key) to be reloaded on the
+// next LoadFolder, even if its files did not change.
+func (l *Loader) Invalidate(key string) {
+	l.mu.Lock()
+	delete(l.stamps, key)
+	l.mu.Unlock()
+}
+
 // gc removes cached bundle binaries that are no longer current and unused
 // for a day (runs started before a DAG change keep using their old binary).
 func (l *Loader) gc() {
@@ -191,7 +199,13 @@ func (l *Loader) load(b bundleSrc) ([]*dag.DAG, error) {
 	p := &proxy{bin: bin}
 	var dags []*dag.DAG
 	for _, spec := range desc.Dags {
-		dags = append(dags, p.build(spec))
+		d := p.build(spec)
+		for _, f := range b.files {
+			if filepath.Base(f) == spec.File {
+				d.File = f
+			}
+		}
+		dags = append(dags, d)
 	}
 	return dags, nil
 }

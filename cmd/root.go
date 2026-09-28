@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -46,12 +48,58 @@ var goLoader = &bundle.Loader{Log: func(f string, a ...any) {
 	fmt.Fprintf(os.Stderr, "[dags] "+f+"\n", a...)
 }}
 
+var (
+	reparseMu   sync.Mutex
+	reparseSeen map[string]time.Time
+)
+
+// applyReparseRequests invalidates sources that someone asked to reparse
+// (UI/API/CLI, possibly from another process) since we last looked.
+func applyReparseRequests() {
+	reqs := newStore().ReparseRequests()
+	reparseMu.Lock()
+	defer reparseMu.Unlock()
+	first := reparseSeen == nil
+	if first {
+		reparseSeen = map[string]time.Time{}
+	}
+	for src, t := range reqs {
+		if !t.After(reparseSeen[src]) {
+			continue
+		}
+		reparseSeen[src] = t
+		if first { // everything gets parsed on startup anyway
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[dags] reparse requested for %s\n", src)
+		if ext := strings.ToLower(filepath.Ext(src)); ext == ".yaml" || ext == ".yml" {
+			dag.InvalidateYAML(src)
+		} else {
+			goLoader.Invalidate(src)
+		}
+	}
+}
+
 // loadDags (re)loads the DAG folder: YAML DAGs and Go DAG files (compiled on
 // the fly into bundles). Safe to call repeatedly; unchanged files are skipped.
 func loadDags() {
+	applyReparseRequests()
 	dag.LoadDagFolder(dagsFolder())
 	goLoader.Home = home()
 	goLoader.LoadFolder(dagsFolder())
+}
+
+// reparseDag is used by the webserver: record the request for the other
+// processes and reload here right away.
+func reparseDag(d *dag.DAG) error {
+	if !d.IsFileSource() {
+		return fmt.Errorf("%s is compiled into the dagsflow-go binary: rebuild and restart to change it (move it to the DAG folder to reparse without rebuilding)", d.ID)
+	}
+	if err := newStore().RequestReparse(d.Source); err != nil {
+		return err
+	}
+	loadDags()
+	return nil
 }
 
 // setup wires the secrets backends (env → metastore → connections/*.json)
@@ -184,17 +232,24 @@ func newScheduler(st *engine.Store) *engine.Scheduler {
 }
 
 // reloadLoop rescans the DAG folder in the background (compiling Go DAGs can
-// take a while, so this never blocks the scheduler loop).
+// take a while, so this never blocks the scheduler loop). Reparse requests
+// are picked up within ~2s.
 func reloadLoop(ctx context.Context) {
 	go func() {
-		t := time.NewTicker(reloadEvery)
+		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
+		st := newStore()
+		last, stamp := time.Now(), st.ReparseRequestsStamp()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				loadDags()
+				ns := st.ReparseRequestsStamp()
+				if time.Since(last) >= reloadEvery || !ns.Equal(stamp) {
+					stamp, last = ns, time.Now()
+					loadDags()
+				}
 			}
 		}
 	}()
@@ -212,7 +267,7 @@ func newWebServer(st *engine.Store) *web.Server {
 	if len(users) == 0 {
 		fmt.Println("[webserver] no users defined: auth disabled (localhost only). Create one with `users create` to enable RBAC.")
 	}
-	return &web.Server{Store: st}
+	return &web.Server{Store: st, Reparse: reparseDag}
 }
 
 func isLoopback(addr string) bool {

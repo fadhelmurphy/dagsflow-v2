@@ -134,6 +134,11 @@ type runCtx struct {
 	ctx    context.Context
 	events chan tiKey
 	weight map[string]int
+
+	// manual "mark state" support (see mark.go)
+	cancels   map[tiKey]context.CancelFunc // live task instances
+	overrides map[tiKey]dag.State          // state to finish a cancelled TI with
+	runMark   dag.State                    // run marked success/failed while executing
 }
 
 func (rc *runCtx) save() {
@@ -310,7 +315,9 @@ func (e *Engine) Execute(ctx context.Context, r *DagRun) error {
 	if !ok {
 		return fmt.Errorf("dag %s not found", r.DagID)
 	}
-	rc := &runCtx{e: e, d: d, r: r, ctx: ctx, events: make(chan tiKey), weight: downstreamWeights(d)}
+	rc := &runCtx{e: e, d: d, r: r, ctx: ctx, events: make(chan tiKey), weight: downstreamWeights(d),
+		cancels: map[tiKey]context.CancelFunc{}, overrides: map[tiKey]dag.State{}}
+	defer e.Store.DropCommands(r.DagID, r.RunID)
 
 	now := time.Now()
 	rc.mu.Lock()
@@ -346,8 +353,10 @@ func (e *Engine) Execute(ctx context.Context, r *DagRun) error {
 		go func() { rc.runTask(k, item); rc.events <- k }()
 	}
 
+	poll := time.NewTicker(time.Second)
+	defer poll.Stop()
 	for {
-		for changed := true; changed && ctx.Err() == nil; {
+		for changed := true; changed && ctx.Err() == nil && rc.runMark == ""; {
 			changed = false
 			for _, t := range d.Tasks() {
 				k := tiKey{t.ID, -1}
@@ -398,10 +407,16 @@ func (e *Engine) Execute(ctx context.Context, r *DagRun) error {
 		if running == 0 {
 			break
 		}
-		k := <-rc.events
-		running--
-		if k.idx >= 0 {
-			rc.aggregateMapped(k.task)
+		select {
+		case k := <-rc.events:
+			running--
+			if k.idx >= 0 {
+				rc.aggregateMapped(k.task)
+			}
+		case <-poll.C:
+			for _, m := range e.Store.TakeMarks(r.DagID, r.RunID) {
+				rc.applyMarkLive(m)
+			}
 		}
 	}
 
@@ -412,14 +427,9 @@ func (e *Engine) Execute(ctx context.Context, r *DagRun) error {
 	if interrupted {
 		r.State = RunQueued // scheduler shutdown: resume on next start
 	} else {
-		r.State = RunSuccess
-		for _, t := range d.Tasks() {
-			if len(t.Downstream()) == 0 {
-				s := r.Tasks[t.ID].State
-				if s == dag.StateFailed || s == dag.StateUpstreamFailed || s == dag.StateNone {
-					r.State = RunFailed
-				}
-			}
+		r.State = finalRunState(d, r)
+		if rc.runMark != "" {
+			r.State = string(rc.runMark)
 		}
 		r.EndDate = &end
 	}
@@ -627,8 +637,34 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 	}
 	prio := rc.weight[t.ID]
 
+	// per task-instance context: cancelled on scheduler shutdown or when the
+	// instance is marked success/failed manually
+	base, stop := context.WithCancel(rc.ctx)
+	rc.mu.Lock()
+	rc.cancels[k] = stop
+	rc.mu.Unlock()
+	defer func() {
+		rc.mu.Lock()
+		delete(rc.cancels, k)
+		rc.mu.Unlock()
+		stop()
+	}()
+	marked := func() bool { // finish with the manually requested state
+		rc.mu.Lock()
+		st, ok := rc.overrides[k]
+		delete(rc.overrides, k)
+		rc.mu.Unlock()
+		if ok {
+			rc.setState(k, st, fmt.Sprintf("marked %s manually", st))
+		}
+		return ok
+	}
+
 	for {
-		if err := e.slots.acquire(rc.ctx, t.Pool(), t.PoolSlots(), prio); err != nil {
+		if err := e.slots.acquire(base, t.Pool(), t.PoolSlots(), prio); err != nil {
+			if marked() {
+				return
+			}
 			if rc.ctx.Err() != nil {
 				rc.setState(k, dag.StateNone, "")
 			} else {
@@ -645,7 +681,7 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 			}
 		}
 		reacquire := func() error {
-			if err := e.slots.acquire(rc.ctx, t.Pool(), t.PoolSlots(), prio); err != nil {
+			if err := e.slots.acquire(base, t.Pool(), t.PoolSlots(), prio); err != nil {
 				return err
 			}
 			held = true
@@ -674,9 +710,9 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 		fmt.Fprintf(out, "=== %s.%s run_id=%s map_index=%d try=%d/%d pool=%s priority=%d ===\n",
 			rc.r.DagID, t.ID, rc.r.RunID, k.idx, try, t.Retries()+1, t.Pool(), prio)
 
-		tctx, cancel := rc.ctx, context.CancelFunc(func() {})
+		tctx, cancel := context.WithCancel(base)
 		if t.Timeout() > 0 {
-			tctx, cancel = context.WithTimeout(rc.ctx, t.Timeout())
+			tctx, cancel = context.WithTimeout(base, t.Timeout())
 		}
 		taskCtx := dag.NewTaskContext(tctx, t, info, rc, out)
 
@@ -690,6 +726,13 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 		cancel()
 		release()
 
+		if base.Err() != nil && rc.ctx.Err() == nil {
+			fmt.Fprintf(out, "Task instance was marked manually; stopping\n")
+			closeLog(logF)
+			if marked() {
+				return
+			}
+		}
 		if err == nil {
 			if t.IsBranch() {
 				fmt.Fprintf(out, "Branch selected: %v\n", selected)
@@ -740,7 +783,10 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 			case <-time.After(t.RetryDelay()):
 				rc.setState(k, dag.StateQueued, "")
 				continue
-			case <-rc.ctx.Done():
+			case <-base.Done():
+				if marked() {
+					return
+				}
 				rc.setState(k, dag.StateNone, "")
 				return
 			}
@@ -845,5 +891,77 @@ func openTaskLog(s *Store, dagID, runID, taskID string, mapIndex, try int) (*os.
 func closeLog(f *os.File) {
 	if f != nil {
 		_ = f.Close()
+	}
+}
+
+// applyMarkLive applies a mark request to a run this engine is executing:
+// live task instances are cancelled and finish with the requested state,
+// everything else is updated in place; the scheduling loop then continues.
+func (rc *runCtx) applyMarkLive(m MarkRequest) {
+	if err := m.Validate(rc.d); err != nil {
+		fmt.Fprintf(os.Stderr, "mark %s/%s: %v\n", rc.r.DagID, rc.r.RunID, err)
+		return
+	}
+	rc.mu.Lock()
+	var cancel []context.CancelFunc
+	set := func(k tiKey, st dag.State) {
+		if c, live := rc.cancels[k]; live {
+			rc.overrides[k] = st
+			cancel = append(cancel, c)
+			return
+		}
+		if ti := rc.tiLocked(k); ti != nil {
+			markTI(ti, st, m.User)
+		}
+	}
+	if m.Target == "run" {
+		rc.runMark = m.State
+		for _, t := range rc.d.Tasks() {
+			keys := []tiKey{{t.ID, -1}}
+			for i := range rc.r.Mapped[t.ID] {
+				keys = append(keys, tiKey{t.ID, i})
+			}
+			for _, k := range keys {
+				st := rc.tiLocked(k).State
+				switch {
+				case m.State == dag.StateSuccess && st != dag.StateSuccess && st != dag.StateSkipped:
+					set(k, dag.StateSuccess)
+				case m.State == dag.StateFailed && st == dag.StateNone:
+					set(k, dag.StateSkipped)
+				case m.State == dag.StateFailed && !st.Finished():
+					set(k, dag.StateFailed)
+				}
+			}
+		}
+	} else {
+		sel := markTargets(rc.d, m)
+		for id := range sel {
+			kids := rc.r.Mapped[id]
+			if id == m.TaskID && m.MapIndex >= 0 {
+				if m.MapIndex < len(kids) {
+					set(tiKey{id, m.MapIndex}, m.State)
+				}
+				continue
+			}
+			for i := range kids {
+				set(tiKey{id, i}, m.State)
+			}
+			if len(kids) == 0 || rc.tiLocked(tiKey{id, -1}).State.Finished() {
+				set(tiKey{id, -1}, m.State)
+			}
+		}
+		for _, id := range descendantsOf(rc.d, sel) {
+			if s := rc.r.Tasks[id].State; s == dag.StateFailed || s == dag.StateUpstreamFailed {
+				resetTI(rc.r, id)
+			}
+		}
+	}
+	rc.mu.Unlock()
+	rc.save()
+	for _, c := range cancel {
+		c()
+	}
+	if m.Target == "task" && m.MapIndex >= 0 {
+		rc.aggregateMapped(m.TaskID)
 	}
 }

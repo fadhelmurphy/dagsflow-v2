@@ -249,6 +249,10 @@ func usersCmd() *cobra.Command {
 			if err := newStore().CreateUser(u, readPassword(), role); err != nil {
 				exitf("%v", err)
 			}
+			fn, _ := cmd.Flags().GetString("first-name")
+			ln, _ := cmd.Flags().GetString("last-name")
+			em, _ := cmd.Flags().GetString("email")
+			_ = newStore().UpdateUser(u, engine.UserUpdate{FirstName: &fn, LastName: &ln, Email: &em})
 			fmt.Printf("user %s created with role %s\n", u, role)
 		}}
 	create.Flags().String("username", "", "username")
@@ -256,16 +260,63 @@ func usersCmd() *cobra.Command {
 	create.Flags().Bool("exists-ok", false, "do nothing if the user already exists (for container init)")
 	_ = create.MarkFlagRequired("username")
 
-	c.AddCommand(create,
+	update := &cobra.Command{Use: "update <username>", Short: "Change a user's role, status, details or password", Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, a []string) {
+			var up engine.UserUpdate
+			f := cmd.Flags()
+			str := func(name string) *string {
+				if !f.Changed(name) {
+					return nil
+				}
+				v, _ := f.GetString(name)
+				return &v
+			}
+			up.FirstName, up.LastName, up.Email = str("first-name"), str("last-name"), str("email")
+			if r := str("role"); r != nil {
+				role, err := engine.ParseRole(*r)
+				if err != nil {
+					exitf("%v", err)
+				}
+				up.Role = &role
+			}
+			if f.Changed("active") {
+				v, _ := f.GetBool("active")
+				up.Active = &v
+			}
+			if v, _ := f.GetBool("reset-password"); v {
+				pw := readPassword()
+				up.Password = &pw
+			}
+			if err := newStore().UpdateUser(a[0], up); err != nil {
+				exitf("%v", err)
+			}
+			fmt.Println("user updated:", a[0])
+		}}
+	update.Flags().String("role", "", "Viewer | User | Op | Admin")
+	update.Flags().Bool("active", true, "--active=false deactivates the user")
+	update.Flags().String("first-name", "", "first name")
+	update.Flags().String("last-name", "", "last name")
+	update.Flags().String("email", "", "email")
+	update.Flags().Bool("reset-password", false, "prompt for a new password (or DAGSFLOW_PASSWORD); revokes API tokens")
+	create.Flags().String("first-name", "", "first name")
+	create.Flags().String("last-name", "", "last name")
+	create.Flags().String("email", "", "email")
+
+	c.AddCommand(create, update,
 		&cobra.Command{Use: "list", Short: "List users", Run: func(*cobra.Command, []string) {
 			users, err := newStore().Users()
 			if err != nil {
 				exitf("%v", err)
 			}
 			w := table()
-			fmt.Fprintln(w, "USERNAME\tROLE\tAPI_TOKENS\tCREATED")
+			fmt.Fprintln(w, "USERNAME\tNAME\tEMAIL\tROLE\tACTIVE\tAPI_TOKENS\tLAST_LOGIN")
 			for _, u := range users {
-				fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", u.Username, u.Role, len(u.Tokens), u.CreatedAt.Local().Format(time.DateTime))
+				last := "-"
+				if u.LastLogin != nil {
+					last = u.LastLogin.Local().Format(time.DateTime)
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%v\t%d\t%s\n", u.Username, strings.TrimSpace(u.FirstName+" "+u.LastName),
+					u.Email, u.Role, u.Active(), len(u.Tokens), last)
 			}
 			w.Flush()
 		}},
