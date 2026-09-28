@@ -1,0 +1,33 @@
+# YAML DAGs are picked up by the scheduler/webserver without rebuilding the binary
+# (rescanned every --dag-dir-list-interval, default 30s).
+dag_id: yaml_example
+schedule: "@daily"
+catchup: false
+tags: [example, yaml]
+params:
+  target_table: daily_summary
+default_args:
+  retries: 2
+  retry_delay: 10s
+  timeout: 30m
+  on_failure: [gchat_alerts]     # connection ids of type google_chat
+tasks:
+  - id: list_files
+    operator: bash
+    command: 'echo ''["a.csv","b.csv","c.csv"]'''   # last stdout line -> XCom return_value
+
+  - id: process_file
+    operator: bash
+    command: 'echo "processing {{ .item }} for {{ .ds }} (index {{ .map_index }})"'
+    expand:
+      xcom: {task: list_files}
+    pool: default_pool
+    priority_weight: 3
+
+  - id: notify_api
+    operator: http
+    method: GET
+    url: "https://example.com/?table={{ .params.target_table }}&ds={{ .ds }}"
+    upstream: [process_file]
+    trigger_rule: all_done
+    retries: 0

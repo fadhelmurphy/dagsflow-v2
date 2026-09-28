@@ -1,0 +1,60 @@
+# docker compose up -d   →  http://localhost:8080 (login with DAGSFLOW_ADMIN_* from .env)
+x-dagsflow: &dagsflow
+  build: .
+  image: dagsflow-go:local
+  env_file: .env
+  environment:
+    DAGSFLOW_BASE_URL: ${DAGSFLOW_BASE_URL:-http://localhost:8080}
+  volumes:
+    - ./dags:/opt/dagsflow-home/dags              # DAG folder: .go and .yaml, hot reloaded
+    - ./connections:/opt/dagsflow-home/connections # optional file-based connections
+    - ./keys:/opt/dagsflow-home/keys:ro            # optional: GCP service-account JSON
+    - dagsflow-state:/opt/dagsflow-home/state      # metadata (JSON store)
+    - dagsflow-logs:/opt/dagsflow-home/logs        # task logs
+    - dagsflow-build:/opt/dagsflow-home/build      # compiled Go DAG bundles
+    - go-build-cache:/root/.cache/go-build         # shared Go build cache
+    - go-mod-cache:/go/pkg/mod                     # modules for DAGs with extra imports
+  restart: unless-stopped
+
+services:
+  dagsflow-init:
+    <<: *dagsflow
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        : "$${DAGSFLOW_ADMIN_USERNAME:?set DAGSFLOW_ADMIN_USERNAME in .env}"
+        : "$${DAGSFLOW_ADMIN_PASSWORD:?set DAGSFLOW_ADMIN_PASSWORD in .env}"
+        DAGSFLOW_PASSWORD="$$DAGSFLOW_ADMIN_PASSWORD" dagsflow-go users create --exists-ok \
+          --username "$$DAGSFLOW_ADMIN_USERNAME" --role Admin
+        # compile Go DAGs once so scheduler and webserver start from the cache
+        dagsflow-go dags list
+
+  dagsflow-scheduler:
+    <<: *dagsflow
+    command: ["scheduler", "--parallelism", "${DAGSFLOW_PARALLELISM:-16}"]
+    depends_on:
+      dagsflow-init:
+        condition: service_completed_successfully
+
+  dagsflow-webserver:
+    <<: *dagsflow
+    command: ["webserver", "--addr", "0.0.0.0:8080"]
+    ports:
+      - "${DAGSFLOW_WEB_PORT:-8080}:8080"
+    depends_on:
+      dagsflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  dagsflow-state:
+  dagsflow-logs:
+  dagsflow-build:
+  go-build-cache:
+  go-mod-cache:

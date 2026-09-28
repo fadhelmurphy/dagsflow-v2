@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · dagsflow</title>
+<style>
+:root{--ink:#16202A;--muted:#5E6B78;--line:#D6DBE0;--pill:#0F6FDE;--sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;flex-direction:column;background:#F4F6F8;color:var(--ink);font:14px/1.45 var(--sans)}
+header{height:58px;background:#fff;box-shadow:0 2px 6px rgba(22,32,42,.12);display:flex;align-items:center;padding:0 20px}
+.brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:18px}
+main{flex:1;display:flex;align-items:flex-start;justify-content:center;padding:10vh 16px 40px}
+.card{width:min(380px,100%);background:#fff;border:1px solid var(--line);border-radius:6px;padding:28px 28px 24px;box-shadow:0 4px 18px rgba(22,32,42,.06)}
+h1{font-size:22px;font-weight:600;margin:0 0 4px}
+p.sub{color:var(--muted);margin:0 0 22px}
+label{display:block;font-weight:600;font-size:13px;margin:14px 0 6px}
+input{width:100%;font:inherit;padding:9px 11px;border:1px solid #CED4DA;border-radius:4px;color:var(--ink)}
+input:focus-visible,button:focus-visible{outline:2px solid var(--pill);outline-offset:1px}
+button{width:100%;margin-top:22px;font:inherit;font-weight:600;padding:10px;border:0;border-radius:4px;background:var(--pill);color:#fff;cursor:pointer}
+button:disabled{opacity:.6;cursor:default}
+.err{display:none;margin-top:14px;padding:9px 12px;border-radius:4px;background:#FDECEC;border:1px solid #F1B8B8;color:#8A1F1F;font-size:13px}
+.err.show{display:block}
+</style>
+</head>
+<body>
+<header><span class="brand"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><path d="M7 8 L13 18 M19 8 L13 18 M7 8 L19 8" stroke="#8FA3B8" stroke-width="2" fill="none"/><circle cx="7" cy="8" r="4" fill="#0F6FDE"/><circle cx="19" cy="8" r="4" fill="#2E9B57"/><circle cx="13" cy="19" r="4.5" fill="#F0A020"/></svg>dagsflow</span></header>
+<main>
+  <form class="card" id="f" novalidate>
+    <h1>Sign in</h1>
+    <p class="sub">Use your dagsflow account.</p>
+    <label for="u">Username</label>
+    <input id="u" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required autofocus>
+    <label for="p">Password</label>
+    <input id="p" name="password" type="password" autocomplete="current-password" required>
+    <div class="err" id="err" role="alert"></div>
+    <button id="go" type="submit">Sign in</button>
+  </form>
+</main>
+<script>
+const next = () => { const n = new URLSearchParams(location.search).get("next") || "#/"; return "/" + (n.startsWith("#") ? n : "#/"); };
+// already signed in (or auth disabled): go straight to the app
+fetch("/api/v1/me", {headers:{"X-Dagsflow":"1"}}).then(r => { if(r.ok) location.replace(next()); });
+const err = document.getElementById("err"), go = document.getElementById("go");
+document.getElementById("f").addEventListener("submit", async e => {
+  e.preventDefault();
+  const username = document.getElementById("u").value.trim(), password = document.getElementById("p").value;
+  if(!username || !password){ err.textContent = "Enter your username and password."; err.classList.add("show"); return; }
+  go.disabled = true; go.textContent = "Signing in…"; err.classList.remove("show");
+  try{
+    const r = await fetch("/api/v1/login", {method:"POST", headers:{"Content-Type":"application/json","X-Dagsflow":"1"}, body:JSON.stringify({username, password})});
+    if(r.ok){ location.replace(next()); return; }
+    let m = "Sign in failed."; try{ m = (await r.json()).error || m }catch{}
+    err.textContent = m; err.classList.add("show");
+    document.getElementById("p").select();
+  }catch{ err.textContent = "Cannot reach the webserver."; err.classList.add("show"); }
+  go.disabled = false; go.textContent = "Sign in";
+});
+</script>
+</body>
+</html>

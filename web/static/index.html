@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dagsflow</title>
+<style>
+:root{
+  --canvas:#FFFFFF; --surface:#FFFFFF; --head:#F7F8F9; --line:#E4E7EB; --pill:#0F6FDE; --ink:#16202A; --muted:#5E6B78; --rule:#D3D9DF; --action:#1F5FD1;
+  --s-success:#2E9B57; --s-failed:#D23B3B; --s-running:#1FA7D6; --s-queued:#9AA5B1; --s-up_for_retry:#E0A21B;
+  --s-skipped:#E57FB8; --s-up_for_reschedule:#6FD3C8; --s-upstream_failed:#F08A2C; --s-none:#FFFFFF;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --code: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--canvas);color:var(--ink);font:14px/1.45 var(--sans);font-variant-numeric:tabular-nums}
+a{color:var(--action);text-decoration:none}
+a:hover{text-decoration:underline}
+button{font:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--action);outline-offset:2px}
+code,.id{font-family:var(--code);font-size:13px}
+
+header.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:8px;padding:0 20px;height:58px;background:#fff;color:var(--ink);box-shadow:0 2px 6px rgba(22,32,42,.12)}
+header.top .brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:18px;color:var(--ink);margin-right:18px;letter-spacing:-.01em}
+header.top .brand:hover{text-decoration:none}
+.menu{display:flex;align-items:center;gap:2px;height:100%}
+.menu>a,.dd>button{display:flex;align-items:center;height:100%;padding:0 12px;color:var(--ink);font-weight:600;font-size:14px;border:0;background:none;border-bottom:3px solid transparent}
+.menu>a:hover,.dd>button:hover{text-decoration:none;background:#F3F5F7}
+.menu>a.on,.dd.on>button{border-bottom-color:var(--pill)}
+.dd{position:relative;height:100%}
+.dd>button::after{content:"";margin-left:6px;border:4px solid transparent;border-top-color:#8A96A3;margin-top:4px}
+.ddm{display:none;position:absolute;top:100%;left:0;min-width:180px;background:#fff;border:1px solid var(--line);border-radius:4px;box-shadow:0 6px 18px rgba(22,32,42,.14);padding:4px 0;z-index:30}
+.dd.open .ddm{display:block}
+.ddm a,.ddm button,.ddm .info{display:block;width:100%;text-align:left;padding:8px 16px;color:var(--ink);font-weight:400;border:0;background:none;font-size:14px}
+.ddm a:hover,.ddm button:hover{background:#F0F4FA;text-decoration:none}
+.ddm .info{color:var(--muted);font-size:12px;border-bottom:1px solid var(--line);margin-bottom:4px}
+.ddm.right{left:auto;right:0}
+.clock{font-size:14px;font-weight:600;color:var(--ink);white-space:nowrap}
+.avatar{width:32px;height:32px;border-radius:50%;background:#DCE8FB;color:#1F4E9C;font-weight:700;display:flex;align-items:center;justify-content:center;font-size:13px}
+.userBtn{display:flex;align-items:center;gap:6px;border:0;background:none;padding:0 4px;height:100%}
+.sched{margin-left:auto;margin-right:12px;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+.sched i{width:8px;height:8px;border-radius:50%;background:var(--s-queued)}
+.sched.alive i{background:#2E9B57}
+.sched.dead{color:var(--s-failed)}
+.sched.dead i{background:var(--s-failed)}
+
+main{padding:20px 12px 40px;max-width:1920px;margin:0 auto}
+h1{font-size:22px;margin:0;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:13px}
+.panel{background:var(--surface);border:1px solid var(--rule);border-radius:6px;overflow-x:auto}
+.banner{padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px}
+.banner.warn{background:#FFF4E0;border:1px solid #F3D3A0}
+.banner.err{background:#FDECEC;border:1px solid #F1B8B8}
+.banner pre{margin:6px 0 0;white-space:pre-wrap;font:12px var(--code)}
+
+/* buttons */
+.btn{border:1px solid var(--rule);background:var(--surface);border-radius:5px;padding:6px 12px;font-weight:500}
+.btn:hover{border-color:#9FAAB5}
+.btn.primary{background:var(--action);border-color:var(--action);color:#fff}
+.btn.danger{color:var(--s-failed)}
+.btn:disabled{opacity:.5;cursor:default}
+.iconbtn{border:0;background:none;padding:4px 8px;border-radius:4px;color:var(--action);font-weight:600}
+.iconbtn:hover{background:#E6EDFA}
+
+/* toggle */
+.toggle{position:relative;width:36px;height:20px;border-radius:10px;border:0;background:#C9CFD6;padding:0;flex:none}
+.toggle::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.toggle[aria-checked="true"]{background:var(--pill)}
+.toggle[aria-checked="true"]::after{left:18px}
+
+/* dag list */
+table.list{width:100%;border-collapse:collapse}
+table.list th{text-align:left;font-weight:600;font-size:12px;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--rule)}
+table.list td{padding:12px 14px;border-bottom:1px solid #E7EBEF;vertical-align:middle}
+table.list tr:last-child td{border-bottom:0}
+table.list tr.paused .dagname{color:var(--muted)}
+.dagname{font-weight:600;font-family:var(--code);font-size:14px}
+.tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:9px;background:#E6EBF0;color:var(--muted);margin-right:4px}
+.dots{display:flex;gap:3px;align-items:center}
+.dot{width:12px;height:12px;border-radius:2px;border:1px solid rgba(0,0,0,.18);flex:none}
+.muted{color:var(--muted)}
+
+/* dag page */
+.dagHead{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+.dagHead .spacer{flex:1}
+.facts{display:flex;gap:22px;flex-wrap:wrap;color:var(--muted);font-size:13px;margin:6px 0 18px}
+.facts b{color:var(--ink);font-weight:600}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--rule);margin-bottom:16px}
+.tabs a{padding:8px 14px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs a.on{color:var(--ink);border-bottom-color:var(--ink);text-decoration:none}
+
+/* grid — the centrepiece: runs across, tasks down */
+.gridWrap{overflow-x:auto;padding:16px}
+table.grid{border-collapse:separate;border-spacing:3px 3px}
+table.grid th.task{text-align:left;font:13px var(--code);font-weight:400;padding-right:14px;white-space:nowrap;position:sticky;left:0;background:var(--surface)}
+table.grid td{padding:0}
+.cell{display:block;width:18px;height:18px;border-radius:3px;border:1px solid rgba(0,0,0,.1);padding:0}
+.cell:hover{transform:scale(1.15)}
+.runbar{display:flex;align-items:flex-end;height:46px}
+.runbar button{width:18px;border:0;border-radius:3px 3px 0 0;padding:0;min-height:6px}
+.cell.sel,.runbar button.sel{outline:2px solid var(--ink);outline-offset:1px}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--muted);padding:0 16px 14px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+
+/* graph */
+.graphTools{display:flex;gap:10px;align-items:center;padding:12px 16px;border-bottom:1px solid #E7EBEF}
+.graphWrap{overflow:auto;padding:16px}
+svg .node rect{stroke:rgba(0,0,0,.25);stroke-width:1}
+svg .node text{font:12px var(--code);fill:var(--ink);pointer-events:none}
+svg .node{cursor:pointer}
+svg .node:hover rect{stroke:var(--ink);stroke-width:2}
+svg .edge{fill:none;stroke:#9AA5B1;stroke-width:1.4}
+select,input,textarea{font:inherit;border:1px solid var(--rule);border-radius:5px;padding:6px 8px;background:#fff;color:var(--ink)}
+
+/* runs table */
+.stateTag{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600}
+.stateTag i{width:10px;height:10px;border-radius:2px;border:1px solid rgba(0,0,0,.12)}
+
+/* drawer */
+.scrim{position:fixed;inset:0;background:rgba(22,32,42,.25)}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(640px,100%);background:var(--surface);border-left:1px solid var(--rule);display:flex;flex-direction:column;box-shadow:-12px 0 32px rgba(22,32,42,.12)}
+.drawer header{padding:16px 20px;border-bottom:1px solid var(--rule);display:flex;gap:12px;align-items:flex-start}
+.drawer header h2{margin:0;font:600 16px var(--code)}
+.drawer .body{padding:16px 20px;overflow:auto;flex:1}
+dl.kv{display:grid;grid-template-columns:130px 1fr;gap:6px 12px;margin:0 0 16px;font-size:13px}
+dl.kv dt{color:var(--muted)}
+dl.kv dd{margin:0;word-break:break-all}
+pre.log{background:#16202A;color:#DCE3EA;padding:12px;border-radius:6px;font:12px/1.5 var(--code);white-space:pre-wrap;word-break:break-word;min-height:120px;max-height:52vh;overflow:auto;margin:0}
+pre.err{background:#FDECEC;color:#8A1F1F;padding:10px;border-radius:6px;font:12px var(--code);white-space:pre-wrap;margin:0 0 16px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;padding:14px 20px;border-top:1px solid var(--rule);align-items:center}
+.tries{display:flex;gap:4px;margin-bottom:8px}
+.tries button{border:1px solid var(--rule);background:#fff;border-radius:4px;padding:2px 10px;font-size:12px}
+.tries button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+h3{font-size:13px;margin:18px 0 8px}
+
+dialog{border:1px solid var(--rule);border-radius:8px;padding:0;width:min(520px,94vw)}
+dialog::backdrop{background:rgba(22,32,42,.35)}
+dialog form{padding:20px}
+dialog h2{margin:0 0 12px;font-size:17px}
+dialog label{display:block;font-size:13px;margin:12px 0 4px;color:var(--muted)}
+dialog textarea{width:100%;height:160px;font:12px var(--code)}
+dialog input{width:100%}
+dialog .row{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.formerr{color:var(--s-failed);font-size:13px;margin-top:8px}
+
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:8px 16px;border-radius:6px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
+#toast.show{opacity:1}
+.empty{padding:40px;text-align:center;color:var(--muted)}
+body:not(.can-User) .needs-User, body:not(.can-Op) .needs-Op, body:not(.can-Admin) .needs-Admin{display:none!important}
+.adminForm{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;padding:14px;border-top:1px solid #E7EBEF}
+.adminForm label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:3px}
+/* airflow-style DAG list */
+.errbar{background:#E9ECEF;border:1px solid #D6DBE0;border-radius:4px;margin-bottom:18px}
+.errbar>button{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;padding:12px 18px;color:#C62828;font-size:16px;text-align:left}
+.errbar>button b{font-weight:400}
+.errbar>button::after{content:"⌄";margin-left:auto;color:var(--ink);font-size:18px;line-height:1}
+.errbar .ico{width:18px;height:18px;border-radius:50%;background:#E53935;color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.errbar pre{margin:0;padding:0 18px 14px;white-space:pre-wrap;font:12px var(--code);color:#8A1F1F}
+.pageTitle{font-size:30px;font-weight:400;margin:6px 0 20px}
+.toolbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:16px}
+.seg{display:inline-flex;border:1px solid #CED4DA;border-radius:4px;overflow:hidden}
+.seg a{padding:6px 12px;color:var(--ink);display:flex;align-items:center;gap:8px;border-right:1px solid #CED4DA;font-size:14px}
+.seg a:last-child{border-right:0}
+.seg a:hover{text-decoration:none;background:#F3F5F7}
+.seg a.on{background:var(--pill);color:#fff}
+.seg .n{background:#51565C;color:#fff;border-radius:10px;padding:0 7px;font-size:12px;font-weight:700}
+.seg a.on .n{background:#fff;color:var(--pill)}
+.toolbar .grow{flex:1}
+.toolbar input{width:260px;padding:7px 12px;border-color:#CED4DA;border-radius:4px}
+.toolbar input.search{width:300px}
+.autoref{display:flex;align-items:center;gap:6px;font-size:14px}
+.sqbtn{border:1px solid #CED4DA;background:#fff;border-radius:4px;width:36px;height:34px;display:flex;align-items:center;justify-content:center;padding:0;color:var(--ink)}
+.sqbtn:hover{background:#F0F4FA}
+.sqbtn svg{width:16px;height:16px}
+table.dags{width:100%;border-collapse:collapse;font-size:14px}
+table.dags th{background:var(--head);text-align:left;font-weight:700;padding:10px 6px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);white-space:nowrap}
+table.dags th button.sort{border:0;background:none;padding:0;font-weight:700;display:inline-flex;align-items:center;gap:6px}
+table.dags th button.sort::after{content:"⇅";color:#9AA5B1;font-size:12px}
+table.dags th button.sort.asc::after{content:"↑";color:var(--ink)}
+table.dags th button.sort.desc::after{content:"↓";color:var(--ink)}
+table.dags td{padding:9px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
+table.dags tr:hover td{background:#FAFBFC}
+.dagcell a.dagname{font-family:var(--sans);font-weight:600;color:#1B4F9C;font-size:14px}
+.dagcell .tags{margin-top:3px}
+.badge{display:inline-block;font-size:11px;padding:1px 6px;border-radius:3px;background:#E3EEFB;color:#1B4F9C;margin-right:4px}
+.badge.grey{background:#E9ECEF;color:#495057}
+.badge.code{font-family:var(--code);background:#E9ECEF;color:var(--ink);font-size:11px;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.circles{display:flex;gap:2px}
+.circ{width:24px;height:24px;border-radius:50%;border:2px solid #DDE1E5;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:var(--ink);flex:none;background:#fff}
+a.circ:hover{text-decoration:none;box-shadow:0 0 0 2px #CFE0F7}
+.when{white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+.when i{width:8px;height:8px;border-radius:50%}
+.acts{display:flex}
+.acts button,.acts a{width:32px;height:32px;border:1px solid #CED4DA;background:#fff;margin-left:-1px;display:flex;align-items:center;justify-content:center;color:#1B4F9C;padding:0}
+.acts :first-child{border-radius:4px 0 0 4px;margin-left:0}
+.acts :last-child{border-radius:0 4px 4px 0}
+.acts button:hover,.acts a:hover{background:#F0F4FA}
+.acts .del{color:#D32F2F}
+.acts svg{width:15px;height:15px}
+.dd>button.dots3{border:0;background:none;font-size:18px;letter-spacing:1px;padding:2px 8px;color:var(--ink);height:auto}
+.dd>button.dots3::after{display:none}
+td .dd{height:auto}
+.pager{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:12px 4px;color:var(--muted);font-size:13px}
+.pager .pgs{display:flex;gap:4px}
+.pager button{border:1px solid #CED4DA;background:#fff;border-radius:4px;padding:4px 10px}
+.pager button.on{background:var(--pill);color:#fff;border-color:var(--pill)}
+.pager button:disabled{opacity:.4;cursor:default}
+td .toggle{margin-left:4px}
+@media (max-width:1350px){.hideMd{display:none}}
+@media (max-width:760px){
+  .tblwrap{overflow-x:auto}
+  main{padding:14px}
+  .hideSm{display:none}
+  .sched span{display:none}
+  table.list td,table.list th{padding:10px 8px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}.cell:hover{transform:none}}
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><path d="M7 8 L13 18 M19 8 L13 18 M7 8 L19 8" stroke="#8FA3B8" stroke-width="2" fill="none"/><circle cx="7" cy="8" r="4" fill="#0F6FDE"/><circle cx="19" cy="8" r="4" fill="#2E9B57"/><circle cx="13" cy="19" r="4.5" fill="#F0A020"/></svg>dagsflow</a>
+  <nav class="menu" aria-label="Main">
+    <a href="#/" data-nav="dags">DAGs</a>
+    <a href="#/admin?tab=datasets" data-nav="datasets">Datasets</a>
+    <div class="dd needs-Admin" data-nav="security"><button type="button" aria-haspopup="true">Security</button><div class="ddm"><a href="#/admin?tab=users">List Users</a></div></div>
+    <div class="dd" data-nav="browse"><button type="button" aria-haspopup="true">Browse</button><div class="ddm"><a href="#/admin?tab=errors">DAG Import Errors</a></div></div>
+    <div class="dd" data-nav="admin"><button type="button" aria-haspopup="true">Admin</button><div class="ddm"><a href="#/admin?tab=pools">Pools</a><a class="needs-Op" href="#/admin?tab=variables">Variables</a><a class="needs-Op" href="#/admin?tab=connections">Connections</a></div></div>
+  </nav>
+  <div class="sched" id="sched" title="Scheduler status"><i></i><span>Checking scheduler…</span></div>
+  <span class="clock" id="clock"></span>
+  <div class="dd" id="userMenu" hidden><button type="button" class="userBtn" aria-haspopup="true" aria-label="Account"><span class="avatar" id="avatar"></span></button>
+    <div class="ddm right"><div class="info" id="who"></div><button type="button" id="logoutBtn">Log out</button></div></div>
+</header>
+<main id="app"></main>
+
+<dialog id="triggerDlg">
+  <form method="dialog" id="triggerForm">
+    <h2>Trigger <span class="id" id="trgDag"></span></h2>
+    <label for="trgConf">Run config (JSON, overrides DAG params)</label>
+    <textarea id="trgConf" spellcheck="false"></textarea>
+    <label for="trgRunId">Run ID (optional)</label>
+    <input id="trgRunId" placeholder="Generated automatically">
+    <div class="formerr" id="trgErr" role="alert"></div>
+    <div class="row">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" id="trgGo" value="go">Trigger run</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const STATES = ["success","running","queued","up_for_retry","up_for_reschedule","failed","upstream_failed","skipped","none"];
+const $app = document.getElementById("app");
+let refreshTimer = null, drawer = null, logTimer = null;
+
+// ---- utilities -------------------------------------------------------------
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const st = s => (s && s !== "") ? s : "none";
+const color = s => `var(--s-${st(s)})`;
+const enc = encodeURIComponent;
+function fmt(t){ if(!t) return "–"; const d=new Date(t); if(isNaN(d)||d.getFullYear()<2) return "–";
+  const p=n=>String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}, ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
+function dur(a,b){ if(!a) return "–"; const ms=(b?new Date(b):new Date())-new Date(a); if(ms<0) return "–";
+  const s=Math.round(ms/1000); if(s<60) return s+"s"; const m=Math.floor(s/60); if(m<60) return `${m}m ${s%60}s`; return `${Math.floor(m/60)}h ${m%60}m`; }
+function toast(msg){ const t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"),2600); }
+async function api(path, opts={}){
+  const res = await fetch("/api/v1"+path, {...opts, headers:{"Content-Type":"application/json","X-Dagsflow":"1",...(opts.headers||{})}});
+  if(res.status===401 && path!=="/login"){ location.href = "/login?next="+encodeURIComponent(location.hash||"#/"); throw new Error("Please sign in"); }
+  if(res.status===204) return null;
+  if(!res.ok){ let m=res.statusText; try{ m=(await res.json()).error||m }catch{} throw new Error(m); }
+  const ct=res.headers.get("Content-Type")||"";
+  return ct.includes("json") ? res.json() : res.text();
+}
+const post = (path, body, method="POST") => api(path, {method, body:JSON.stringify(body||{})});
+const ME = {role:"Viewer"}; const can = r => ({Viewer:1,User:2,Op:3,Admin:4})[ME.role] >= ({Viewer:1,User:2,Op:3,Admin:4})[r];
+const stateTag = s => `<span class="stateTag"><i style="background:${color(s)}"></i>${esc(st(s))}</span>`;
+const legend = () => `<div class="legend">${STATES.map(s=>`<span><i class="dot" style="background:${color(s)}"></i>${s}</span>`).join("")}</div>`;
+const route = () => { const [path,q] = location.hash.slice(1).split("?"); return {parts:(path||"/").split("/").filter(Boolean).map(decodeURIComponent), q:new URLSearchParams(q||"")}; };
+function setQuery(k,v){ const r=route(); v==null?r.q.delete(k):r.q.set(k,v); location.hash="#/"+r.parts.map(enc).join("/")+(r.q.toString()?"?"+r.q:""); }
+
+// ---- scheduler status ------------------------------------------------------
+async function health(){
+  const el=document.getElementById("sched");
+  try{ const h=await api("/health");
+    el.className="sched "+(h.scheduler_alive?"alive":"dead");
+    el.querySelector("span").textContent = h.scheduler_alive ? `Scheduler running (pid ${h.scheduler_pid})` : "Scheduler not running: queued runs will wait";
+  }catch{ el.className="sched dead"; el.querySelector("span").textContent="Webserver unreachable"; }
+}
+
+// ---- DAG list (Airflow-style) -----------------------------------------------
+const RUN_STATES = ["queued","success","running","failed"];
+const TASK_STATES = ["success","running","failed","upstream_failed","skipped","up_for_retry","up_for_reschedule","queued","none"];
+const ICON = {
+  play:'<svg viewBox="0 0 16 16"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>',
+  grid:'<svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>',
+  trash:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.8 9.5h6.4L12 4"/></svg>',
+  refresh:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3.5H10"/></svg>',
+};
+let listData = null;
+const PAGE = 25;
+const qget = (k,d="") => route().q.get(k) ?? d;
+const circ = (state, n, title, href) => {
+  const style = n ? `border-color:${color(state)}` : "";
+  const inner = n ? (n>999?Math.round(n/1000)+"k":n) : "";
+  const t = `${title}: ${n||0}`;
+  return href && n ? `<a class="circ" href="${href}" style="${style}" title="${esc(t)}" aria-label="${esc(t)}">${inner}</a>`
+                   : `<span class="circ" style="${style}" title="${esc(t)}" aria-label="${esc(t)}">${inner}</span>`;
+};
+function filteredDags(){
+  const status = qget("status","all"), last = qget("last"), tag = qget("tags").trim().toLowerCase(), search = qget("search").trim().toLowerCase();
+  let rows = listData.dags.filter(d =>
+    (status==="all" || (status==="active") === !d.is_paused) &&
+    (!last || (last==="running" ? d.active_runs>0 : d.last_run?.state==="failed")) &&
+    (!tag || d.tags.some(t=>t.toLowerCase().includes(tag))) &&
+    (!search || d.dag_id.toLowerCase().includes(search) || d.owner.toLowerCase().includes(search)));
+  const sort = qget("sort","dag_id"), dir = qget("dir","asc")==="desc" ? -1 : 1;
+  const key = {dag_id:d=>d.dag_id, owner:d=>d.owner, last_run:d=>d.last_run?.logical_date||"", next_run:d=>d.next_data_interval_start||""}[sort] || (d=>d.dag_id);
+  rows.sort((a,b)=> key(a)<key(b) ? -dir : key(a)>key(b) ? dir : 0);
+  return rows;
+}
+function listHref(changes){
+  const r = route(); for(const [k,v] of Object.entries(changes)) (v===""||v==null) ? r.q.delete(k) : r.q.set(k,v);
+  if(!("page" in changes)) r.q.delete("page");
+  return "#/"+(r.q.toString()?"?"+r.q:"");
+}
+async function viewList(){
+  listData = await api("/dags");
+  const tb = document.getElementById("dagToolbar"), f = document.activeElement;
+  if(tb && f && tb.contains(f) && f.tagName==="INPUT"){ renderListTable(); return; } // keep focus while typing
+  const errs = Object.entries(listData.import_errors||{});
+  const all = listData.dags, act = all.filter(d=>!d.is_paused).length;
+  const running = all.filter(d=>d.active_runs>0).length, failed = all.filter(d=>d.last_run?.state==="failed").length;
+  const status = qget("status","all"), last = qget("last");
+  const seg = (k,v,label,n,cur) => `<a href="${listHref({[k]: cur===v && k==="last" ? "" : v})}" class="${cur===v?"on":""}">${label} <span class="n">${n}</span></a>`;
+  $app.innerHTML = `
+    ${errs.length?`<div class="errbar"><button type="button" aria-expanded="false" onclick="const p=this.nextElementSibling;p.hidden=!p.hidden;this.setAttribute('aria-expanded',!p.hidden)"><span class="ico">!</span><b>DAG Import Errors (${errs.length})</b></button><pre hidden>${errs.map(([k,v])=>esc(k+"\n"+v)).join("\n\n")}</pre></div>`:""}
+    <h1 class="pageTitle">DAGs</h1>
+    <div class="toolbar" id="dagToolbar">
+      <div class="seg" role="group" aria-label="Filter by state">${seg("status","all","All",all.length,status)}${seg("status","active","Active",act,status)}${seg("status","paused","Paused",all.length-act,status)}</div>
+      <div class="seg" role="group" aria-label="Filter by last run">${seg("last","running","Running",running,last)}${seg("last","failed","Failed",failed,last)}</div>
+      <span class="grow"></span>
+      <input id="tagFilter" placeholder="Filter DAGs by tag" value="${esc(qget("tags"))}" aria-label="Filter DAGs by tag">
+      <input id="dagSearch" class="search" placeholder="Search DAGs" value="${esc(qget("search"))}" aria-label="Search DAGs">
+      <label class="autoref"><button type="button" class="toggle" role="switch" id="autoRef" aria-checked="${autoRefresh()}" aria-label="Auto-refresh"></button>Auto-refresh</label>
+      <button type="button" class="sqbtn" id="refreshBtn" title="Refresh" aria-label="Refresh">${ICON.refresh}</button>
+    </div>
+    <div id="dagTable"></div>`;
+  renderListTable();
+}
+function renderListTable(){
+  const box = document.getElementById("dagTable"); if(!box) return;
+  const rows = filteredDags(), total = rows.length;
+  const pages = Math.max(1, Math.ceil(total/PAGE)), page = Math.min(pages, Math.max(1, +qget("page","1")||1));
+  const shown = rows.slice((page-1)*PAGE, page*PAGE);
+  const sort = qget("sort","dag_id"), dir = qget("dir","asc");
+  const sh = (k,label) => `<button type="button" class="sort ${sort===k?dir:""}" data-sort="${k}">${label}</button>`;
+  if(!listData.dags.length){ box.innerHTML = `<div class="panel empty">No DAGs yet. Put a <code>.go</code> or <code>.yaml</code> file in the DAG folder; it is picked up within the rescan interval.</div>`; return; }
+  let h = `<div class="tblwrap"><table class="dags"><thead><tr>
+    <th style="width:50px"><span class="sr" title="Pause/unpause">&nbsp;</span></th><th>${sh("dag_id","DAG")}</th><th class="hideMd">${sh("owner","Owner")}</th>
+    <th>Runs</th><th>Schedule</th><th>${sh("last_run","Last Run")}</th><th class="hideMd">${sh("next_run","Next Run")}</th>
+    <th class="hideMd">Recent Tasks</th><th style="text-align:center">Actions</th><th>Links</th></tr></thead><tbody>`;
+  for(const d of shown){
+    const id = enc(d.dag_id), lr = d.last_run;
+    h += `<tr>
+      <td><button class="toggle needs-User" role="switch" aria-checked="${!d.is_paused}" aria-label="${d.is_paused?"Unpause":"Pause"} ${esc(d.dag_id)}" data-pause="${esc(d.dag_id)}" data-paused="${d.is_paused}"></button></td>
+      <td class="dagcell"><a class="dagname" href="#/dags/${id}">${esc(d.dag_id)}</a>
+        <div class="tags">${d.source!=="go"?`<span class="badge grey" title="${esc(d.source)}">${/\.ya?ml$/.test(d.source)?"yaml":"go"}</span>`:""}${d.tags.map(t=>`<a class="badge" href="${listHref({tags:t})}">${esc(t)}</a>`).join("")}</div></td>
+      <td class="hideMd"><span class="badge grey">${esc(d.owner)}</span></td>
+      <td><div class="circles">${RUN_STATES.map(s=>circ(s, d.run_counts[s]||0, s, `#/dags/${id}?tab=runs`)).join("")}</div></td>
+      <td><span class="badge code" title="${esc(d.schedule)}">${esc(d.schedule.startsWith("datasets")?"Dataset":d.schedule)}</span></td>
+      <td>${lr?`<a class="when" href="#/dags/${id}?tab=grid&run=${enc(lr.dag_run_id)}" title="${esc(lr.dag_run_id)} (${esc(lr.state)})"><i style="background:${color(lr.state)}"></i>${fmt(lr.logical_date)}</a>`:""}</td>
+      <td class="hideMd"><span class="when">${d.schedule.startsWith("datasets")?"On dataset update":d.is_paused&&!d.next_data_interval_start?"":fmt(d.next_data_interval_start).replace("–","")}</span></td>
+      <td class="hideMd"><div class="circles">${TASK_STATES.map(s=>circ(s, d.recent_task_counts[s]||0, s)).join("")}</div></td>
+      <td><div class="acts" style="justify-content:center">
+        <button class="needs-User" data-trigger="${esc(d.dag_id)}" title="Trigger DAG" aria-label="Trigger ${esc(d.dag_id)}">${ICON.play}</button>
+        <a href="#/dags/${id}?tab=grid" title="Grid view" aria-label="Grid view of ${esc(d.dag_id)}">${ICON.grid}</a>
+        <button class="del needs-Op" data-deldag="${esc(d.dag_id)}" title="Delete DAG runs and logs" aria-label="Delete ${esc(d.dag_id)} metadata">${ICON.trash}</button></div></td>
+      <td><div class="dd"><button type="button" class="dots3" aria-haspopup="true" aria-label="Links for ${esc(d.dag_id)}">···</button>
+        <div class="ddm right"><a href="#/dags/${id}?tab=grid">Grid</a><a href="#/dags/${id}?tab=graph">Graph</a><a href="#/dags/${id}?tab=runs">Runs</a><a href="#/dags/${id}?tab=details">Details</a></div></div></td>
+    </tr>`;
+  }
+  if(!shown.length) h += `<tr><td colspan="10" class="empty">No DAGs match these filters. <a href="#/">Clear filters</a></td></tr>`;
+  h += `</tbody></table></div>`;
+  const nums = []; for(let i=Math.max(1,page-2); i<=Math.min(pages,page+2); i++) nums.push(i);
+  h += `<div class="pager"><span>Showing ${total?(page-1)*PAGE+1:0}–${Math.min(page*PAGE,total)} of ${total} DAGs</span>
+    <span class="pgs"><button data-page="${page-1}" ${page<=1?"disabled":""} aria-label="Previous page">‹</button>${nums.map(n=>`<button data-page="${n}" class="${n===page?"on":""}">${n}</button>`).join("")}<button data-page="${page+1}" ${page>=pages?"disabled":""} aria-label="Next page">›</button></span></div>`;
+  box.innerHTML = h;
+}
+let typeTimer = null;
+document.addEventListener("input", e=>{
+  if(e.target.id!=="dagSearch" && e.target.id!=="tagFilter") return;
+  clearTimeout(typeTimer);
+  typeTimer = setTimeout(()=>{ // update the URL without a full re-render so the input keeps focus
+    const k = e.target.id==="dagSearch" ? "search" : "tags";
+    history.replaceState(null, "", listHref({[k]: e.target.value}));
+    renderListTable();
+  }, 200);
+});
+const autoRefresh = () => localStorage.getItem("dagsflow.autorefresh") !== "off";
+
+// ---- DAG detail ------------------------------------------------------------
+let current = null; // last loaded DAG detail
+async function viewDag(id, q){
+  const tab = q.get("tab") || "grid";
+  const d = current = await api(`/dags/${enc(id)}?runs=${tab==="runs"?100:30}`);
+  const tabs = ["grid","graph","runs","details"].map(t=>`<a href="#/dags/${enc(id)}?tab=${t}" class="${t===tab?"on":""}">${t[0].toUpperCase()+t.slice(1)}</a>`).join("");
+  let html = `<div class="dagHead">
+      <button class="toggle needs-User" role="switch" aria-checked="${!d.is_paused}" aria-label="${d.is_paused?"Unpause":"Pause"} DAG" data-pause="${esc(d.dag_id)}" data-paused="${d.is_paused}"></button>
+      <h1 class="id" style="font-size:20px">${esc(d.dag_id)}</h1>
+      <span class="spacer"></span>
+      <button class="btn primary needs-User" data-trigger="${esc(d.dag_id)}">Trigger run</button>
+    </div>
+    <div class="facts"><span>Schedule <b><code>${esc(d.schedule||"None")}</code></b></span>
+      <span>Next interval <b>${fmt(d.next_data_interval_start)}</b></span>
+      <span>Max active runs <b>${d.max_active_runs}</b></span>
+      <span>Catchup <b>${d.catchup?"on":"off"}</b></span>
+      <span>Runs <b>${d.total_runs}</b></span>
+      ${d.is_paused?`<span style="color:var(--s-up_for_retry)"><b style="color:inherit">Paused</b>: nothing will run</span>`:""}</div>
+    <nav class="tabs">${tabs}</nav>`;
+  if(tab==="grid") html += gridView(d, q.get("run"));
+  if(tab==="graph") html += graphView(d, q.get("run"));
+  if(tab==="runs") html += runsView(d);
+  if(tab==="details") html += detailsView(d);
+  $app.innerHTML = html;
+}
+
+function gridView(d, selRun){
+  if(!d.runs.length) return `<div class="panel empty">No runs yet. Trigger one, or wait for the scheduler to create the next interval.</div>`;
+  const maxDur = Math.max(1,...d.runs.map(r=>r.start_date?(new Date(r.end_date||Date.now())-new Date(r.start_date)):0));
+  let h = `<div class="panel"><div class="gridWrap"><table class="grid"><thead><tr><th></th>`;
+  for(const r of d.runs){
+    const ms = r.start_date?(new Date(r.end_date||Date.now())-new Date(r.start_date)):0;
+    h += `<td><div class="runbar"><button class="${r.dag_run_id===selRun?"sel":""}" style="background:${color(r.state)};height:${Math.max(6,Math.round(ms/maxDur*46))}px"
+      title="${esc(r.dag_run_id)}\n${esc(r.state)} · ${dur(r.start_date,r.end_date)}" aria-label="Run ${esc(r.dag_run_id)}, ${esc(r.state)}" data-run="${esc(r.dag_run_id)}"></button></div></td>`;
+  }
+  h += `</tr></thead><tbody>`;
+  for(const t of d.tasks){
+    h += `<tr><th class="task" scope="row">${esc(t.task_id)}${t.is_mapped?" [ ]":""}${t.is_sensor?" ◷":""}</th>`;
+    for(const r of d.runs){
+      const s = st(r.task_states?.[t.task_id]);
+      h += `<td><button class="cell ${r.dag_run_id===selRun?"sel":""}" style="background:${color(s)}" title="${esc(t.task_id)}\n${esc(r.dag_run_id)}\n${s}"
+        aria-label="${esc(t.task_id)} in ${esc(r.dag_run_id)}: ${s}" data-ti="${esc(r.dag_run_id)}|${esc(t.task_id)}"></button></td>`;
+    }
+    h += `</tr>`;
+  }
+  return h + `</tbody></table></div>${legend()}</div>
+    <p class="sub">Columns are runs, oldest on the left; bar height is run duration. Select a square to see its log, or a bar to manage the whole run.</p>`;
+}
+
+function graphView(d, selRun){
+  const run = d.runs.find(r=>r.dag_run_id===selRun) || d.runs[d.runs.length-1];
+  // layer = longest path from a root (tasks arrive in topological order)
+  const layer = {}; for(const t of d.tasks) layer[t.task_id] = t.upstream.length ? Math.max(...t.upstream.map(u=>layer[u]+1)) : 0;
+  const cols = []; for(const t of d.tasks) (cols[layer[t.task_id]] ||= []).push(t.task_id);
+  const W=190,H=34,GX=60,GY=16,pos={};
+  cols.forEach((c,x)=>c.forEach((id,y)=>pos[id]={x:16+x*(W+GX), y:16+y*(H+GY)}));
+  const width = 32+cols.length*(W+GX)-GX, height = 32+Math.max(...cols.map(c=>c.length))*(H+GY)-GY;
+  let edges="", nodes="";
+  for(const t of d.tasks) for(const u of t.upstream){
+    const a=pos[u], b=pos[t.task_id], x1=a.x+W, y1=a.y+H/2, x2=b.x, y2=b.y+H/2, mx=(x1+x2)/2;
+    edges += `<path class="edge" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}" marker-end="url(#arr)"/>`;
+  }
+  for(const t of d.tasks){
+    const p=pos[t.task_id], s=st(run?.task_states?.[t.task_id]), dark=["failed","success","running","upstream_failed"].includes(s);
+    const label = t.task_id.length>24 ? t.task_id.slice(0,23)+"…" : t.task_id;
+    nodes += `<g class="node" tabindex="0" role="button" aria-label="${esc(t.task_id)}: ${s}" data-ti="${esc(run?.dag_run_id||"")}|${esc(t.task_id)}">
+      <title>${esc(t.task_id)} (${s}, ${esc(t.trigger_rule)})</title>
+      <rect x="${p.x}" y="${p.y}" width="${W}" height="${H}" rx="5" fill="${color(s)}"/>
+      <text x="${p.x+10}" y="${p.y+H/2+4}" style="fill:${dark?"#fff":"var(--ink)"}">${esc(label)}${t.is_branch?" ⑂":""}${t.is_mapped?" [ ]":""}${t.is_sensor?" ◷":""}</text></g>`;
+  }
+  const opts = d.runs.slice().reverse().map(r=>`<option value="${esc(r.dag_run_id)}" ${r===run?"selected":""}>${esc(r.dag_run_id)} (${esc(r.state)})</option>`).join("");
+  return `<div class="panel"><div class="graphTools"><label for="runSel" class="sub">Colour by run</label>
+      ${d.runs.length?`<select id="runSel">${opts}</select>`:`<span class="muted">No runs yet: showing structure only</span>`}</div>
+    <div class="graphWrap"><svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Task dependency graph">
+      <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9AA5B1"/></marker></defs>
+      ${edges}${nodes}</svg></div>${legend()}</div>`;
+}
+
+function runsView(d){
+  if(!d.runs.length) return `<div class="panel empty">No runs yet.</div>`;
+  let h = `<div class="panel"><table class="list"><thead><tr><th>Run</th><th>State</th><th>Type</th><th>Logical date</th><th class="hideSm">Started</th><th>Duration</th></tr></thead><tbody>`;
+  for(const r of d.runs.slice().reverse()){
+    h += `<tr><td><button class="iconbtn id" style="padding:0" data-run="${esc(r.dag_run_id)}">${esc(r.dag_run_id)}</button></td><td>${stateTag(r.state)}</td>
+      <td>${esc(r.run_type)}</td><td>${fmt(r.logical_date)}</td><td class="hideSm">${fmt(r.start_date)}</td><td>${dur(r.start_date,r.end_date)}</td></tr>`;
+  }
+  return h + `</tbody></table></div>`;
+}
+
+function detailsView(d){
+  let h = `<div class="facts"><span>Source <b>${esc(d.source)}</b></span></div><div class="panel"><table class="list"><thead><tr><th>Task</th><th>Upstream</th><th>Trigger rule</th><th>Retries</th><th>Timeout</th><th>Pool</th><th>Priority</th><th>SLA</th><th>Outlets</th></tr></thead><tbody>`;
+  for(const t of d.tasks) h += `<tr><td class="id">${esc(t.task_id)}${t.is_branch?' <span class="tag">branch</span>':""}${t.is_mapped?' <span class="tag">mapped</span>':""}${t.is_sensor?' <span class="tag">sensor</span>':""}</td><td class="id">${esc(t.upstream.join(", ")||"–")}</td><td><code>${esc(t.trigger_rule)}</code></td><td>${t.retries}</td><td>${esc(t.timeout)}</td><td>${esc(t.pool)}</td><td>${t.priority_weight}</td><td>${esc(t.sla||"–")}</td><td class="id">${esc((t.outlets||[]).join(", ")||"–")}</td></tr>`;
+  return h + `</tbody></table></div><h3>Params</h3><pre class="log" style="min-height:0">${esc(JSON.stringify(d.params||{},null,2))}</pre>`;
+}
+
+// ---- drawer: run or task instance ------------------------------------------
+function closeDrawer(){ drawer?.remove(); drawer=null; clearInterval(logTimer); }
+async function openDrawer(dagId, runId, taskId, keepTry, mapIndex=-1){
+  const run = await api(`/dags/${enc(dagId)}/dagRuns/${enc(runId)}`);
+  const kids = (run.mapped_task_instances||{})[taskId] || [];
+  const isTask = !!taskId, ti = isTask ? (mapIndex>=0 ? kids[mapIndex] : run.task_instances[taskId]) : null;
+  const wasOpen = !!drawer; let scroll = 0;
+  if(wasOpen){ scroll = drawer.querySelector(".body").scrollTop; drawer.remove(); }
+  drawer = document.createElement("div");
+  const runFinished = run.state==="success"||run.state==="failed";
+  let body = "";
+  if(isTask){
+    const tries = ti.try_number||0, sel = keepTry && keepTry<=tries ? keepTry : tries;
+    const td = current?.tasks.find(t=>t.task_id===taskId);
+    body = `<dl class="kv"><dt>State</dt><dd>${stateTag(ti.state)}</dd><dt>Run</dt><dd class="id">${esc(runId)}</dd><dt>Pool</dt><dd>${esc(td?.pool||"")}</dd>
+      <dt>Attempts</dt><dd>${tries}</dd><dt>Started</dt><dd>${fmt(ti.start_date)}</dd><dt>Ended</dt><dd>${fmt(ti.end_date)}</dd>
+      <dt>Duration</dt><dd>${dur(ti.start_date,ti.end_date)}</dd><dt>Trigger rule</dt><dd><code>${esc(current?.tasks.find(t=>t.task_id===taskId)?.trigger_rule||"")}</code></dd></dl>
+      ${ti.error?`<pre class="err">${esc(ti.error)}</pre>`:""}
+      ${kids.length && mapIndex<0 ? `<h3>Mapped instances (${kids.length})</h3><div class="dots" style="flex-wrap:wrap;gap:4px">${kids.map(k=>`<button class="cell" style="background:${color(k.state)}" title="[${k.map_index}] ${st(k.state)}" aria-label="Instance ${k.map_index}: ${st(k.state)}" data-mi="${k.map_index}"></button>`).join("")}</div><p class="sub">Select an instance to see its log.</p>` : ""}
+      ${mapIndex>=0?`<p><button class="iconbtn" style="padding:0" data-mi="-1">Back to all instances</button></p>`:""}
+      <h3>Log</h3>${tries?`<div class="tries">${Array.from({length:tries},(_,i)=>`<button data-try="${i+1}" class="${i+1===sel?"on":""}">Attempt ${i+1}</button>`).join("")}</div><pre class="log" id="logBox">Loading…</pre>`
+        :kids.length&&mapIndex<0?`<p class="muted">Logs are per mapped instance.</p>`:`<p class="muted">This task has not started in this run${ti.state==="skipped"?": it was skipped":ti.state==="upstream_failed"?": an upstream task failed":""}.</p>`}`;
+    drawer._try = sel;
+  } else {
+    const counts = {}; Object.values(run.task_instances).forEach(t=>counts[st(t.state)]=(counts[st(t.state)]||0)+1);
+    body = `<dl class="kv"><dt>State</dt><dd>${stateTag(run.state)}</dd><dt>Type</dt><dd>${esc(run.run_type)}</dd>
+      <dt>Logical date</dt><dd>${fmt(run.logical_date)}</dd><dt>Data interval</dt><dd>${fmt(run.data_interval_start)} → ${fmt(run.data_interval_end)}</dd>
+      <dt>Started</dt><dd>${fmt(run.start_date)}</dd><dt>Duration</dt><dd>${dur(run.start_date,run.end_date)}</dd>
+      <dt>Tasks</dt><dd>${Object.entries(counts).map(([s,n])=>`${stateTag(s)} ${n}`).join("&nbsp;&nbsp; ")}</dd></dl>
+      <h3>Task instances</h3><table class="list"><tbody>${(current?.tasks||[]).map(t=>{const x=run.task_instances[t.task_id]||{};
+        return `<tr><td><button class="iconbtn id" style="padding:0" data-ti="${esc(runId)}|${esc(t.task_id)}">${esc(t.task_id)}</button></td><td>${stateTag(x.state)}</td><td>${dur(x.start_date,x.end_date)}</td></tr>`}).join("")}</tbody></table>
+      <h3>Conf</h3><pre class="log" style="min-height:0">${esc(JSON.stringify(run.conf||{},null,2))}</pre>`;
+  }
+  const actions = isTask
+    ? `<button class="btn needs-User" data-clear="task" ${runFinished?"":"disabled"}>Clear task</button>
+       <button class="btn needs-User" data-clear="down" ${runFinished?"":"disabled"}>Clear task and downstream</button>`
+    : `<button class="btn needs-User" data-clear="failed" ${runFinished?"":"disabled"}>Clear failed tasks</button>
+       <button class="btn danger needs-User" data-clear="all" ${runFinished?"":"disabled"}>Clear whole run</button>`;
+  drawer.innerHTML = `<div class="scrim" data-close></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="${isTask?"Task instance":"Run"} details">
+    <header><div style="flex:1;min-width:0"><h2>${esc(isTask?taskId+(mapIndex>=0?`[${mapIndex}]`:""):runId)}</h2><div class="sub">${esc(dagId)}</div></div>
+      <button class="iconbtn" data-close aria-label="Close">Close</button></header>
+    <div class="body">${body}</div>
+    <div class="actions">${actions}<span class="sub">${runFinished?"Cleared tasks rerun on the next scheduler loop.":"Clearing is available once the run finishes."}</span></div></aside>`;
+  document.body.appendChild(drawer);
+  drawer._ctx = {dagId, runId, taskId, mapIndex, state: isTask?ti.state:run.state};
+  drawer.querySelector(".body").scrollTop = scroll;
+  if(!wasOpen) drawer.querySelector("[data-close].iconbtn").focus();
+  if(isTask && ti.try_number) loadLog(true);
+  clearInterval(logTimer);
+  const live = ["running","queued","up_for_retry","up_for_reschedule"].includes(isTask?ti.state:run.state);
+  if(live) logTimer = setInterval(()=>drawer && openDrawer(dagId, runId, taskId, drawer._try, mapIndex), 2500);
+}
+async function loadLog(stick){
+  const {dagId, runId, taskId} = drawer._ctx, box = drawer.querySelector("#logBox"); if(!box) return;
+  const mi = drawer._ctx.mapIndex ?? -1;
+  try{ box.textContent = await api(`/dags/${enc(dagId)}/dagRuns/${enc(runId)}/taskInstances/${enc(taskId)}/logs/${drawer._try}${mi>=0?`?map_index=${mi}`:""}`); }
+  catch(e){ box.textContent = e.message; }
+  if(stick) box.scrollTop = box.scrollHeight;
+}
+async function clearAction(kind){
+  const {dagId, runId, taskId} = drawer._ctx;
+  const body = {task_ids: taskId?[taskId]:[], include_downstream: kind==="down", only_failed: kind==="failed"};
+  const what = {task:`task ${taskId}`, down:`${taskId} and everything downstream`, failed:"all failed tasks", all:"every task"}[kind];
+  if(!confirm(`Clear ${what} in ${runId}? They will run again.`)) return;
+  try{ const r = await post(`/dags/${enc(dagId)}/dagRuns/${enc(runId)}/clear`, body);
+    toast(r.cleared.length ? `Cleared ${r.cleared.length} task${r.cleared.length>1?"s":""}` : "Nothing to clear"); closeDrawer(); render(); }
+  catch(e){ toast(e.message); }
+}
+
+// ---- trigger dialog --------------------------------------------------------
+async function openTrigger(dagId){
+  const dlg = document.getElementById("triggerDlg");
+  document.getElementById("trgDag").textContent = dagId;
+  document.getElementById("trgErr").textContent = "";
+  document.getElementById("trgRunId").value = "";
+  let params = {}; try{ params = (current?.dag_id===dagId ? current : await api(`/dags/${enc(dagId)}?runs=1`)).params||{} }catch{}
+  document.getElementById("trgConf").value = JSON.stringify(params, null, 2);
+  dlg.dataset.dag = dagId; dlg.showModal();
+}
+document.getElementById("triggerForm").addEventListener("submit", async e=>{
+  if(e.submitter?.value !== "go") return;
+  e.preventDefault();
+  const dlg = document.getElementById("triggerDlg"), err = document.getElementById("trgErr");
+  let conf; try{ conf = JSON.parse(document.getElementById("trgConf").value || "{}"); if(typeof conf!=="object"||Array.isArray(conf)) throw 0; }
+  catch{ err.textContent = "Config must be a JSON object, for example {\"param2\": 42}."; return; }
+  try{ const r = await post(`/dags/${enc(dlg.dataset.dag)}/dagRuns`, {conf, dag_run_id: document.getElementById("trgRunId").value.trim()});
+    dlg.close(); toast(`Queued ${r.dag_run_id}`); render(); }
+  catch(ex){ err.textContent = ex.message; }
+});
+
+
+// ---- admin -----------------------------------------------------------------
+async function viewAdmin(tab){
+  const tabs = [["pools","Pools"],["variables","Variables"],["connections","Connections"],["datasets","Datasets"],["errors","Import errors"],["users","Users"]]
+    .filter(([k])=> (k!=="variables"&&k!=="connections"||can("Op")) && (k!=="users"||can("Admin")))
+    .map(([k,l])=>`<a href="#/admin?tab=${k}" class="${k===tab?"on":""}">${l}</a>`).join("");
+  let h = `<div class="dagHead"><h1>Admin</h1></div><nav class="tabs">${tabs}</nav>`;
+  if(tab==="pools"){
+    const {pools} = await api("/pools");
+    h += `<div class="panel"><table class="list"><thead><tr><th>Pool</th><th>Slots</th><th>Running</th><th>Queued</th><th>Description</th><th></th></tr></thead><tbody>${pools.map(p=>`<tr><td class="id">${esc(p.name)}</td><td>${p.slots}</td><td>${p.running_slots}</td><td>${p.queued_slots}</td><td>${esc(p.description)}</td><td style="text-align:right">${p.name!=="default_pool"?`<button class="iconbtn needs-Op" data-admin="delpool" data-k="${esc(p.name)}">Delete</button>`:""}</td></tr>`).join("")}</tbody></table>
+      <div class="adminForm needs-Op"><label>Name<input id="poolName" placeholder="bigquery"></label><label>Slots<input id="poolSlots" type="number" min="0" value="4" style="width:90px"></label><label>Description<input id="poolDesc"></label><button class="btn primary" data-admin="setpool">Save pool</button></div></div>
+      <p class="sub">Tasks join a pool with <code>dag.WithPool("name")</code> or <code>pool:</code> in YAML. A pool limits how many of its tasks run at once across all DAGs.</p>`;
+  }
+  if(tab==="variables"){
+    const {variables, encryption_enabled} = await api("/variables");
+    h += encryption_enabled?"":`<div class="banner warn">DAGSFLOW_FERNET_KEY is not set, so variables and connections are stored unencrypted. Generate one with <code>dagsflow-go config gen-key</code>.</div>`;
+    h += `<div class="panel"><table class="list"><thead><tr><th>Key</th><th>Value</th><th>Encrypted</th><th>Description</th><th></th></tr></thead><tbody>${variables.length?variables.map(v=>`<tr><td class="id">${esc(v.key)}</td><td class="id" style="max-width:420px;word-break:break-all">${esc(v.value)}</td><td>${v.encrypted?"yes":"no"}</td><td>${esc(v.description)}</td><td style="text-align:right"><button class="iconbtn" data-admin="delvar" data-k="${esc(v.key)}">Delete</button></td></tr>`).join(""):`<tr><td colspan="5" class="muted">No variables yet.</td></tr>`}</tbody></table>
+      <div class="adminForm"><label>Key<input id="varKey"></label><label>Value<input id="varVal" style="width:280px"></label><label>Description<input id="varDesc"></label><button class="btn primary" data-admin="setvar">Save variable</button></div></div>
+      <p class="sub">Read in tasks with <code>dag.GetVariable("key")</code> or <code>{{ var "key" }}</code> in templates. Env vars <code>DAGSFLOW_VAR_KEY</code> take precedence.</p>`;
+  }
+  if(tab==="connections"){
+    const {connections, encryption_enabled} = await api("/connections");
+    h += encryption_enabled?"":`<div class="banner warn">DAGSFLOW_FERNET_KEY is not set, so connections are stored unencrypted.</div>`;
+    h += `<div class="panel"><table class="list"><thead><tr><th>Conn ID</th><th>Type</th><th>Config</th><th>Encrypted</th><th></th></tr></thead><tbody>${connections.length?connections.map(c=>`<tr><td class="id">${esc(c.conn_id)}</td><td>${esc(c.conn_type)}</td><td class="id">${esc(c.error||JSON.stringify(c.config))}</td><td>${c.encrypted?"yes":"no"}</td><td style="text-align:right"><button class="iconbtn" data-admin="delconn" data-k="${esc(c.conn_id)}">Delete</button></td></tr>`).join(""):`<tr><td colspan="5" class="muted">No connections in the metastore. Files in connections/ and DAGSFLOW_CONN_* env vars also work.</td></tr>`}</tbody></table>
+      <div class="adminForm"><label>Conn ID<input id="connId" placeholder="gchat_alerts"></label><label>Type<input id="connType" placeholder="google_chat"></label><label>Config (JSON)<input id="connCfg" style="width:320px" placeholder='{"webhook_url":"https://chat.googleapis.com/..."}'></label><button class="btn primary" data-admin="setconn">Save connection</button></div></div>
+      <p class="sub">Sensitive values are masked here. To replace a connection, save it again with the same ID.</p>`;
+  }
+  if(tab==="datasets"){
+    const {datasets} = await api("/datasets");
+    h += `<div class="panel"><table class="list"><thead><tr><th>Dataset</th><th>Last updated</th><th>Produced by</th><th>Triggers</th></tr></thead><tbody>${datasets.length?datasets.map(d=>`<tr><td class="id">${esc(d.uri)}</td><td>${fmt(d.last_updated)}</td><td class="id">${esc(d.producing_tasks.join(", ")||"–")}</td><td>${d.consuming_dags.map(x=>`<a class="id" href="#/dags/${enc(x)}">${esc(x)}</a>`).join(", ")||"–"}</td></tr>`).join(""):`<tr><td colspan="4" class="muted">No datasets. Declare outlets on a task and a dataset schedule on a DAG.</td></tr>`}</tbody></table></div>`;
+  }
+  if(tab==="errors"){
+    const {import_errors} = await api("/importErrors"); const e = Object.entries(import_errors);
+    h += e.length?`<div class="panel"><table class="list"><thead><tr><th>Source</th><th>Error</th></tr></thead><tbody>${e.map(([k,v])=>`<tr><td class="id">${esc(k)}</td><td><pre class="err" style="margin:0">${esc(v)}</pre></td></tr>`).join("")}</tbody></table></div>`:`<div class="panel empty">Every DAG loaded without errors.</div>`;
+  }
+  if(tab==="users"){
+    const {users} = await api("/users");
+    h += `<div class="panel"><table class="list"><thead><tr><th>Username</th><th>Role</th><th>API tokens</th><th>Created</th></tr></thead><tbody>${users.length?users.map(u=>`<tr><td>${esc(u.username)}</td><td>${esc(u.role)}</td><td>${u.api_tokens}</td><td>${fmt(u.created_at)}</td></tr>`).join(""):`<tr><td colspan="4" class="muted">No users: authentication is off (localhost only). Create one with <code>dagsflow-go users create</code>.</td></tr>`}</tbody></table></div>`;
+  }
+  $app.innerHTML = h;
+}
+async function adminAction(b){
+  const v = id => document.getElementById(id)?.value.trim();
+  const need = {setpool:["poolName","Pool name"], setvar:["varKey","Variable key"], setconn:["connId","Conn ID"]}[b.dataset.admin];
+  if(need && !v(need[0])){ toast(`${need[1]} is required`); document.getElementById(need[0]).focus(); return; }
+  if(b.dataset.admin==="setconn" && !v("connType")){ toast("Type is required"); document.getElementById("connType").focus(); return; }
+  try{
+    switch(b.dataset.admin){
+      case "setpool": await post(`/pools/${enc(v("poolName"))}`, {slots:+v("poolSlots"), description:v("poolDesc")}, "PUT"); toast("Pool saved"); break;
+      case "delpool": if(!confirm(`Delete pool ${b.dataset.k}?`)) return; await api(`/pools/${enc(b.dataset.k)}`, {method:"DELETE"}); toast("Pool deleted"); break;
+      case "setvar": await post(`/variables/${enc(v("varKey"))}`, {value:document.getElementById("varVal").value, description:v("varDesc")}, "PUT"); toast("Variable saved"); break;
+      case "delvar": if(!confirm(`Delete variable ${b.dataset.k}?`)) return; await api(`/variables/${enc(b.dataset.k)}`, {method:"DELETE"}); toast("Variable deleted"); break;
+      case "setconn": { let cfg; try{ cfg = JSON.parse(v("connCfg")||"{}"); }catch{ toast("Config must be a JSON object"); return; }
+        await post(`/connections/${enc(v("connId"))}`, {conn_type:v("connType"), config:cfg}, "PUT"); toast("Connection saved"); break; }
+      case "delconn": if(!confirm(`Delete connection ${b.dataset.k}?`)) return; await api(`/connections/${enc(b.dataset.k)}`, {method:"DELETE"}); toast("Connection deleted"); break;
+    }
+    render();
+  }catch(e){ toast(e.message); }
+}
+
+// ---- events & routing ------------------------------------------------------
+document.addEventListener("click", async e=>{
+  const ddBtn = e.target.closest(".dd>button");
+  document.querySelectorAll(".dd.open").forEach(d=>{ if(!ddBtn || d!==ddBtn.parentElement) d.classList.remove("open"); });
+  if(ddBtn){ ddBtn.parentElement.classList.toggle("open"); return; }
+  if(e.target.closest(".ddm a")) document.querySelectorAll(".dd.open").forEach(d=>d.classList.remove("open"));
+  const sortB = e.target.closest("[data-sort]");
+  if(sortB){ const k=sortB.dataset.sort, same=qget("sort","dag_id")===k; location.hash = listHref({sort:k, dir: same && qget("dir","asc")==="asc" ? "desc" : "asc"}); return; }
+  const pg = e.target.closest("[data-page]");
+  if(pg && !pg.disabled){ location.hash = listHref({page: pg.dataset.page}); scrollTo(0,0); return; }
+  if(e.target.closest("#autoRef")){ const on=!autoRefresh(); localStorage.setItem("dagsflow.autorefresh", on?"on":"off"); e.target.closest("#autoRef").setAttribute("aria-checked", on); toast(on?"Auto-refresh on":"Auto-refresh off"); return; }
+  if(e.target.closest("#refreshBtn")){ render(); health(); return; }
+  if(e.target.closest("#logoutBtn")){ try{ await api("/logout",{method:"POST"}); }catch{} location.href="/login"; return; }
+  const del = e.target.closest("[data-deldag]");
+  if(del){ const id=del.dataset.deldag;
+    if(!confirm(`Delete all runs, task instances and logs of ${id}? The DAG definition stays and will show up again with no history.`)) return;
+    try{ await api(`/dags/${enc(id)}`, {method:"DELETE"}); toast(`Deleted metadata of ${id}`); render(); }catch(x){ toast(x.message); } return; }
+  const t = e.target.closest("[data-pause],[data-trigger],[data-ti],[data-run],[data-close],[data-clear],[data-try],[data-mi],[data-admin]"); if(!t) return;
+  if(t.dataset.mi!==undefined){ const c=drawer._ctx; openDrawer(c.dagId, c.runId, c.taskId, 0, +t.dataset.mi); return; }
+  if(t.dataset.admin){ adminAction(t); return; }
+  if(t.dataset.pause){ const paused = t.dataset.paused!=="true";
+    try{ await post(`/dags/${enc(t.dataset.pause)}`, {is_paused:paused}, "PATCH"); toast(paused?`Paused ${t.dataset.pause}`:`Unpaused ${t.dataset.pause}`); render(); }catch(x){ toast(x.message); } }
+  else if(t.dataset.trigger) openTrigger(t.dataset.trigger);
+  else if(t.dataset.ti!==undefined){ const [run,task]=t.dataset.ti.split("|"); if(run) openDrawer(route().parts[1], run, task); }
+  else if(t.dataset.run){ openDrawer(route().parts[1], t.dataset.run); if(route().q.get("tab")!=="runs") setQuery("run", t.dataset.run); }
+  else if(t.dataset.close!==undefined) closeDrawer();
+  else if(t.dataset.clear) clearAction(t.dataset.clear);
+  else if(t.dataset.try){ drawer._try=+t.dataset.try; drawer.querySelectorAll(".tries button").forEach(b=>b.classList.toggle("on", b===t)); loadLog(true); }
+});
+document.addEventListener("keydown", e=>{
+  if(e.key==="Escape" && drawer) closeDrawer();
+  if((e.key==="Enter"||e.key===" ") && e.target.matches("g.node")){ e.preventDefault(); e.target.dispatchEvent(new MouseEvent("click",{bubbles:true})); }
+});
+document.addEventListener("change", e=>{ if(e.target.id==="runSel") setQuery("run", e.target.value); });
+
+async function render(){
+  const {parts, q} = route();
+  try{
+    const tab = q.get("tab")||"pools";
+    const navKey = parts[0]!=="admin" ? "dags" : tab==="datasets" ? "datasets" : tab==="users" ? "security" : tab==="errors" ? "browse" : "admin";
+    document.querySelectorAll("[data-nav]").forEach(n=>n.classList.toggle("on", n.dataset.nav===navKey));
+    if(parts[0]==="dags" && parts[1]) await viewDag(parts[1], q);
+    else if(parts[0]==="admin"){ current=null; await viewAdmin(q.get("tab")||"pools"); }
+    else { current=null; await viewList(); }
+  }catch(e){ $app.innerHTML = `<div class="banner err"><b>Could not load this page.</b> ${esc(e.message)}. <a href="#/">Back to DAGs</a></div>`; }
+}
+function refreshLoop(){ // live refresh, paused while the user is in a dialog or has text selected
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(()=>{ if(!autoRefresh() || document.querySelector(".dd.open") || document.hidden || document.getElementById("triggerDlg").open || String(getSelection()) || document.activeElement?.closest?.(".adminForm")) return;
+    const y = scrollY; render().then(()=>scrollTo(0,y)); health(); }, 4000);
+}
+let lastPath = location.hash.split("?")[0];
+window.addEventListener("hashchange", ()=>{ const p = location.hash.split("?")[0]; if(p!==lastPath) closeDrawer(); lastPath = p; render(); });
+async function whoami(){ Object.assign(ME, await api("/me"));
+  ["User","Op","Admin"].forEach(r=>document.body.classList.toggle("can-"+r, can(r)));
+  if(ME.auth_enabled){
+    document.getElementById("userMenu").hidden = false;
+    document.getElementById("avatar").textContent = ME.username.slice(0,2).toUpperCase();
+    document.getElementById("who").textContent = `Signed in as ${ME.username} (${ME.role})`;
+  } }
+function tick(){
+  const d = new Date(), off = -d.getTimezoneOffset(), p = n=>String(Math.abs(n)).padStart(2,"0");
+  const tz = (Intl.DateTimeFormat("en",{timeZoneName:"short"}).formatToParts(d).find(x=>x.type==="timeZoneName")||{}).value||"";
+  document.getElementById("clock").textContent = `${p(d.getHours())}:${p(d.getMinutes())} ${tz} (${off<0?"-":"+"}${p(Math.trunc(off/60))}:${p(off%60)})`;
+}
+tick(); setInterval(tick, 15000);
+whoami().then(()=>{ health(); render(); refreshLoop(); }).catch(()=>{});
+</script>
+</body>
+</html>

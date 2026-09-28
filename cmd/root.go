@@ -1,0 +1,282 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"text/tabwriter"
+	"time"
+
+	"dagsflow-go/bundle"
+	"dagsflow-go/dag"
+	"dagsflow-go/engine"
+	"dagsflow-go/web"
+
+	"github.com/spf13/cobra"
+)
+
+var parallelism int
+
+func home() string {
+	if h := os.Getenv("DAGSFLOW_HOME"); h != "" {
+		return h
+	}
+	return "."
+}
+
+func newStore() *engine.Store { return engine.NewStore(home()) }
+
+// loadConnections is kept as a no-op hook: connections/variables are resolved
+// lazily through the secrets backends configured in setup().
+func loadConnections() {}
+
+func dagsFolder() string {
+	if d := os.Getenv("DAGSFLOW_DAGS_FOLDER"); d != "" {
+		return d
+	}
+	return filepath.Join(home(), "dags")
+}
+
+var goLoader = &bundle.Loader{Log: func(f string, a ...any) {
+	fmt.Fprintf(os.Stderr, "[dags] "+f+"\n", a...)
+}}
+
+// loadDags (re)loads the DAG folder: YAML DAGs and Go DAG files (compiled on
+// the fly into bundles). Safe to call repeatedly; unchanged files are skipped.
+func loadDags() {
+	dag.LoadDagFolder(dagsFolder())
+	goLoader.Home = home()
+	goLoader.LoadFolder(dagsFolder())
+}
+
+// setup wires the secrets backends (env → metastore → connections/*.json)
+// and loads the DAG folder (skipped for commands that don't need DAGs).
+func setup(cmd *cobra.Command) {
+	st := newStore()
+	dag.SetSecretsBackends(dag.EnvBackend{}, engine.MetastoreBackend{Store: st},
+		dag.FileBackend{Dir: filepath.Join(home(), "connections")})
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case "variables", "connections", "pools", "users", "config", "stop", "status", "help", "completion":
+			return
+		}
+	}
+	loadDags()
+}
+
+func signalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
+func mustDAG(id string) *dag.DAG {
+	d, ok := dag.Get(id)
+	if !ok {
+		if err, bad := dag.ImportErrors()[id]; bad {
+			exitf("dag %s has an import error: %v", id, err)
+		}
+		exitf("dag %s not found", id)
+	}
+	return d
+}
+
+func exitf(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", a...)
+	os.Exit(1)
+}
+
+func table() *tabwriter.Writer { return tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0) }
+
+func fmtTime(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return "-"
+	}
+	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+func parseConf(s string) map[string]any {
+	if s == "" {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		exitf("invalid --conf JSON: %v", err)
+	}
+	return m
+}
+
+var rootCmd = &cobra.Command{
+	Use:              "dagsflow-go",
+	PersistentPreRun: func(c *cobra.Command, _ []string) { setup(c) },
+	Short:            "Airflow-like workflow orchestrator in Go",
+	Long:             "State lives in $DAGSFLOW_HOME (default: current dir): state/ = metadata, logs/ = task logs, connections/ = connection files.",
+}
+
+// ---- scheduler ---------------------------------------------------------------
+
+var schedulerCmd = &cobra.Command{
+	Use:   "scheduler",
+	Short: "Run the scheduler for all DAGs (foreground; -D to daemonize)",
+	Run: func(cmd *cobra.Command, args []string) {
+		st := newStore()
+		if _, alive := engine.SchedulerInfo(st); alive {
+			exitf("a scheduler is already running (see `scheduler status`)")
+		}
+		if daemon, _ := cmd.Flags().GetBool("daemon"); daemon {
+			_ = os.MkdirAll(st.LogsDir(), 0o755)
+			lf, err := os.OpenFile(filepath.Join(st.LogsDir(), "scheduler.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				exitf("%v", err)
+			}
+			pid, err := spawnDetached(lf, "scheduler", "--parallelism", fmt.Sprint(parallelism), "--dag-dir-list-interval", reloadEvery.String())
+			if err != nil {
+				exitf("start scheduler: %v", err)
+			}
+			fmt.Printf("scheduler started in background (pid %d), log: %s\n", pid, lf.Name())
+			return
+		}
+		loadConnections()
+		ctx, cancel := signalContext()
+		defer cancel()
+		reloadLoop(ctx)
+		s := newScheduler(st)
+		if err := s.Run(ctx); err != nil {
+			exitf("%v", err)
+		}
+	},
+}
+
+var schedulerStopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the background scheduler (running runs resume on next start)",
+	Run: func(cmd *cobra.Command, args []string) {
+		pid, alive := engine.SchedulerInfo(newStore())
+		if !alive {
+			exitf("no scheduler running")
+		}
+		if err := terminate(pid); err != nil {
+			exitf("stop pid %d: %v", pid, err)
+		}
+		fmt.Printf("sent stop signal to scheduler (pid %d)\n", pid)
+	},
+}
+
+var schedulerStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show scheduler status",
+	Run: func(cmd *cobra.Command, args []string) {
+		if pid, alive := engine.SchedulerInfo(newStore()); alive {
+			fmt.Printf("scheduler is running (pid %d)\n", pid)
+		} else {
+			fmt.Println("scheduler is not running")
+		}
+	},
+}
+
+var reloadEvery time.Duration
+
+func newScheduler(st *engine.Store) *engine.Scheduler {
+	return engine.NewScheduler(engine.NewEngine(st, parallelism))
+}
+
+// reloadLoop rescans the DAG folder in the background (compiling Go DAGs can
+// take a while, so this never blocks the scheduler loop).
+func reloadLoop(ctx context.Context) {
+	go func() {
+		t := time.NewTicker(reloadEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				loadDags()
+			}
+		}
+	}()
+}
+
+// ---- webserver / standalone -----------------------------------------------------
+
+var webAddr string
+
+func newWebServer(st *engine.Store) *web.Server {
+	users, _ := st.Users()
+	if len(users) == 0 && !isLoopback(webAddr) {
+		exitf("refusing to listen on %s without users; create one: dagsflow-go users create --username admin --role Admin", webAddr)
+	}
+	if len(users) == 0 {
+		fmt.Println("[webserver] no users defined: auth disabled (localhost only). Create one with `users create` to enable RBAC.")
+	}
+	return &web.Server{Store: st}
+}
+
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return host == "localhost" || (ip != nil && ip.IsLoopback())
+}
+
+var webserverCmd = &cobra.Command{
+	Use:   "webserver",
+	Short: "Serve the web UI (like `airflow webserver`); needs a running scheduler to execute runs",
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx, cancel := signalContext()
+		defer cancel()
+		reloadLoop(ctx)
+		if err := newWebServer(newStore()).Serve(ctx, webAddr); err != nil {
+			exitf("%v", err)
+		}
+	},
+}
+
+var standaloneCmd = &cobra.Command{
+	Use:   "standalone",
+	Short: "Run scheduler + web UI in one process (like `airflow standalone`)",
+	Run: func(cmd *cobra.Command, args []string) {
+		st := newStore()
+		if _, alive := engine.SchedulerInfo(st); alive {
+			exitf("a scheduler is already running; use `webserver` instead")
+		}
+		loadConnections()
+		ctx, cancel := signalContext()
+		defer cancel()
+		errc := make(chan error, 2)
+		reloadLoop(ctx)
+		go func() { errc <- newScheduler(st).Run(ctx) }()
+		go func() { errc <- newWebServer(st).Serve(ctx, webAddr) }()
+		if err := <-errc; err != nil {
+			cancel()
+			exitf("%v", err)
+		}
+		<-errc
+	},
+}
+
+func Execute() {
+	webserverCmd.Flags().StringVar(&webAddr, "addr", "127.0.0.1:8080", "listen address")
+	standaloneCmd.Flags().StringVar(&webAddr, "addr", "127.0.0.1:8080", "listen address")
+	standaloneCmd.Flags().IntVar(&parallelism, "parallelism", 16, "max concurrent task instances")
+	webserverCmd.Flags().DurationVar(&reloadEvery, "dag-dir-list-interval", 30*time.Second, "how often to rescan the DAG folder")
+	for _, c := range []*cobra.Command{schedulerCmd, standaloneCmd} {
+		c.Flags().DurationVar(&reloadEvery, "dag-dir-list-interval", 30*time.Second, "how often to rescan the DAG folder")
+	}
+	rootCmd.AddCommand(webserverCmd, standaloneCmd)
+	rootCmd.AddCommand(adminCmds()...)
+
+	schedulerCmd.Flags().BoolP("daemon", "D", false, "run in background")
+	schedulerCmd.PersistentFlags().IntVar(&parallelism, "parallelism", 16, "max concurrent task instances")
+	schedulerCmd.AddCommand(schedulerStopCmd, schedulerStatusCmd)
+
+	rootCmd.AddCommand(schedulerCmd, dagsCmd(), tasksCmd())
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}

@@ -1,0 +1,6 @@
+/dagsflow-go
+/state/
+/logs/
+/build/
+/keys/
+.env
