@@ -84,6 +84,9 @@ table.list tr.paused .dagname{color:var(--muted)}
 
 /* ---- task instance details (Airflow-style) ---- */
 .dagTitle a{color:inherit}
+.backlink{flex:0 0 100%;display:inline-flex;align-items:center;gap:6px;font-weight:600;color:#1B4F9C;margin-bottom:4px;width:max-content}
+.tiTitle + .backlink{margin:0 0 12px;display:flex}
+table.dts{width:auto;min-width:320px;margin-bottom:16px}
 .tiLinks{display:flex;gap:28px;padding:6px 0 12px}
 .tiLinks a{font-weight:600;color:#1B4F9C}
 section.notes{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:14px}
@@ -433,6 +436,7 @@ const ICON = {
   play:'<svg viewBox="0 0 16 16"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>',
   grid:'<svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>',
   trash:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.8 9.5h6.4L12 4"/></svg>',
+  back:'<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 8H3M7.5 3.5 3 8l4.5 4.5"/></svg>',
   pencil:'<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M11 2.5l2.5 2.5L6 12.5 3 13l.5-3z"/></svg>',
   refresh:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3.5H10"/></svg>',
 };
@@ -752,9 +756,11 @@ async function renderPane(d, q){
 function paneHead(d, sel, run, ti, taskDef){
   const crumb = (label, val, href) => { const t = esc(val.replace(/<[^>]*>/g,""));
     return `<div class="crumb"><span>${label}</span>${href?`<a href="${href}" title="${t}">${val}</a>`:`<b title="${t}">${val}</b>`}</div>`; };
-  let h = `<div class="crumbs">${crumb("DAG", esc(d.dag_id), sel.kind!=="dag" ? dagHref({run:null,task:null,mi:null}) : "")}`;
+  let h = sel.mi>=0 && sel.task ? `<a class="backlink" href="${dagHref({mi:null, tab:"mapped", try:null})}">${ICON.back} Back to dynamic task summary</a>` : "";
+  h += `<div class="crumbs">${crumb("DAG", esc(d.dag_id), sel.kind!=="dag" ? dagHref({run:null,task:null,mi:null}) : "")}`;
   if(sel.run) h += `<span class="csep">/</span>${crumb("Run", `<i class="rdot" style="background:${color(run?.state)}"></i>${esc(fmtZ(run?.logical_date))}`, sel.task ? dagHref({task:null,mi:null}) : "")}`;
-  if(sel.task) h += `<span class="csep">/</span>${crumb("Task", esc(sel.task)+(sel.mi>=0?` [${sel.mi}]`:""), sel.mi>=0 ? dagHref({mi:null}) : "")}`;
+  if(sel.task) h += `<span class="csep">/</span>${crumb("Task", esc(sel.task)+(sel.mi>=0?" []":""), sel.mi>=0 ? dagHref({mi:null, tab:"mapped"}) : "")}`;
+  if(sel.task && sel.mi>=0) h += `<span class="csep">/</span>${crumb("Map Index", String(sel.mi), "")}`;
   h += `</div><div class="pacts">`;
   const markMenu = `<div class="dd"><button type="button" class="btn primary needs-User" aria-haspopup="true">Mark state as… ${PI.caret}</button>
       <div class="ddm right"><button data-act="mark" data-state="success"><i class="sq" style="background:var(--s-success)"></i>success</button><button data-act="mark" data-state="failed"><i class="sq" style="background:var(--s-failed)"></i>failed</button></div></div>`;
@@ -828,13 +834,18 @@ function tiDetails(d, r, ti, t, sel){
   const kids = r.mapped_task_instances?.[sel.task] || [];
   let h = `<div class="tiLinks"><a href="${tiHref(d.dag_id, sel.run, sel.task, sel.mi, "details")}">More Details</a>
     <a href="#/admin?tab=tis&dag_id=${enc(d.dag_id)}&task_id=${enc(sel.task)}">List All Instances</a></div>`;
+  if(kids.length && sel.mi<0){
+    const counts = {}; kids.forEach(k=>counts[st(k.state)] = (counts[st(k.state)]||0)+1);
+    h += `<h3 class="ph">Dynamic Task Summary</h3><table class="kvt striped dts"><tbody><tr><th>Total mapped tasks</th><td><a href="${dagHref({tab:"mapped"})}">${kids.length}</a></td></tr>${
+      Object.entries(counts).map(([s2,n])=>`<tr><th><span class="sqs" style="background:${color(s2)}"></span> ${esc(s2)}</th><td>${n}</td></tr>`).join("")}</tbody></table>`;
+  }
   h += notesBlock("Task Instance", ti.note, {run: sel.run, task: sel.task, mi: sel.mi});
   h += extraLinksBlock(t, r, sel);
   if(ti.error) h += `<pre class="err">${esc(ti.error)}</pre>`;
   h += `<table class="kvt striped"><tbody>` + [
     ["Status", `<span class="sqs" style="background:${color(ti.state)}"></span> ${esc(st(ti.state))}`],
     ["Task ID", `${esc(sel.task)} ${copyBtn(sel.task)}`], ["Run ID", `${esc(r.run_id)} ${copyBtn(r.run_id)}`],
-    ["Map Index", sel.mi], kids.length && sel.mi<0 ? ["Mapped instances", `${kids.length} <a href="${dagHref({tab:"mapped"})}">(view)</a>`] : null,
+    ["Map Index", sel.mi],
     ["Operator", esc(t.operator)], ["Trigger Rule", esc(t.trigger_rule)],
     ["Started", fmtZ(ti.start_date)], ["Ended", fmtZ(ti.end_date)], ["Duration", ti.start_date ? hms(secs(ti.start_date, ti.end_date)) : "–"],
     ["Try Number", ti.try_number||0], ["Max Tries", t.retries+1], ["Pool", esc(ti.pool||t.pool)], ["Priority Weight", t.priority_weight],
@@ -1240,6 +1251,7 @@ async function viewTI(id, q){
   if(fresh){
     $app.innerHTML = `<div id="tiPage" data-key="${esc(key)}">${dagTopHtml(d)}
       <h2 class="tiTitle"><span>Task Instance:</span> ${esc(sel.task)}${sel.mi>=0?` [${sel.mi}]`:""} <span>at</span> ${esc(fmt(run.logical_date))}</h2>
+      ${sel.mi>=0 ? `<a class="backlink" href="#/dags/${enc(id)}?run=${enc(sel.run)}&task=${enc(sel.task)}&tab=mapped">${ICON.back} Back to dynamic task summary</a>` : ""}
       <nav class="pilltabs">${TI_TABS.map(([k,l])=>`<a href="${k==="grid" ? `#/dags/${enc(id)}?run=${enc(sel.run)}&task=${enc(sel.task)}${sel.mi>=0?`&mi=${sel.mi}`:""}` : tiHref(id, sel.run, sel.task, sel.mi, k)}" class="${k===tab?"on":""}">${TI_ICON[k]}${l}</a>`).join("")}</nav>
       <div class="pbody tipbody" id="pbody"></div></div>`;
   }
