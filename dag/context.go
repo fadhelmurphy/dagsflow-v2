@@ -23,6 +23,8 @@ type RunState interface {
 	ExternalTaskState(dagID, taskID string, logical time.Time) (State, bool, error)
 	// SetRendered records a rendered template field (Rendered Template view).
 	SetRendered(taskID string, mapIndex int, field, value string) error
+	// SetOutletExtra sets the extra of the dataset event emitted on success.
+	SetOutletExtra(taskID string, mapIndex int, uri string, extra map[string]any) error
 }
 
 // RunInfo is the per-run metadata exposed to tasks (Airflow's context / macros).

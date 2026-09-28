@@ -14,6 +14,14 @@ import (
 
 // Showcases: pools, priority, dynamic task mapping, sensors, SLA,
 // callbacks (Google Chat) and datasets (data-aware scheduling).
+const salesDataset = "bq://fadhel-project.dw.sales"
+
+// salesInfo is the extra that sales_ingest attaches to the dataset event.
+type salesInfo struct {
+	Rows     int `json:"rows"`
+	Branches int `json:"branches"`
+}
+
 func init() {
 	alert := dag.GoogleChatNotifier("gchat_alerts") // connection type google_chat, Config.webhook_url
 
@@ -50,8 +58,9 @@ func init() {
 			total += r
 		}
 		ctx.Logf("published %d rows from %d branches", total, len(rows))
-		return nil
-	}, dag.WithOutlets("bq://fadhel-project.dw.sales"))
+		// metadata for consumers of the dataset (Airflow: outlet_events[...].extra)
+		return ctx.SetOutletExtra(salesDataset, map[string]any{"rows": total, "branches": len(rows)})
+	}, dag.WithOutlets(salesDataset))
 
 	// data dependencies above are wired automatically; add ordering-only ones:
 	dag.Chain(waitFile, branches) // wait_for_upstream_window >> list_branches
@@ -60,11 +69,28 @@ func init() {
 
 	// runs whenever bq://fadhel-project.dw.sales is updated
 	consumer := dag.NewDAG("sales_report", "",
-		dag.WithDatasetSchedule("bq://fadhel-project.dw.sales"),
+		dag.WithDatasetSchedule(salesDataset),
 		dag.WithTags("example", "datasets"))
 	consumer.NewTask("build_report", func(ctx *dag.TaskContext) error {
-		ctx.Logf("triggered by datasets: %v", ctx.Conf["triggering_dataset_events"] != nil)
-		fmt.Fprintln(ctx.LogWriter(), "report built")
+		// extra of the latest event, decoded into a struct
+		info, ok, err := dag.DatasetExtraAs[salesInfo](ctx, salesDataset)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			ctx.Logf("not triggered by %s (manual run?): nothing to report", salesDataset)
+			return nil
+		}
+		ctx.Logf("report: %d rows from %d branches", info.Rows, info.Branches)
+
+		// all events since the previous report (the producer may have run several times)
+		events, err := ctx.TriggeringDatasetEvents()
+		if err != nil {
+			return err
+		}
+		for _, ev := range events[salesDataset] {
+			fmt.Fprintf(ctx.LogWriter(), "  %s by %s.%s: %v\n", ev.Timestamp.Format(time.DateTime), ev.SourceDagID, ev.SourceTask, ev.Extra)
+		}
 		return nil
 	})
 	dag.Register(consumer)

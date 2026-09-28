@@ -136,9 +136,10 @@ type runCtx struct {
 	weight map[string]int
 
 	// manual "mark state" support (see mark.go)
-	cancels   map[tiKey]context.CancelFunc // live task instances
-	overrides map[tiKey]dag.State          // state to finish a cancelled TI with
-	runMark   dag.State                    // run marked success/failed while executing
+	cancels   map[tiKey]context.CancelFunc        // live task instances
+	overrides map[tiKey]dag.State                 // state to finish a cancelled TI with
+	runMark   dag.State                           // run marked success/failed while executing
+	outletX   map[tiKey]map[string]map[string]any // dataset event extras set by tasks
 }
 
 func (rc *runCtx) save() {
@@ -258,6 +259,26 @@ func (rc *runCtx) SetRendered(taskID string, idx int, field, value string) error
 	rc.r.Rendered[slot][field] = value
 	rc.mu.Unlock()
 	rc.save()
+	return nil
+}
+
+func (rc *runCtx) SetOutletExtra(taskID string, idx int, uri string, extra map[string]any) error {
+	b, err := json.Marshal(extra)
+	if err != nil {
+		return fmt.Errorf("dataset extra is not JSON serialisable: %w", err)
+	}
+	var norm map[string]any
+	_ = json.Unmarshal(b, &norm)
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	if rc.outletX == nil {
+		rc.outletX = map[tiKey]map[string]map[string]any{}
+	}
+	k := tiKey{taskID, idx}
+	if rc.outletX[k] == nil {
+		rc.outletX[k] = map[string]map[string]any{}
+	}
+	rc.outletX[k][uri] = norm
 	return nil
 }
 
@@ -777,9 +798,13 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 				}
 				_ = rc.XComPush(t.ID, k.idx, "branch", selected)
 			}
+			rc.mu.Lock()
+			extras := rc.outletX[k]
+			delete(rc.outletX, k)
+			rc.mu.Unlock()
 			for _, uri := range t.Outlets() {
 				if err := e.Store.AddDatasetEvent(uri, DatasetEvent{Timestamp: time.Now(), SourceDag: rc.d.ID,
-					SourceTask: t.ID, SourceRunID: rc.r.RunID}); err != nil {
+					SourceTask: t.ID, SourceRunID: rc.r.RunID, Extra: extras[uri]}); err != nil {
 					fmt.Fprintf(out, "WARN: dataset event %s: %v\n", uri, err)
 				} else {
 					fmt.Fprintf(out, "Dataset updated: %s\n", uri)

@@ -246,6 +246,12 @@ type memRun struct {
 	rendered []string
 }
 
+func (m *memRun) SetOutletExtra(_ string, _ int, uri string, extra map[string]any) error {
+	b, _ := json.Marshal(extra)
+	m.rendered = append(m.rendered, fmt.Sprintf("--- dataset extra %s ---\n%s", uri, b))
+	return nil
+}
+
 func (m *memRun) SetRendered(taskID string, _ int, field, value string) error {
 	m.rendered = append(m.rendered, fmt.Sprintf("--- %s ---\n%s", field, value))
 	return nil

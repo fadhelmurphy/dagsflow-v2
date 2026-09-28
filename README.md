@@ -337,6 +337,16 @@ Operator: `empty`, `bash`, `bigquery`, `http`, `trigger_dagrun`, `file_sensor`, 
 
 `mode: reschedule` melepas slot executor/pool di antara poke (mirip deferrable).
 
+Metadata dataset (≈ `outlet_events[...].extra` / `triggering_dataset_events` di Airflow 2.9+):
+
+```go
+// producer: tempel metadata ke event dataset
+return ctx.SetOutletExtra("bq://proj.dw.sales", map[string]any{"rows": total})
+// consumer (DAG yang di-schedule oleh dataset tsb)
+info, ok, err := dag.DatasetExtraAs[salesInfo](ctx, "bq://proj.dw.sales") // extra event terakhir
+events, _ := ctx.TriggeringDatasetEvents()                                 // semua event pemicu
+```
+
 ### Alert Google Chat
 
 ```bash

@@ -72,6 +72,11 @@ func (r *rpcClient) SetRendered(taskID string, mapIndex int, field, value string
 	return err
 }
 
+func (r *rpcClient) SetOutletExtra(taskID string, mapIndex int, uri string, extra map[string]any) error {
+	_, err := r.call("SetOutletExtra", Args{TaskID: taskID, MapIndex: mapIndex, Name: uri, Value: extra})
+	return err
+}
+
 func (r *rpcClient) Name() string { return "scheduler" }
 
 func (r *rpcClient) GetVariable(key string) (string, bool, error) {

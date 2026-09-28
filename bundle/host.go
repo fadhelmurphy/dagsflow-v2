@@ -146,6 +146,15 @@ func (x *Host) SetRendered(a *Args, r *Reply) error {
 	return nil
 }
 
+func (x *Host) SetOutletExtra(a *Args, r *Reply) error {
+	t, err := x.task(a)
+	if err != nil {
+		return err
+	}
+	extra, _ := a.Value.(map[string]any)
+	return t.SetOutletExtra(a.Name, extra)
+}
+
 func (x *Host) GetVariable(a *Args, r *Reply) error {
 	if _, err := x.h.get(a.Token); err != nil {
 		return err

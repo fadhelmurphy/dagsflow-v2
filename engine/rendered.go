@@ -109,6 +109,9 @@ func (sr *storedRun) TriggerDagRun(context.Context, string, map[string]any, bool
 	return "", errPreview
 }
 func (sr *storedRun) SetRendered(string, int, string, string) error { return nil }
+func (sr *storedRun) SetOutletExtra(string, int, string, map[string]any) error {
+	return errPreview
+}
 func (sr *storedRun) ExternalTaskState(dagID, taskID string, logical time.Time) (dag.State, bool, error) {
 	return externalTaskState(sr.s, dagID, taskID, logical)
 }

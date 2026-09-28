@@ -305,10 +305,11 @@ func (s *Store) DeletePool(name string) error {
 // ---- datasets -----------------------------------------------------------------------
 
 type DatasetEvent struct {
-	Timestamp   time.Time `json:"timestamp"`
-	SourceDag   string    `json:"source_dag_id"`
-	SourceTask  string    `json:"source_task_id"`
-	SourceRunID string    `json:"source_run_id"`
+	Timestamp   time.Time      `json:"timestamp"`
+	SourceDag   string         `json:"source_dag_id"`
+	SourceTask  string         `json:"source_task_id"`
+	SourceRunID string         `json:"source_run_id"`
+	Extra       map[string]any `json:"extra,omitempty"`
 }
 
 type Dataset struct {
