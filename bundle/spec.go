@@ -55,6 +55,8 @@ type TaskSpec struct {
 	Sensor      *dag.SensorConfig   `json:"sensor,omitempty"`
 	Map         *dag.MapSource      `json:"map,omitempty"`
 	Templates   []dag.TemplateField `json:"template_fields,omitempty"`
+	Operator    string              `json:"operator,omitempty"`
+	ExtraLinks  []dag.ExtraLink     `json:"extra_links,omitempty"`
 	OnSuccess   int                 `json:"on_success"`
 	OnFailure   int                 `json:"on_failure"`
 	OnRetry     int                 `json:"on_retry"`
@@ -78,7 +80,7 @@ func describe() Describe {
 			ts := TaskSpec{ID: t.ID, TriggerRule: string(t.TriggerRule()), Retries: t.Retries(),
 				RetryDelay: t.RetryDelay(), Timeout: t.Timeout(), Pool: t.Pool(), PoolSlots: t.PoolSlots(),
 				Priority: t.PriorityWeight(), SLA: t.SLA(), Outlets: t.Outlets(), Branch: t.IsBranch(),
-				Map: t.MapSource(), Templates: t.TemplateFields(), OnSuccess: len(t.OnSuccessCallbacks()),
+				Map: t.MapSource(), Templates: t.TemplateFields(), Operator: t.Operator(), ExtraLinks: t.ExtraLinks(), OnSuccess: len(t.OnSuccessCallbacks()),
 				OnFailure: len(t.OnFailureCallbacks()), OnRetry: len(t.OnRetryCallbacks())}
 			if sn := t.Sensor(); sn != nil {
 				cfg := sn.SensorConfig

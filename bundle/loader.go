@@ -482,6 +482,12 @@ func (p *proxy) build(s DagSpec) *dag.DAG {
 		o := []dag.TaskOption{dag.WithTriggerRule(dag.TriggerRule(ts.TriggerRule)), dag.WithRetries(ts.Retries, ts.RetryDelay),
 			dag.WithTimeout(ts.Timeout), dag.WithPool(ts.Pool), dag.WithPoolSlots(ts.PoolSlots),
 			dag.WithPriorityWeight(ts.Priority), dag.WithSLA(ts.SLA), dag.WithOutlets(ts.Outlets...)}
+		if ts.Operator != "" {
+			o = append(o, dag.WithOperatorName(ts.Operator))
+		}
+		for _, l := range ts.ExtraLinks {
+			o = append(o, dag.WithExtraLink(l.Name, l.XComKey))
+		}
 		if len(ts.Templates) > 0 {
 			o = append(o, dag.WithTemplateFields(ts.Templates...))
 		}

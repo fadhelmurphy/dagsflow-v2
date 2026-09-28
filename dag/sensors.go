@@ -46,7 +46,7 @@ func (d *DAG) NewSensor(id string, poke SensorFunc, cfg SensorConfig, opts ...Ta
 
 // NewFileSensor waits until a (templated) path exists. Glob patterns allowed.
 func (d *DAG) NewFileSensor(id, pathTmpl string, cfg SensorConfig, opts ...TaskOption) *Task {
-	opts = append([]TaskOption{WithTemplateField("filepath", pathTmpl, "text")}, opts...)
+	opts = append([]TaskOption{WithTemplateField("filepath", pathTmpl, "text"), WithOperatorName("FileSensor")}, opts...)
 	return d.NewSensor(id, func(ctx *TaskContext) (bool, error) {
 		p, err := ctx.RenderTemplateField("filepath")
 		if err != nil {
@@ -68,6 +68,7 @@ func (d *DAG) NewFileSensor(id, pathTmpl string, cfg SensorConfig, opts ...TaskO
 
 // NewTimeDeltaSensor waits until data_interval_end + delta.
 func (d *DAG) NewTimeDeltaSensor(id string, delta time.Duration, cfg SensorConfig, opts ...TaskOption) *Task {
+	opts = append([]TaskOption{WithOperatorName("TimeDeltaSensor")}, opts...)
 	return d.NewSensor(id, func(ctx *TaskContext) (bool, error) {
 		target := ctx.DataIntervalEnd.Add(delta)
 		ctx.Logf("waiting until %s", target.Format(time.RFC3339))
@@ -78,6 +79,7 @@ func (d *DAG) NewTimeDeltaSensor(id string, delta time.Duration, cfg SensorConfi
 // NewExternalTaskSensor waits for a task (or, with externalTaskID "", the whole
 // run) of another DAG with the same logical date. Fails if it failed.
 func (d *DAG) NewExternalTaskSensor(id, externalDagID, externalTaskID string, cfg SensorConfig, opts ...TaskOption) *Task {
+	opts = append([]TaskOption{WithOperatorName("ExternalTaskSensor")}, opts...)
 	return d.NewSensor(id, func(ctx *TaskContext) (bool, error) {
 		st, found, err := ctx.ExternalTaskState(externalDagID, externalTaskID, ctx.LogicalDate)
 		if err != nil {
@@ -100,7 +102,7 @@ func (d *DAG) NewExternalTaskSensor(id, externalDagID, externalTaskID string, cf
 
 // NewHTTPSensor pokes an endpoint until it returns an expected status.
 func (d *DAG) NewHTTPSensor(id string, req HTTPRequest, cfg SensorConfig, opts ...TaskOption) *Task {
-	opts = append([]TaskOption{WithTemplateFields(httpTemplateFields(req)...)}, opts...)
+	opts = append([]TaskOption{WithTemplateFields(httpTemplateFields(req)...), WithOperatorName("HttpSensor")}, opts...)
 	return d.NewSensor(id, func(ctx *TaskContext) (bool, error) {
 		code, _, err := doHTTP(ctx, req)
 		if err != nil {

@@ -103,6 +103,9 @@ func (s *Server) Handler() http.Handler {
 		{"POST /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/mark", U, s.markTask},
 		{"GET /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/rendered", V, s.rendered},
 		{"GET /api/v1/eventLogs", V, s.eventLogs},
+		{"GET /api/v1/taskInstances", V, s.taskInstances},
+		{"PUT /api/v1/dags/{dag}/dagRuns/{run}/note", U, s.runNote},
+		{"PUT /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/note", U, s.tiNote},
 		{"GET /api/v1/roles", V, s.roles},
 		{"GET /api/v1/users", A, s.listUsers},
 		{"POST /api/v1/users", A, s.createUser},
@@ -434,18 +437,24 @@ func (s *Server) importErrors(w http.ResponseWriter, r *http.Request) {
 }
 
 type taskInfo struct {
-	TaskID      string   `json:"task_id"`
-	Upstream    []string `json:"upstream"`
-	TriggerRule string   `json:"trigger_rule"`
-	Retries     int      `json:"retries"`
-	Timeout     string   `json:"timeout"`
-	Pool        string   `json:"pool"`
-	Priority    int      `json:"priority_weight"`
-	SLA         string   `json:"sla,omitempty"`
-	IsBranch    bool     `json:"is_branch"`
-	IsSensor    bool     `json:"is_sensor"`
-	IsMapped    bool     `json:"is_mapped"`
-	Outlets     []string `json:"outlets,omitempty"`
+	TaskID      string          `json:"task_id"`
+	Upstream    []string        `json:"upstream"`
+	TriggerRule string          `json:"trigger_rule"`
+	Retries     int             `json:"retries"`
+	Timeout     string          `json:"timeout"`
+	Pool        string          `json:"pool"`
+	Priority    int             `json:"priority_weight"`
+	SLA         string          `json:"sla,omitempty"`
+	IsBranch    bool            `json:"is_branch"`
+	IsSensor    bool            `json:"is_sensor"`
+	IsMapped    bool            `json:"is_mapped"`
+	Outlets     []string        `json:"outlets,omitempty"`
+	Operator    string          `json:"operator"`
+	ExtraLinks  []dag.ExtraLink `json:"extra_links,omitempty"`
+	Templates   []string        `json:"template_fields"`
+	RetryDelay  string          `json:"retry_delay"`
+	PoolSlots   int             `json:"pool_slots"`
+	Downstream  []string        `json:"downstream"`
 }
 
 func describeTasks(d *dag.DAG) []taskInfo {
@@ -463,6 +472,14 @@ func describeTasks(d *dag.DAG) []taskInfo {
 		}
 		if t.SLA() > 0 {
 			ti.SLA = t.SLA().String()
+		}
+		ti.Operator, ti.ExtraLinks, ti.RetryDelay, ti.PoolSlots = t.Operator(), t.ExtraLinks(), t.RetryDelay().String(), t.PoolSlots()
+		ti.Templates, ti.Downstream = []string{}, []string{}
+		for _, f := range t.TemplateFields() {
+			ti.Templates = append(ti.Templates, f.Name)
+		}
+		for _, dn := range t.Downstream() {
+			ti.Downstream = append(ti.Downstream, dn.ID)
 		}
 		out = append(out, ti)
 	}

@@ -3,8 +3,10 @@ package web
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"dagsflow-go/dag"
 	"dagsflow-go/engine"
@@ -185,4 +187,134 @@ func (s *Server) mark(w http.ResponseWriter, r *http.Request, m engine.MarkReque
 	}
 	s.audit(r, "mark_"+string(m.State), d.ID, run.RunID, m.TaskID, extra)
 	writeJSON(w, 200, map[string]any{"changed": changed, "dag_run_state": run.State})
+}
+
+// ---- notes (Airflow "Task Instance Notes" / "DAG Run Notes") -------------------------------
+
+type noteBody struct {
+	Note     string `json:"note"`
+	MapIndex *int   `json:"map_index"`
+}
+
+func (s *Server) runNote(w http.ResponseWriter, r *http.Request) {
+	var b noteBody
+	if err := readBody(r, &b); err != nil {
+		fail(w, 400, "invalid body: %v", err)
+		return
+	}
+	s.setNote(w, r, engine.MarkRequest{Kind: "note", Target: "run", MapIndex: -1, Note: b.Note})
+}
+
+func (s *Server) tiNote(w http.ResponseWriter, r *http.Request) {
+	var b noteBody
+	if err := readBody(r, &b); err != nil {
+		fail(w, 400, "invalid body: %v", err)
+		return
+	}
+	idx := -1
+	if b.MapIndex != nil {
+		idx = *b.MapIndex
+	}
+	s.setNote(w, r, engine.MarkRequest{Kind: "note", Target: "task", TaskID: r.PathValue("task"), MapIndex: idx, Note: b.Note})
+}
+
+func (s *Server) setNote(w http.ResponseWriter, r *http.Request, m engine.MarkRequest) {
+	d, run, ok := s.runOr404(w, r)
+	if !ok {
+		return
+	}
+	if u := userFrom(r); u != nil {
+		m.User = u.Username
+	}
+	if err := m.Validate(d); err != nil {
+		fail(w, 400, "%v", err)
+		return
+	}
+	extra := "note cleared"
+	if m.Note != "" {
+		extra = "note set"
+	}
+	// running: the scheduler owns the run file; it applies the note itself
+	if run.State == engine.RunRunning {
+		if _, alive := engine.SchedulerInfo(s.Store); alive {
+			if err := s.Store.EnqueueMark(d.ID, run.RunID, m); err != nil {
+				fail(w, 500, "%v", err)
+				return
+			}
+			s.audit(r, "set_note", d.ID, run.RunID, m.TaskID, extra)
+			writeJSON(w, 202, map[string]any{"queued": true, "note": m.Note})
+			return
+		}
+	}
+	if err := engine.SetNote(d, run, m); err != nil {
+		fail(w, 400, "%v", err)
+		return
+	}
+	if err := s.Store.SaveRun(run); err != nil {
+		fail(w, 500, "%v", err)
+		return
+	}
+	s.audit(r, "set_note", d.ID, run.RunID, m.TaskID, extra)
+	writeJSON(w, 200, map[string]any{"note": m.Note})
+}
+
+// ---- task instance list (Browse → Task Instances / "List All Instances") -------------
+
+func (s *Server) taskInstances(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	type item struct {
+		DagID       string     `json:"dag_id"`
+		TaskID      string     `json:"task_id"`
+		RunID       string     `json:"run_id"`
+		MapIndex    int        `json:"map_index"`
+		State       dag.State  `json:"state"`
+		LogicalDate time.Time  `json:"logical_date"`
+		StartDate   *time.Time `json:"start_date,omitempty"`
+		EndDate     *time.Time `json:"end_date,omitempty"`
+		TryNumber   int        `json:"try_number"`
+		Operator    string     `json:"operator"`
+		Pool        string     `json:"pool"`
+		Note        string     `json:"note,omitempty"`
+	}
+	out := []item{}
+	var dags []*dag.DAG
+	if id := q.Get("dag_id"); id != "" {
+		if d, ok := dag.Get(id); ok {
+			dags = []*dag.DAG{d}
+		}
+	} else {
+		dags = dag.List()
+	}
+	for _, d := range dags {
+		runs, _ := s.Store.ListRuns(d.ID)
+		for i := len(runs) - 1; i >= 0; i-- {
+			run := runs[i]
+			for _, t := range d.Tasks() {
+				if tf := q.Get("task_id"); tf != "" && tf != t.ID {
+					continue
+				}
+				tis := []*engine.TaskInstance{run.Tasks[t.ID]}
+				if kids := run.Mapped[t.ID]; len(kids) > 0 {
+					tis = kids
+				}
+				for _, ti := range tis {
+					if ti == nil || (q.Get("state") != "" && string(ti.State) != q.Get("state")) {
+						continue
+					}
+					out = append(out, item{d.ID, t.ID, run.RunID, ti.MapIndex, ti.State, run.LogicalDate,
+						ti.StartDate, ti.EndDate, ti.TryNumber, t.Operator(), t.Pool(), ti.Note})
+				}
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].LogicalDate.After(out[j].LogicalDate) })
+	total := len(out)
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	writeJSON(w, 200, map[string]any{"task_instances": out, "total_entries": total})
 }

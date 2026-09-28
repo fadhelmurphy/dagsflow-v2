@@ -82,6 +82,41 @@ table.list tr.paused .dagname{color:var(--muted)}
 .dot{width:12px;height:12px;border-radius:2px;border:1px solid rgba(0,0,0,.18);flex:none}
 .muted{color:var(--muted)}
 
+/* ---- task instance details (Airflow-style) ---- */
+.dagTitle a{color:inherit}
+.tiLinks{display:flex;gap:28px;padding:6px 0 12px}
+.tiLinks a{font-weight:600;color:#1B4F9C}
+section.notes{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:14px}
+.notesH{margin-top:0}
+.noteText{white-space:pre-wrap;background:#FFFBEA;border:1px solid #F3E3A0;border-radius:4px;padding:8px 10px;font-size:14px}
+.noteActs{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}
+.noteEdit{width:100%;font:14px var(--sans)}
+.btn.light{background:#EEF1F4;border-color:#EEF1F4;font-weight:600;color:var(--ink)}
+.btn.light:hover{background:#E2E7EC}
+.xlinks{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.xlinks .btn{text-decoration:none}
+.btn.disabled{opacity:.45;cursor:not-allowed}
+table.kvt.striped tr:nth-child(odd) th,table.kvt.striped tr:nth-child(odd) td{background:#F1F4F7}
+table.kvt.striped th{background:transparent;font-weight:400;width:40%}
+.sqs{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:-1px;margin-right:4px}
+button.copy{border:0;background:none;padding:0 2px;color:#1B4F9C;vertical-align:-2px}
+button.copy svg{width:15px;height:15px}
+.tiTitle{font-size:22px;font-weight:400;margin:6px 0 12px}
+.tiTitle span{color:#B5BDC6}
+.pilltabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px}
+.pilltabs a{display:flex;align-items:center;gap:7px;padding:10px 16px;border-radius:4px;color:#1B4F9C;font-weight:500}
+.pilltabs a:hover{background:#EEF3FA;text-decoration:none}
+.pilltabs a.on{background:#2D5A87;color:#fff}
+.pilltabs svg{width:15px;height:15px}
+.tipbody{padding:4px 0 30px;overflow:visible}
+h2.sech{font-size:22px;font-weight:400;margin:14px 0 6px}
+h3.subh{font-size:15px;font-weight:400;margin:14px 0 8px;color:#343A40}
+table.attrs td:first-child{width:260px}
+table.attrs code{white-space:pre-wrap;word-break:break-word}
+table.attrs tbody tr:nth-child(odd) td{background:#F7F8F9}
+.fchip{background:#E3EEFB;color:#1B4F9C;border-radius:12px;padding:3px 10px;font-size:13px}
+.fchip a{margin-left:4px;font-weight:700}
+
 /* ---- DAG page (Airflow-style) ---- */
 select,input,textarea{font:inherit;border:1px solid #CED4DA;border-radius:4px;padding:6px 8px;background:#fff;color:var(--ink)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
@@ -324,7 +359,7 @@ td .toggle{margin-left:4px}
     <a href="#/" data-nav="dags">DAGs</a>
     <a href="#/admin?tab=datasets" data-nav="datasets">Datasets</a>
     <div class="dd" data-nav="security"><button type="button" aria-haspopup="true">Security</button><div class="ddm"><a class="needs-Admin" href="#/admin?tab=users">List Users</a><a href="#/admin?tab=roles">List Roles</a></div></div>
-    <div class="dd" data-nav="browse"><button type="button" aria-haspopup="true">Browse</button><div class="ddm"><a href="#/admin?tab=events">Event Log</a><a href="#/admin?tab=errors">DAG Import Errors</a></div></div>
+    <div class="dd" data-nav="browse"><button type="button" aria-haspopup="true">Browse</button><div class="ddm"><a href="#/admin?tab=tis">Task Instances</a><a href="#/admin?tab=events">Event Log</a><a href="#/admin?tab=errors">DAG Import Errors</a></div></div>
     <div class="dd" data-nav="admin"><button type="button" aria-haspopup="true">Admin</button><div class="ddm"><a href="#/admin?tab=pools">Pools</a><a class="needs-Op" href="#/admin?tab=variables">Variables</a><a class="needs-Op" href="#/admin?tab=connections">Connections</a></div></div>
   </nav>
   <div class="sched" id="sched" title="Scheduler status"><i></i><span>Checking scheduler…</span></div>
@@ -398,6 +433,7 @@ const ICON = {
   play:'<svg viewBox="0 0 16 16"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>',
   grid:'<svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>',
   trash:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.8 9.5h6.4L12 4"/></svg>',
+  pencil:'<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M11 2.5l2.5 2.5L6 12.5 3 13l.5-3z"/></svg>',
   refresh:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3.5H10"/></svg>',
 };
 let listData = null;
@@ -518,7 +554,7 @@ const hms = s => { s = Math.round(s); const p=n=>String(n).padStart(2,"0"); retu
 const shortDate = t => new Date(t).toLocaleString("en-US",{month:"short", day:"numeric", hour:"2-digit", minute:"2-digit", hour12:false});
 const LIVE = ["running","queued","up_for_retry","up_for_reschedule"];
 function dagHref(changes){ const r = route(); for(const [k,v] of Object.entries(changes)) (v===""||v==null) ? r.q.delete(k) : r.q.set(k,v);
-  return "#/dags/"+enc(r.parts[1])+(r.q.toString()?"?"+r.q:""); }
+  return "#/"+r.parts.map(enc).join("/")+(r.q.toString()?"?"+r.q:""); }
 const goDag = changes => { location.hash = dagHref(changes); };
 const PI = { // small inline icons
   details:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 1.8 14.6 13.6H1.4z"/><path d="M8 6.2v3.6M8 11.4v.4"/></svg>',
@@ -549,7 +585,7 @@ function tabsFor(sel, taskDef, ti){
   }
   const t = ["details","graph","gantt","code","events"];
   const expanded = (DV.run?.mapped_task_instances?.[sel.task]||[]).length > 0;
-  if(taskDef?.is_mapped && sel.mi < 0 && expanded) t.splice(1,0,"mapped"); else t.push("logs","xcom","rendered");
+  if(taskDef?.is_mapped && sel.mi < 0 && expanded) t.splice(1,0,"mapped"); else t.push("logs","xcom");
   t.push("duration");
   return t;
 }
@@ -586,12 +622,10 @@ async function viewDag(id, q){
   await renderPane(d, q);
 }
 
-function dagSkeleton(d, q){
-  const opt = (v,l,cur) => `<option value="${v}" ${cur===v?"selected":""}>${l}</option>`;
-  return `<div id="dagPage" data-dag="${esc(d.dag_id)}">
-    <div class="dagTop">
+function dagTopHtml(d){
+  return `<div class="dagTop">
       <button class="toggle needs-User" role="switch" id="hPause" data-pause="${esc(d.dag_id)}"></button>
-      <h1 class="dagTitle"><span>DAG:</span> ${esc(d.dag_id)}</h1>
+      <h1 class="dagTitle"><span>DAG:</span> <a href="#/dags/${enc(d.dag_id)}">${esc(d.dag_id)}</a></h1>
       <span class="grow"></span>
       <span class="hbadge" id="hSched"></span><span class="hbadge" id="hNext"></span>
       <div class="acts">
@@ -600,7 +634,12 @@ function dagSkeleton(d, q){
         <span class="off needs-User" id="reparseOff" title="Compiled into the binary (builtin_dags/): rebuild to change it" hidden>${PI.reparse}</span>
         <button class="del needs-Op" data-deldag="${esc(d.dag_id)}" title="Delete DAG runs and logs" aria-label="Delete DAG metadata">${ICON.trash}</button>
       </div>
-    </div>
+    </div>`;
+}
+function dagSkeleton(d, q){
+  const opt = (v,l,cur) => `<option value="${v}" ${cur===v?"selected":""}>${l}</option>`;
+  return `<div id="dagPage" data-dag="${esc(d.dag_id)}">
+    ${dagTopHtml(d)}
     <div class="fbar">
       <label class="sr" for="fBase">Runs up to</label>
       <input type="datetime-local" id="fBase" title="Show runs up to this date" step="1">
@@ -747,7 +786,7 @@ function dagDetails(d){
 }
 function runDetails(d, r){
   const counts = {}; Object.values(r.task_instances).forEach(t=>counts[st(t.state)]=(counts[st(t.state)]||0)+1);
-  let h = `<h3 class="ph">DAG Run Details</h3>` + kv([
+  let h = notesBlock("DAG Run", r.note, {run: r.run_id}) + `<h3 class="ph">DAG Run Details</h3>` + kv([
     ["Status", pill(r.state)], ["Run ID", `<code>${esc(r.run_id)}</code>`], ["Run type", esc(r.run_type)],
     ["Duration", r.start_date ? hms(secs(r.start_date, r.end_date)) : "–"], ["Logical date", fmtZ(r.logical_date)],
     ["Data interval start", fmtZ(r.data_interval_start)], ["Data interval end", fmtZ(r.data_interval_end)],
@@ -768,18 +807,38 @@ function taskDetails(d, t){
     ["Outlets", t.outlets?.length ? t.outlets.map(o=>`<code>${esc(o)}</code>`).join(", ") : "–"],
   ]) + `<p class="sub">Select a square in the grid to see this task in a specific run.</p>`;
 }
+const copyBtn = text => `<button class="copy" data-copy="${esc(text)}" title="Copy" aria-label="Copy ${esc(text)}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg></button>`;
+const tiHref = (dagId, run, task, mi, tab) => `#/dags/${enc(dagId)}/ti?${new URLSearchParams(Object.entries({run, task, mi: mi>=0?mi:"", tab:tab||""}).filter(([,v])=>v!==""&&v!=null))}`;
+const slotOf = (task, mi) => mi>=0 ? `${task}#${mi}` : task;
+function notesBlock(kind, note, target){ // kind: "Task Instance" | "DAG Run"
+  return `<section class="notes" data-note-target="${esc(JSON.stringify(target))}">
+    <h3 class="ph notesH">${kind} Notes</h3>
+    <div class="noteBody">${note ? `<div class="noteText">${esc(note)}</div>` : `<p class="sub">No note yet.</p>`}</div>
+    <div class="noteActs"><button class="btn light needs-User" data-note-edit>${ICON.pencil} ${note?"Edit Note":"Add Note"}</button></div></section>`;
+}
+function extraLinksBlock(t, r, sel){
+  if(!t.extra_links?.length) return "";
+  const x = r.xcom?.[slotOf(sel.task, sel.mi)] || {};
+  return `<h3 class="ph">Extra Links</h3><div class="xlinks">${t.extra_links.map(l => x[l.xcom_key]
+    ? `<a class="btn primary" href="${esc(x[l.xcom_key])}" target="_blank" rel="noopener">${esc(l.name)}</a>`
+    : `<span class="btn primary disabled" title="Not available for this task instance">${esc(l.name)}</span>`).join("")}</div>`;
+}
 function tiDetails(d, r, ti, t, sel){
   if(!ti) return `<div class="empty">This task instance does not exist in this run (the task was added later). Clear the run to create it.</div>`;
   const kids = r.mapped_task_instances?.[sel.task] || [];
-  let h = ti.error ? `<pre class="err">${esc(ti.error)}</pre>` : "";
-  h += `<h3 class="ph">Task Instance Details</h3>` + kv([
-    ["Status", pill(ti.state)], ["Task ID", `<code>${esc(sel.task)}</code>`], ["Run ID", `<code>${esc(r.run_id)}</code>`],
-    sel.mi>=0 ? ["Map index", sel.mi] : (kids.length ? ["Mapped instances", `${kids.length} <a href="${dagHref({tab:"mapped"})}">(view)</a>`] : null),
-    ["Try number", ti.try_number||0], ["Max tries", t.retries+1], ["Duration", ti.start_date ? hms(secs(ti.start_date, ti.end_date)) : "–"],
-    ["Started", fmtZ(ti.start_date)], ["Ended", fmtZ(ti.end_date)], ["Pool", esc(ti.pool||t.pool)], ["Priority weight", t.priority_weight],
-    ["Trigger rule", `<code>${esc(t.trigger_rule)}</code>`],
-    ["Upstream", t.upstream.length ? t.upstream.map(u=>`<a href="${dagHref({task:u, mi:null})}"><code>${esc(u)}</code></a>`).join(", ") : "–"],
-  ]);
+  let h = `<div class="tiLinks"><a href="${tiHref(d.dag_id, sel.run, sel.task, sel.mi, "details")}">More Details</a>
+    <a href="#/admin?tab=tis&dag_id=${enc(d.dag_id)}&task_id=${enc(sel.task)}">List All Instances</a></div>`;
+  h += notesBlock("Task Instance", ti.note, {run: sel.run, task: sel.task, mi: sel.mi});
+  h += extraLinksBlock(t, r, sel);
+  if(ti.error) h += `<pre class="err">${esc(ti.error)}</pre>`;
+  h += `<table class="kvt striped"><tbody>` + [
+    ["Status", `<span class="sqs" style="background:${color(ti.state)}"></span> ${esc(st(ti.state))}`],
+    ["Task ID", `${esc(sel.task)} ${copyBtn(sel.task)}`], ["Run ID", `${esc(r.run_id)} ${copyBtn(r.run_id)}`],
+    ["Map Index", sel.mi], kids.length && sel.mi<0 ? ["Mapped instances", `${kids.length} <a href="${dagHref({tab:"mapped"})}">(view)</a>`] : null,
+    ["Operator", esc(t.operator)], ["Trigger Rule", esc(t.trigger_rule)],
+    ["Started", fmtZ(ti.start_date)], ["Ended", fmtZ(ti.end_date)], ["Duration", ti.start_date ? hms(secs(ti.start_date, ti.end_date)) : "–"],
+    ["Try Number", ti.try_number||0], ["Max Tries", t.retries+1], ["Pool", esc(ti.pool||t.pool)], ["Priority Weight", t.priority_weight],
+  ].filter(Boolean).map(([k,v])=>`<tr><th>${k}</th><td>${v}</td></tr>`).join("") + `</tbody></table>`;
   return h;
 }
 function mappedTab(r, sel){
@@ -940,7 +999,7 @@ async function renderLogs(d, sel, run, ti, q, fresh){
     : `<div class="empty">No log yet: the task has not started${ti.state==="skipped"?" (it was skipped)":ti.state==="upstream_failed"?" (an upstream task failed)":""}.</div>`; return; }
   const url = `/dags/${enc(d.dag_id)}/dagRuns/${enc(sel.run)}/taskInstances/${enc(sel.task)}/logs/${pick}${sel.mi>=0?`?map_index=${sel.mi}`:""}`;
   let box = document.getElementById("logBox");
-  if(fresh || !box || box.dataset.url !== url || document.querySelectorAll(".tries button").length !== tries){
+  if(fresh || !box || box.dataset.url !== url || document.querySelectorAll(".tries a").length !== tries){
     body.innerHTML = `<div class="logHead"><div class="tries">${Array.from({length:tries},(_,i)=>`<a href="${dagHref({try:i+1})}" class="${i+1===pick?"on":""}">Attempt ${i+1}</a>`).join("")}</div>
       <span class="grow"></span><a class="btn outline" href="/api/v1${url}" target="_blank" rel="noopener">See raw log</a></div><pre class="log" id="logBox" data-url="${esc(url)}">Loading…</pre>`;
     box = document.getElementById("logBox"); fresh = true;
@@ -1043,6 +1102,7 @@ async function reparseAction(){
 
 // DAG page events
 document.addEventListener("click", e=>{
+  if(document.getElementById("tiPage") && e.target.closest("#reparseBtn")) return reparseAction();
   if(!document.getElementById("dagPage")) return;
   const el = e.target.closest("[data-selrun],[data-seltask],[data-selcell],[data-act],[data-go-mi],#reparseBtn,#fClear"); if(!el) return;
   const sel = selection(route().q);
@@ -1110,6 +1170,7 @@ async function viewAdmin(tab){
   if(tab==="users"){ $app.innerHTML = can("Admin") ? await usersPage() : `<div class="banner err">Only Admins can manage users.</div>`; return; }
   if(tab==="roles"){ $app.innerHTML = await rolesPage(); return; }
   if(tab==="events"){ $app.innerHTML = await eventsPage(); return; }
+  if(tab==="tis"){ $app.innerHTML = await tisPage(); return; }
   const titles = {pools:"Pools", variables:"Variables", connections:"Connections", datasets:"Datasets", errors:"DAG Import Errors"};
   let h = `<h1 class="pageTitle">${titles[tab]||"Admin"}</h1>`;
   if(tab==="pools"){
@@ -1160,6 +1221,128 @@ async function adminAction(b){
     render();
   }catch(e){ toast(e.message); }
 }
+
+// ---- Task Instance page ("More Details"): Grid · Task Instance Details · Rendered Template · Log · XCom ----
+const TI_TABS = [["grid","Grid"],["details","Task Instance Details"],["rendered","Rendered Template"],["logs","Log"],["xcom","XCom"]];
+const TI_ICON = {grid: ICON.grid, details: PI.details, rendered: PI.code, logs: PI.logs, xcom: PI.xcom};
+async function viewTI(id, q){
+  const sel = selection(q);
+  if(!sel.run || !sel.task){ location.hash = `#/dags/${enc(id)}`; return; }
+  const d = current = DV.data = await api(`/dags/${enc(id)}?runs=1`);
+  const t = d.tasks.find(x=>x.task_id===sel.task);
+  if(!t) throw new Error(`task ${sel.task} not found in ${id}`);
+  const run = DV.run = await api(`/dags/${enc(id)}/dagRuns/${enc(sel.run)}`);
+  const ti = sel.mi>=0 ? (run.mapped_task_instances?.[sel.task]||[])[sel.mi] : run.task_instances[sel.task];
+  const tab = ["details","rendered","logs","xcom"].includes(q.get("tab")) ? q.get("tab") : "details";
+  const key = JSON.stringify([id, sel, tab]);
+  let page = document.getElementById("tiPage");
+  const fresh = !page || page.dataset.key !== key;
+  if(fresh){
+    $app.innerHTML = `<div id="tiPage" data-key="${esc(key)}">${dagTopHtml(d)}
+      <h2 class="tiTitle"><span>Task Instance:</span> ${esc(sel.task)}${sel.mi>=0?` [${sel.mi}]`:""} <span>at</span> ${esc(fmt(run.logical_date))}</h2>
+      <nav class="pilltabs">${TI_TABS.map(([k,l])=>`<a href="${k==="grid" ? `#/dags/${enc(id)}?run=${enc(sel.run)}&task=${enc(sel.task)}${sel.mi>=0?`&mi=${sel.mi}`:""}` : tiHref(id, sel.run, sel.task, sel.mi, k)}" class="${k===tab?"on":""}">${TI_ICON[k]}${l}</a>`).join("")}</nav>
+      <div class="pbody tipbody" id="pbody"></div></div>`;
+  }
+  renderDagHeader(d);
+  const body = document.getElementById("pbody");
+  if(!ti){ body.innerHTML = `<div class="empty">This task instance does not exist in this run.</div>`; return; }
+  const live = LIVE.includes(ti.state) || run.state==="running";
+  if(!fresh && tab!=="logs" && !(tab==="details" && live)) return;
+  switch(tab){
+    case "details": body.innerHTML = tiFullDetails(d, run, ti, t, sel); break;
+    case "rendered": body.innerHTML = await renderedTab(d, sel); break;
+    case "logs": await renderLogs(d, sel, run, ti, q, fresh); break;
+    case "xcom": body.innerHTML = xcomTab(run, sel); break;
+  }
+}
+function blockingDeps(d, run, ti, t){
+  const rows = [], s = st(ti.state);
+  if(run.state !== "running") rows.push(["Dagrun Running", `Task instance's dagrun was not in the 'running' state but in the state '${run.state}'.`]);
+  if(["success","failed","skipped","upstream_failed"].includes(s)) rows.push(["Task Instance State", `Task is in the '${s}' state.`]);
+  else if(["running","queued","up_for_reschedule"].includes(s)) rows.push(["Task Instance State", `Task is in the '${s}' state.`]);
+  else if(s==="up_for_retry") rows.push(["Not In Retry Period", `Task is not ready for retry yet: it waits ${t.retry_delay} between tries.`]);
+  else {
+    const ups = t.upstream.map(u=>[u, st(run.task_instances[u]?.state)]);
+    const notDone = ups.filter(([,x])=>!["success","failed","skipped","upstream_failed"].includes(x));
+    const notOk = ups.filter(([,x])=>x!=="success");
+    if(t.trigger_rule==="all_success" && notOk.length)
+      rows.push(["Trigger Rule", `Task's trigger rule 'all_success' requires all upstream tasks to have succeeded, but found ${notOk.length} non-success(es). upstream_states=${JSON.stringify(Object.fromEntries(ups))}, upstream_task_ids=${JSON.stringify(t.upstream)}`]);
+    else if(notDone.length)
+      rows.push(["Trigger Rule", `Task's trigger rule '${t.trigger_rule}' is waiting for ${notDone.length} upstream task(s) to finish: ${notDone.map(([u])=>u).join(", ")}`]);
+  }
+  return rows;
+}
+function attrTable(obj){
+  return `<table class="tbl attrs"><thead><tr><th>Attribute</th><th>Value</th></tr></thead><tbody>${Object.keys(obj).sort().map(k=>
+    `<tr><td>${esc(k)}</td><td><code>${esc(obj[k]==null||obj[k]===""?"None":typeof obj[k]==="object"?JSON.stringify(obj[k]):String(obj[k]))}</code></td></tr>`).join("")}</tbody></table>`;
+}
+function tiFullDetails(d, run, ti, t, sel){
+  const deps = blockingDeps(d, run, ti, t);
+  let h = `<h2 class="sech">Task Instance Details</h2><h3 class="subh">Dependencies Blocking Task From Getting Scheduled</h3>`;
+  h += deps.length ? `<table class="tbl attrs"><thead><tr><th>Dependency</th><th>Reason</th></tr></thead><tbody>${deps.map(([a,b])=>`<tr><td>${esc(a)}</td><td><code>${esc(b)}</code></td></tr>`).join("")}</tbody></table>`
+    : `<p class="sub">All dependencies are met but the task instance is not running. In most cases this just means that the task will probably be scheduled soon unless the pool has no free slots or the DAG has reached max_active_runs.</p>`;
+  if(ti.error) h += `<pre class="err" style="margin-top:14px">${esc(ti.error)}</pre>`;
+  const dur = ti.start_date ? secs(ti.start_date, ti.end_date) : null;
+  h += `<h3 class="subh">Task Instance Attributes</h3>` + attrTable({
+    dag_id: d.dag_id, dag_run: `<DagRun ${d.dag_id} @ ${run.logical_date}: ${run.run_id}, state:${run.state}, queued_at: ${run.queued_at}. run_type: ${run.run_type}>`,
+    duration: dur==null ? null : dur.toFixed(6), end_date: ti.end_date ? fmt(ti.end_date) : null, execution_date: fmt(run.logical_date),
+    logical_date: fmt(run.logical_date), data_interval_start: fmt(run.data_interval_start), data_interval_end: fmt(run.data_interval_end),
+    log_url: location.origin + "/" + tiHref(d.dag_id, sel.run, sel.task, sel.mi, "logs"), map_index: sel.mi, max_tries: t.retries+1,
+    note: ti.note||null, operator: t.operator, pool: ti.pool||t.pool, pool_slots: t.pool_slots, priority_weight: t.priority_weight,
+    run_id: run.run_id, start_date: ti.start_date ? fmt(ti.start_date) : null, state: st(ti.state), task_id: sel.task, try_number: ti.try_number||0,
+    error: ti.error||null,
+  });
+  h += `<h3 class="subh">Task Attributes</h3>` + attrTable({
+    task_id: t.task_id, operator: t.operator, owner: d.owner, trigger_rule: t.trigger_rule, retries: t.retries, retry_delay: t.retry_delay,
+    execution_timeout: t.timeout==="-" ? null : t.timeout, pool: t.pool, pool_slots: t.pool_slots, priority_weight: t.priority_weight, sla: t.sla||null,
+    upstream_task_ids: t.upstream, downstream_task_ids: t.downstream, template_fields: t.template_fields, outlets: t.outlets||[],
+    extra_links: (t.extra_links||[]).map(l=>l.name), is_mapped: t.is_mapped, is_sensor: t.is_sensor, is_branch: t.is_branch,
+  });
+  return h;
+}
+
+// ---- Browse → Task Instances ("List All Instances") --------------------------------------
+async function tisPage(){
+  const q = route().q, p = new URLSearchParams({limit:"300"});
+  ["dag_id","task_id","state"].forEach(k=>{ if(q.get(k)) p.set(k, q.get(k)); });
+  const {task_instances:tis, total_entries} = await api(`/taskInstances?${p}`);
+  const chip = (k, label) => q.get(k) ? `<span class="fchip">${label}: <b>${esc(q.get(k))}</b> <a href="${(()=>{const r=new URLSearchParams(q);r.delete(k);return "#/admin?"+r;})()}" aria-label="Remove filter">×</a></span>` : "";
+  const states = ["","success","failed","running","queued","up_for_retry","upstream_failed","skipped","none"], oneDag = !!q.get("dag_id");
+  let h = `<h1 class="pageTitle">List Task Instance</h1><div class="toolbar">${chip("dag_id","DAG")}${chip("task_id","Task")}
+    <label class="sub">State <select id="tisState">${states.map(s=>`<option value="${s}" ${q.get("state")===s?"selected":""}>${s||"All"}</option>`).join("")}</select></label>
+    <span class="grow"></span><span class="sub">${total_entries} task instance${total_entries===1?"":"s"}${total_entries>tis.length?`, showing the newest ${tis.length}`:""}</span></div>`;
+  h += `<div class="panel"><table class="list"><thead><tr><th>State</th>${oneDag?"":"<th>DAG</th>"}<th>Task</th><th>Run ID</th><th>Map Index</th><th>Logical Date</th><th>Start Date</th><th>End Date</th><th>Duration</th><th>Try</th><th>Operator</th><th>Pool</th></tr></thead><tbody>${
+    tis.length ? tis.map(x=>`<tr><td>${pill(x.state)}</td>${oneDag?"":`<td><a href="#/dags/${enc(x.dag_id)}"><code>${esc(x.dag_id)}</code></a></td>`}
+      <td><a href="${tiHref(x.dag_id, x.run_id, x.task_id, x.map_index, "details")}"><code>${esc(x.task_id)}</code></a>${x.note?' <span class="badge grey" title="'+esc(x.note)+'">note</span>':""}</td>
+      <td><a href="#/dags/${enc(x.dag_id)}?run=${enc(x.run_id)}&task=${enc(x.task_id)}${x.map_index>=0?`&mi=${x.map_index}`:""}"><code class="sm">${esc(x.run_id)}</code></a></td>
+      <td>${x.map_index}</td><td class="nowrap">${fmt(x.logical_date)}</td><td class="nowrap">${fmt(x.start_date)}</td><td class="nowrap">${fmt(x.end_date)}</td>
+      <td>${x.start_date?hms(secs(x.start_date,x.end_date)):"–"}</td><td>${x.try_number}</td><td>${esc(x.operator)}</td><td>${esc(x.pool)}</td></tr>`).join("")
+    : `<tr><td colspan="${oneDag?11:12}" class="muted">No task instances match.</td></tr>`}</tbody></table></div>`;
+  return h;
+}
+document.addEventListener("change", e=>{ if(e.target.id==="tisState"){ const r = new URLSearchParams(route().q); e.target.value ? r.set("state", e.target.value) : r.delete("state"); location.hash = "#/admin?"+r; } });
+
+// ---- notes editing & copy buttons ----------------------------------------------------
+document.addEventListener("click", async e=>{
+  const cp = e.target.closest("[data-copy]");
+  if(cp){ try{ await navigator.clipboard.writeText(cp.dataset.copy); toast("Copied"); }catch{ toast("Copy failed"); } return; }
+  const sec = e.target.closest("section.notes"); if(!sec) return;
+  const target = JSON.parse(sec.dataset.noteTarget), dagId = DV.data?.dag_id;
+  if(e.target.closest("[data-note-edit]")){
+    const cur = sec.querySelector(".noteText")?.textContent || "";
+    sec.querySelector(".noteBody").innerHTML = `<textarea class="noteEdit" rows="4" maxlength="10000" aria-label="Note">${esc(cur)}</textarea>`;
+    sec.querySelector(".noteActs").innerHTML = `<button class="btn" data-note-cancel>Cancel</button><button class="btn primary" data-note-save>Save Note</button>`;
+    sec.querySelector("textarea").focus(); return;
+  }
+  if(e.target.closest("[data-note-cancel]")){ DV.paneKey = ""; render(); return; }
+  if(e.target.closest("[data-note-save]")){
+    const note = sec.querySelector("textarea").value.trim();
+    const url = target.task ? `/dags/${enc(dagId)}/dagRuns/${enc(target.run)}/taskInstances/${enc(target.task)}/note` : `/dags/${enc(dagId)}/dagRuns/${enc(target.run)}/note`;
+    try{ const r = await post(url, {note, ...(target.task && target.mi>=0 ? {map_index: target.mi} : {})}, "PUT");
+      toast(r.queued ? "Note sent to the scheduler (run is in progress)" : note ? "Note saved" : "Note cleared"); DV.paneKey = ""; document.getElementById("tiPage")?.removeAttribute("data-key"); render(); }
+    catch(x){ toast(x.message); }
+  }
+});
 
 // ---- Security: users (CRUD) & roles, Browse: event log -------------------------------
 const ROLES = ["Viewer","User","Op","Admin"];
@@ -1267,16 +1450,17 @@ async function render(){
   const {parts, q} = route();
   try{
     const tab = q.get("tab")||"pools";
-    const navKey = parts[0]!=="admin" ? "dags" : tab==="datasets" ? "datasets" : ["users","roles"].includes(tab) ? "security" : ["errors","events"].includes(tab) ? "browse" : "admin";
+    const navKey = parts[0]!=="admin" ? "dags" : tab==="datasets" ? "datasets" : ["users","roles"].includes(tab) ? "security" : ["errors","events","tis"].includes(tab) ? "browse" : "admin";
     document.querySelectorAll("[data-nav]").forEach(n=>n.classList.toggle("on", n.dataset.nav===navKey));
-    if(parts[0]==="dags" && parts[1]) await viewDag(parts[1], q);
+    if(parts[0]==="dags" && parts[1] && parts[2]==="ti") await viewTI(parts[1], q);
+    else if(parts[0]==="dags" && parts[1]) await viewDag(parts[1], q);
     else if(parts[0]==="admin"){ current=null; await viewAdmin(q.get("tab")||"pools"); }
     else { current=null; await viewList(); }
   }catch(e){ $app.innerHTML = `<div class="banner err"><b>Could not load this page.</b> ${esc(e.message)}. <a href="#/">Back to DAGs</a></div>`; }
 }
 function refreshLoop(){ // live refresh, paused while the user is in a dialog or has text selected
   clearInterval(refreshTimer);
-  refreshTimer = setInterval(()=>{ if(!autoRefresh() || document.querySelector(".dd.open") || document.hidden || document.querySelector("dialog[open]") || String(getSelection()) || document.activeElement?.closest?.(".adminForm")) return;
+  refreshTimer = setInterval(()=>{ if(!autoRefresh() || document.querySelector(".noteEdit") || document.querySelector(".dd.open") || document.hidden || document.querySelector("dialog[open]") || String(getSelection()) || document.activeElement?.closest?.(".adminForm")) return;
     const y = scrollY; render().then(()=>scrollTo(0,y)); health(); }, 4000);
 }
 let lastPath = location.hash.split("?")[0];

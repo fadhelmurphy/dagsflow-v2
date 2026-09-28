@@ -157,7 +157,7 @@ Pilihan dan filter disimpan di URL, jadi bisa dibagikan dan tidak hilang saat au
 - **Code**: isi file DAG dengan nomor baris, highlight Go/YAML, Toggle Wrap, dan waktu *Parsed at*. DAG di `builtin_dags/` ikut ditampilkan (source di-embed ke binary).
 - **Reparse DAG** (role User): memuat ulang file DAG saat itu juga, tanpa menunggu rescan. Webserver langsung reload; scheduler menerima permintaannya dalam ±2 detik (lewat `state/reparse_requests.json`, aman untuk container terpisah). CLI: `dagsflow-go dags reparse <dag_id>`. DAG di `builtin_dags/` tidak bisa di-reparse karena ter-compile di binary.
 - **Mark state as success/failed** (role User), untuk task instance (opsi upstream/downstream) atau seluruh run. Seperti `set_task_instance_state` Airflow, task downstream yang `failed`/`upstream_failed` di-clear dan run di-queue lagi supaya lanjut jalan. Kalau run sedang berjalan, permintaan dikirim ke scheduler: task yang sedang jalan dihentikan (process group di-kill) lalu selesai dengan state yang dipilih.
-- **Rendered Template** (per task instance): nilai field template setelah dirender, misalnya `bash_command`, `env`, `sql` (termasuk isi `sql_file` dengan `params`), `project_id`, `url`/`endpoint`, `data`, `headers`, `conf`, `filepath`. Nilai direkam saat task jalan (`rendered_fields` di run). Kalau task belum jalan di run itu, template dirender on the fly dari konteks run (params, conf, XCom, item mapping), sama seperti Airflow. CLI: `dagsflow-go tasks render <dag_id> <task_id> <run_id> [--map-index N]`.
+- **Rendered Template** (halaman More Details): nilai field template setelah dirender, misalnya `bash_command`, `env`, `sql` (termasuk isi `sql_file` dengan `params`), `project_id`, `url`/`endpoint`, `data`, `headers`, `conf`, `filepath`. Nilai direkam saat task jalan (`rendered_fields` di run). Kalau task belum jalan di run itu, template dirender on the fly dari konteks run (params, conf, XCom, item mapping), sama seperti Airflow. CLI: `dagsflow-go tasks render <dag_id> <task_id> <run_id> [--map-index N]`.
   Task Go custom bisa ikut tampil:
   ```go
   d.NewTask("count_rows", func(ctx *dag.TaskContext) error {
@@ -166,6 +166,10 @@ Pilihan dan filter disimpan di URL, jadi bisa dibagikan dan tidak hilang saat au
   }, dag.WithTemplateField("sql", "SELECT COUNT(*) FROM `p.d.{{ .params.table }}` WHERE dt='{{ .ds }}'", "sql"))
   ```
   Untuk template yang dibangun dinamis: `ctx.RenderAndRecord("nama", raw)`.
+- **Tab Details task instance** (seperti Airflow): link **More Details** dan **List All Instances**, **Task Instance Notes** (Add/Edit Note, juga ada DAG Run Notes di detail run), **Extra Links** (BigQuery Job Detail dan BigQuery Table untuk task BigQuery), lalu tabel Status / Task ID / Run ID (dengan tombol copy) / Map Index / Operator / Trigger Rule / waktu / tries / pool.
+- **More Details** membuka halaman Task Instance dengan tab Grid · Task Instance Details (Dependencies Blocking Task From Getting Scheduled, Task Instance Attributes, Task Attributes) · Rendered Template · Log · XCom.
+- **List All Instances** / Browse → Task Instances: semua task instance, bisa difilter per DAG, task, dan state.
+- Operator custom bisa punya nama dan extra link sendiri: `dag.WithOperatorName("GcsExportOperator")`, `dag.WithExtraLink("GCS Object", "gcs_url")`, lalu di task: `ctx.XComPush("gcs_url", url)`.
 - **Clear task** dengan opsi downstream / upstream / only failed, lengkap dengan pratinjau task yang terdampak.
 - **Filter DAG by task**: tampilkan hanya upstream, downstream, atau keduanya dari task terpilih.
 - **Event Log**: setiap aksi (trigger, pause, clear, mark, reparse, login, perubahan user/pool/variable/connection) dicatat ke `state/audit.log`; tersedia per DAG/run/task dan di Browse → Event Log.

@@ -924,6 +924,16 @@ func (rc *runCtx) applyMarkLive(m MarkRequest) {
 		fmt.Fprintf(os.Stderr, "mark %s/%s: %v\n", rc.r.DagID, rc.r.RunID, err)
 		return
 	}
+	if m.Kind == "note" {
+		rc.mu.Lock()
+		err := SetNote(rc.d, rc.r, m)
+		rc.mu.Unlock()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "note %s/%s: %v\n", rc.r.DagID, rc.r.RunID, err)
+		}
+		rc.save()
+		return
+	}
 	rc.mu.Lock()
 	var cancel []context.CancelFunc
 	set := func(k tiKey, st dag.State) {

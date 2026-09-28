@@ -38,6 +38,7 @@ type TaskInstance struct {
 	StartDate *time.Time `json:"start_date,omitempty"`
 	EndDate   *time.Time `json:"end_date,omitempty"`
 	Error     string     `json:"error,omitempty"`
+	Note      string     `json:"note,omitempty"`
 }
 
 type DagRun struct {
@@ -59,6 +60,7 @@ type DagRun struct {
 	SLAMisses []SLAMiss                  `json:"sla_misses,omitempty"`
 	// Rendered template fields per task instance slot (task or task#mapIndex).
 	Rendered map[string]map[string]string `json:"rendered_fields,omitempty"`
+	Note     string                       `json:"note,omitempty"`
 }
 
 type SLAMiss struct {

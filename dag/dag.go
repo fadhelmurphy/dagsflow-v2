@@ -130,6 +130,8 @@ type Task struct {
 	outlets     []string
 	mapSource   *MapSource
 	templates   []TemplateField
+	operator    string
+	extraLinks  []ExtraLink
 	onSuccess   []Callback
 	onFailure   []Callback
 	onRetry     []Callback
@@ -166,6 +168,32 @@ func WithOnRetryCallback(cb ...Callback) TaskOption {
 // FromXCom automatically adds the source task as an upstream dependency.
 func Expand(src MapSource) TaskOption { return func(t *Task) { s := src; t.mapSource = &s } }
 
+// ExtraLink ~ Airflow operator extra links: a button in the task instance
+// details whose URL is read from an XCom of that task instance.
+type ExtraLink struct {
+	Name    string `json:"name"`
+	XComKey string `json:"xcom_key"`
+}
+
+// WithOperatorName sets the operator name shown in the UI (e.g. "MyExportOperator").
+func WithOperatorName(name string) TaskOption { return func(t *Task) { t.operator = name } }
+
+// WithExtraLink adds an extra link; the task pushes the URL with ctx.XComPush(xcomKey, url).
+func WithExtraLink(name, xcomKey string) TaskOption {
+	return func(t *Task) {
+		for i := range t.extraLinks {
+			if t.extraLinks[i].Name == name {
+				t.extraLinks[i].XComKey = xcomKey
+				return
+			}
+		}
+		t.extraLinks = append(t.extraLinks, ExtraLink{name, xcomKey})
+	}
+}
+
+func (t *Task) Operator() string        { return t.operator }
+func (t *Task) ExtraLinks() []ExtraLink { return t.extraLinks }
+
 func (d *DAG) addTask(id string, fn TaskFunc, br BranchFunc, sn *SensorSpec, opts []TaskOption) *Task {
 	if _, dup := d.taskMap[id]; dup {
 		panic(fmt.Sprintf("dag %s: duplicate task id %q", d.ID, id))
@@ -179,6 +207,14 @@ func (d *DAG) addTask(id string, fn TaskFunc, br BranchFunc, sn *SensorSpec, opt
 		onSuccess: append([]Callback(nil), da.OnSuccess...),
 		onFailure: append([]Callback(nil), da.OnFailure...),
 		onRetry:   append([]Callback(nil), da.OnRetry...),
+	}
+	switch {
+	case sn != nil:
+		t.operator = "GoSensor"
+	case br != nil:
+		t.operator = "BranchGoOperator"
+	default:
+		t.operator = "GoOperator"
 	}
 	for _, o := range opts {
 		o(t)

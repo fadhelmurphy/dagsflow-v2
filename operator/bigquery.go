@@ -15,6 +15,8 @@ type BigQueryOperator struct {
 	Location        string
 	CredentialsFile string
 	Logf            func(format string, args ...any)
+	// OnJob is called once the job is created (for extra links / XCom job_id).
+	OnJob func(jobID, location string)
 }
 
 // Execute runs the query and waits for it. ctx cancellation (task timeout or
@@ -47,6 +49,9 @@ func (op *BigQueryOperator) Execute(ctx context.Context) error {
 		return fmt.Errorf("start query: %w", err)
 	}
 	op.Logf("BigQuery job id: %s", job.ID())
+	if op.OnJob != nil {
+		op.OnJob(job.ID(), job.Location())
+	}
 	status, err := job.Wait(ctx)
 	if err != nil {
 		return fmt.Errorf("wait query: %w", err)

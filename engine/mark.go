@@ -13,6 +13,8 @@ import (
 
 // MarkRequest ~ Airflow "Mark state as success/failed" on a task instance or a DagRun.
 type MarkRequest struct {
+	Kind       string    `json:"kind,omitempty"` // "" = mark state, "note" = set Note
+	Note       string    `json:"note,omitempty"`
 	Target     string    `json:"target"` // "task" or "run"
 	TaskID     string    `json:"task_id,omitempty"`
 	MapIndex   int       `json:"map_index"` // -1 = the whole (mapped) task
@@ -24,6 +26,17 @@ type MarkRequest struct {
 }
 
 func (m MarkRequest) Validate(d *dag.DAG) error {
+	if m.Kind == "note" {
+		if m.Target == "task" {
+			if _, ok := d.Task(m.TaskID); !ok {
+				return fmt.Errorf("task %q not found in dag %s", m.TaskID, d.ID)
+			}
+		}
+		if len(m.Note) > 10000 {
+			return fmt.Errorf("note is too long (max 10000 characters)")
+		}
+		return nil
+	}
 	if m.State != dag.StateSuccess && m.State != dag.StateFailed {
 		return fmt.Errorf("state must be success or failed")
 	}
@@ -149,6 +162,30 @@ func aggregateState(kids []*TaskInstance) (dag.State, bool) {
 		return dag.StateSuccess, true
 	}
 	return dag.StateSkipped, true
+}
+
+// SetNote sets a DagRun or task instance note ("" clears it).
+func SetNote(d *dag.DAG, r *DagRun, m MarkRequest) error {
+	if err := m.Validate(d); err != nil {
+		return err
+	}
+	if m.Target == "run" {
+		r.Note = m.Note
+		return nil
+	}
+	ti := r.Tasks[m.TaskID]
+	if m.MapIndex >= 0 {
+		kids := r.Mapped[m.TaskID]
+		if m.MapIndex >= len(kids) {
+			return fmt.Errorf("map_index %d out of range", m.MapIndex)
+		}
+		ti = kids[m.MapIndex]
+	}
+	if ti == nil {
+		return fmt.Errorf("task instance %s does not exist in this run", m.TaskID)
+	}
+	ti.Note = m.Note
+	return nil
 }
 
 // MarkState applies a mark to a run that is NOT being executed right now

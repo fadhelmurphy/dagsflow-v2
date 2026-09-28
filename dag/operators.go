@@ -14,6 +14,7 @@ import (
 
 // NewEmptyTask ~ EmptyOperator (useful as start/end/join points).
 func (d *DAG) NewEmptyTask(id string, opts ...TaskOption) *Task {
+	opts = append([]TaskOption{WithOperatorName("EmptyOperator")}, opts...)
 	return d.addTask(id, func(*TaskContext) error { return nil }, nil, nil, opts)
 }
 
@@ -24,18 +25,29 @@ func (d *DAG) NewEmptyTask(id string, opts ...TaskOption) *Task {
 // Special params: project_id, location, gcp_conn_id (default google_cloud_default),
 // sql (inline query instead of sqlPath).
 func (d *DAG) NewBigQueryTask(id, sqlPath string, params map[string]any, opts ...TaskOption) *Task {
-	sqlField := TemplateField{Name: "sql", File: sqlPath, Raw: str(params["sql"]), Lang: "sql", Vars: params}
+	// params (minus the inline "sql" itself) are rendered first and exposed to the SQL template
+	vars := map[string]any{}
+	for k, v := range params {
+		if k != "sql" {
+			vars[k] = v
+		}
+	}
+	sqlField := TemplateField{Name: "sql", File: sqlPath, Raw: str(params["sql"]), Lang: "sql", Vars: vars}
 	fields := []TemplateField{sqlField}
 	for _, k := range []string{"project_id", "location"} {
 		if s := str(params[k]); s != "" {
 			fields = append(fields, TemplateField{Name: k, Raw: s, Lang: "text"})
 		}
 	}
-	opts = append([]TaskOption{WithTemplateFields(fields...)}, opts...)
+	opts = append([]TaskOption{WithTemplateFields(fields...), WithOperatorName("BigQueryInsertJobOperator"),
+		WithExtraLink("BigQuery Job Detail", "bigquery_job_url"), WithExtraLink("BigQuery Table", "bigquery_table_url")}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
-		rendered, err := renderMap(ctx, params)
+		rendered, err := renderMap(ctx, vars)
 		if err != nil {
 			return err
+		}
+		if p, ds, tb := str(rendered["project_id"]), str(rendered["destination_dataset"]), str(rendered["destination_table"]); p != "" && ds != "" && tb != "" {
+			_ = ctx.XComPush("bigquery_table_url", fmt.Sprintf("https://console.cloud.google.com/bigquery?project=%s&ws=!1m5!1m4!4m3!1s%s!2s%s!3s%s", p, p, ds, tb))
 		}
 		for _, k := range []string{"project_id", "location"} {
 			if s := str(rendered[k]); s != "" {
@@ -56,6 +68,10 @@ func (d *DAG) NewBigQueryTask(id, sqlPath string, params map[string]any, opts ..
 			CredentialsFile: conn.String("credentials_path"),
 			Logf:            ctx.Logf,
 		}
+		op.OnJob = func(jobID, location string) {
+			_ = ctx.XComPush("job_id", jobID)
+			_ = ctx.XComPush("bigquery_job_url", fmt.Sprintf("https://console.cloud.google.com/bigquery?project=%s&j=bq:%s:%s&page=queryresults", op.ProjectID, location, jobID))
+		}
 		return op.Execute(ctx)
 	}, opts...)
 }
@@ -67,7 +83,7 @@ func (d *DAG) NewTriggerDagRunTask(id, targetDagID string, conf map[string]any, 
 	if conf == nil {
 		conf = map[string]any{}
 	}
-	opts = append([]TaskOption{WithTemplateFields(TemplateField{Name: "conf", Map: conf, Lang: "json"})}, opts...)
+	opts = append([]TaskOption{WithTemplateFields(TemplateField{Name: "conf", Map: conf, Lang: "json"}), WithOperatorName("TriggerDagRunOperator")}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
 		c, err := renderMap(ctx, conf)
 		if err != nil {
@@ -99,7 +115,7 @@ func (d *DAG) NewBashTask(id, command string, env map[string]string, opts ...Tas
 		}
 		fields = append(fields, TemplateField{Name: "env", Map: m, Lang: "json"})
 	}
-	opts = append([]TaskOption{WithTemplateFields(fields...)}, opts...)
+	opts = append([]TaskOption{WithTemplateFields(fields...), WithOperatorName("BashOperator")}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
 		cmdStr, err := ctx.RenderTemplateField("bash_command")
 		if err != nil {
@@ -165,7 +181,7 @@ type HTTPRequest struct {
 
 // NewHTTPTask sends a request; the response body (max 64KB) is XCom "return_value".
 func (d *DAG) NewHTTPTask(id string, req HTTPRequest, opts ...TaskOption) *Task {
-	opts = append([]TaskOption{WithTemplateFields(httpTemplateFields(req)...)}, opts...)
+	opts = append([]TaskOption{WithTemplateFields(httpTemplateFields(req)...), WithOperatorName("HttpOperator")}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
 		code, body, err := doHTTP(ctx, req)
 		if err != nil {
