@@ -1,6 +1,7 @@
 package dag
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sort"
@@ -51,6 +52,7 @@ type DAG struct {
 
 	tasks    []*Task
 	taskMap  map[string]*Task
+	errs     []error // definition errors, reported by validate()
 	topo     []*Task
 	schedule cron.Schedule
 }
@@ -195,9 +197,6 @@ func (t *Task) Operator() string        { return t.operator }
 func (t *Task) ExtraLinks() []ExtraLink { return t.extraLinks }
 
 func (d *DAG) addTask(id string, fn TaskFunc, br BranchFunc, sn *SensorSpec, opts []TaskOption) *Task {
-	if _, dup := d.taskMap[id]; dup {
-		panic(fmt.Sprintf("dag %s: duplicate task id %q", d.ID, id))
-	}
 	da := d.DefaultArgs
 	t := &Task{
 		ID: id, dag: d, execute: fn, branch: br, sensor: sn,
@@ -228,9 +227,26 @@ func (d *DAG) addTask(id string, fn TaskFunc, br BranchFunc, sn *SensorSpec, opt
 	if t.priority == 0 {
 		t.priority = 1
 	}
+	switch _, dup := d.taskMap[id]; {
+	case strings.TrimSpace(id) == "":
+		d.buildErr(fmt.Errorf("a task has an empty id"))
+		return t // detached: linking it is harmless, the DAG will not load
+	case dup:
+		d.buildErr(fmt.Errorf("duplicate task id %q", id))
+		return t
+	}
 	d.tasks = append(d.tasks, t)
 	d.taskMap[id] = t
 	return t
+}
+
+// buildErr records a definition error. The DAG then shows up as an import
+// error instead of crashing the process (DAG files must never take down
+// the scheduler or the webserver).
+func (d *DAG) buildErr(err error) {
+	if d != nil {
+		d.errs = append(d.errs, err)
+	}
 }
 
 // NewTask ~ PythonOperator. Return an error (or panic) to fail the task.
@@ -244,20 +260,93 @@ func (d *DAG) NewBranchTask(id string, fn BranchFunc, opts ...TaskOption) *Task 
 	return d.addTask(id, nil, fn, nil, opts)
 }
 
+// ---- dependencies ----------------------------------------------------------
+//
+//	Airflow                         dagsflow
+//	a >> b >> c                     dag.Chain(a, b, c)        or a.Then(b).Then(c)
+//	a >> [b, c] >> d                dag.Chain(a, dag.Parallel(b, c), d)
+//	[a, b] >> c                     c.After(a, b)
+//	a >> [b, c]                     a.ThenAll(b, c)
+
+// Node is anything that can take part in a dependency: a *Task, a Parallel
+// group, or a typed output (Out[T]) of the TaskFlow-style API.
+type Node interface{ nodeTasks() []*Task }
+
+func (t *Task) nodeTasks() []*Task { return []*Task{t} }
+
+type parallel []*Task
+
+func (p parallel) nodeTasks() []*Task { return p }
+
+// Parallel groups nodes that run side by side (Airflow's [a, b] list).
+func Parallel(nodes ...Node) Node {
+	var out parallel
+	for _, n := range nodes {
+		if n != nil {
+			out = append(out, n.nodeTasks()...)
+		}
+	}
+	return out
+}
+
+// Chain links nodes in order: every task of a node runs before every task of
+// the next one. Chain(a, Parallel(b, c), d) == a >> [b, c] >> d.
+// It returns the last node so chains can be continued.
+func Chain(nodes ...Node) Node {
+	for i := 1; i < len(nodes); i++ {
+		link(nodes[i-1], nodes[i])
+	}
+	if len(nodes) == 0 {
+		return parallel(nil)
+	}
+	return nodes[len(nodes)-1]
+}
+
 // Then sets t >> next and returns next, so calls can be chained: a.Then(b).Then(c).
 func (t *Task) Then(next *Task) *Task {
-	t.link(next)
+	link(t, next)
 	return next
 }
 
 // ThenAll sets t >> [nexts...].
-func (t *Task) ThenAll(nexts ...*Task) {
-	for _, n := range nexts {
-		t.link(n)
+func (t *Task) ThenAll(nexts ...Node) *Task {
+	link(t, Parallel(nexts...))
+	return t
+}
+
+// After declares upstream tasks: c.After(a, b) == [a, b] >> c. Returns t.
+func (t *Task) After(ups ...Node) *Task {
+	link(Parallel(ups...), t)
+	return t
+}
+
+func link(from, to Node) {
+	if from == nil || to == nil {
+		return
+	}
+	for _, a := range from.nodeTasks() {
+		for _, b := range to.nodeTasks() {
+			a.link(b)
+		}
 	}
 }
 
 func (t *Task) link(next *Task) {
+	switch {
+	case t == nil || next == nil:
+		for _, x := range []*Task{t, next} {
+			if x != nil {
+				x.dag.buildErr(fmt.Errorf("dependency with a nil task (next to %q)", x.ID))
+			}
+		}
+		return
+	case t == next:
+		t.dag.buildErr(fmt.Errorf("task %q cannot depend on itself", t.ID))
+		return
+	case t.dag != next.dag:
+		t.dag.buildErr(fmt.Errorf("cannot link %s.%s to %s.%s: tasks belong to different DAGs (use an ExternalTaskSensor or datasets)", t.dag.ID, t.ID, next.dag.ID, next.ID))
+		return
+	}
 	for _, u := range next.upstream {
 		if u == t {
 			return
@@ -265,13 +354,6 @@ func (t *Task) link(next *Task) {
 	}
 	next.upstream = append(next.upstream, t)
 	t.downstream = append(t.downstream, next)
-}
-
-// Chain(a, b, c) == a >> b >> c
-func Chain(tasks ...*Task) {
-	for i := 1; i < len(tasks); i++ {
-		tasks[i-1].link(tasks[i])
-	}
 }
 
 func (t *Task) DAG() *DAG                      { return t.dag }
@@ -341,6 +423,9 @@ func (d *DAG) IsDatasetScheduled() bool    { return d.schedule == nil && len(d.D
 // validate parses the schedule, wires mapping dependencies and checks the graph
 // is acyclic (topological sort).
 func (d *DAG) validate() error {
+	if len(d.errs) > 0 {
+		return errors.Join(d.errs...)
+	}
 	s := strings.TrimSpace(d.Schedule)
 	if s != "" && s != "@once" && s != "None" {
 		sch, err := cron.ParseStandard(s)

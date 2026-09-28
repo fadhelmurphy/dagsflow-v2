@@ -95,6 +95,20 @@ func (c *TaskContext) render(f TemplateField) (string, error) {
 			return "", err
 		}
 		extra = v
+		// like Airflow, operator params are merged into {{ params }}
+		if _, own := v["params"]; !own {
+			merged := map[string]any{}
+			for k, x := range c.Params {
+				merged[k] = x
+			}
+			for k, x := range v {
+				merged[k] = x
+			}
+			extra = map[string]any{"params": merged}
+			for k, x := range v {
+				extra[k] = x
+			}
+		}
 	}
 	return c.Render(raw, extra)
 }

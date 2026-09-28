@@ -31,27 +31,20 @@ func init() {
 	waitFile := producer.NewTimeDeltaSensor("wait_for_upstream_window", 0,
 		dag.SensorConfig{PokeInterval: 2 * time.Second, Timeout: time.Minute, Mode: dag.ModeReschedule})
 
-	list := producer.NewTask("list_branches", func(ctx *dag.TaskContext) error {
-		return ctx.XComPush("return_value", []string{"jakarta", "bandung", "surabaya"})
+	// Typed TaskFlow style: return values are outputs, passing an output to
+	// the next task wires the dependency and hands over the value.
+	branches := dag.Fn(producer, "list_branches", func(ctx *dag.TaskContext) ([]string, error) {
+		return []string{"jakarta", "bandung", "surabaya"}, nil
 	})
 
 	// dynamic task mapping: one instance per branch, limited by pool "bigquery"
-	load := producer.NewTask("load_branch", func(ctx *dag.TaskContext) error {
-		branch, err := dag.ItemAs[string](ctx)
-		if err != nil {
-			return err
-		}
+	rows := dag.Map(producer, "load_branch", branches, func(ctx *dag.TaskContext, branch string) (int, error) {
 		ctx.Logf("loading %s for %s", branch, ctx.LogicalDate.Format("2006-01-02 15:04"))
 		time.Sleep(300 * time.Millisecond)
-		return ctx.XComPush("rows", len(branch)*100)
-	}, dag.Expand(dag.FromXCom("list_branches", "return_value")),
-		dag.WithPool("bigquery"), dag.WithPriorityWeight(5), dag.WithSLA(30*time.Minute))
+		return len(branch) * 100, nil
+	}, dag.WithPool("bigquery"), dag.WithPriorityWeight(5), dag.WithSLA(30*time.Minute))
 
-	publish := producer.NewTask("publish", func(ctx *dag.TaskContext) error {
-		rows, err := dag.XComPullAs[[]int](ctx, "load_branch", "rows") // list, one per mapped instance
-		if err != nil {
-			return err
-		}
+	publish := dag.Consume(producer, "publish", rows, func(ctx *dag.TaskContext, rows []int) error {
 		total := 0
 		for _, r := range rows {
 			total += r
@@ -60,7 +53,9 @@ func init() {
 		return nil
 	}, dag.WithOutlets("bq://fadhel-project.dw.sales"))
 
-	waitFile.Then(list).Then(load).Then(publish)
+	// data dependencies above are wired automatically; add ordering-only ones:
+	dag.Chain(waitFile, branches) // wait_for_upstream_window >> list_branches
+	_ = publish
 	dag.Register(producer)
 
 	// runs whenever bq://fadhel-project.dw.sales is updated

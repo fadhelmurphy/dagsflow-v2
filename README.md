@@ -58,6 +58,62 @@ yang dibatalkan saat timeout/scheduler stop — teruskan ke client DB/HTTP.
 > Setelah branch, task join perlu `dag.WithTriggerRule(dag.NoneFailedMinOneSuccess)`
 > (sama seperti Airflow), karena path yang tidak dipilih berstatus `skipped`.
 
+## Menulis DAG di Go (padanan `with DAG` dan `>>`)
+
+Go tidak punya context manager maupun operator overloading. Padanannya: task dibuat lewat method DAG (`d.NewTask`, `d.NewBashTask`, ...), dan dependensi ditulis dengan fungsi.
+
+| Airflow | dagsflow |
+|---|---|
+| `with DAG(...) as dag:` | `d := dag.NewDAG(...)` lalu `d.NewBashTask(...)`, `d.NewBigQueryTask(...)` |
+| `a >> b >> c` | `dag.Chain(a, b, c)` atau `a.Then(b).Then(c)` |
+| `a >> [b, c] >> d` | `dag.Chain(a, dag.Parallel(b, c), d)` |
+| `[a, b] >> c` | `c.After(a, b)` |
+| `@task` (TaskFlow) | `dag.Fn`, `dag.Fn1`, `dag.Fn2`, `dag.Consume` |
+| `task.expand(x=...)` | `dag.Map(d, id, output, fn)` / `dag.MapItems(d, id, list, fn)` |
+
+### TaskFlow bertipe
+
+Nilai return sebuah task adalah output-nya. Output yang dioper ke task lain otomatis menjadi dependensi sekaligus dikirim lewat XCom, dan tipenya dicek compiler:
+
+```go
+branches := dag.Fn(d, "list_branches", func(ctx *dag.TaskContext) ([]string, error) {
+	return []string{"jakarta", "bandung"}, nil
+})
+rows := dag.Map(d, "load_branch", branches, func(ctx *dag.TaskContext, b string) (int, error) {
+	return loadBranch(ctx, b) // satu instance per branch
+})
+dag.Consume(d, "publish", rows, func(ctx *dag.TaskContext, rows []int) error {
+	ctx.Logf("total %d", sum(rows))
+	return nil
+})
+```
+
+- `Out[T]` bisa dipakai di `Chain`/`After`/`Parallel` seperti task biasa; `out.Task()` memberi `*Task`-nya.
+- Output task klasik (misalnya baris terakhir stdout bash): `dag.OutputOf[string](bashTask, dag.ReturnKey)`.
+- Nilai dikirim sebagai JSON, jadi `T` harus bisa di-serialisasi (angka, string, slice, map, struct dengan field exported).
+- Output hasil `Map` berupa slice, urut sesuai map index.
+
+API lama (`NewTask`, `XComPush`, `XComPullAs`, `Expand`) tetap jalan.
+
+### Kesalahan definisi tidak lagi membuat crash
+
+Task ID duplikat atau kosong, dependensi ke dirinya sendiri, link antar-DAG, dan task `nil` sekarang dicatat sebagai **import error** DAG tersebut. Proses scheduler/webserver tidak ikut crash, termasuk untuk DAG di `builtin_dags/`.
+
+### Template: gaya Go dan Jinja
+
+Template memakai `text/template` Go (`{{ .ds }}`, `{{ .params.x }}`). Supaya file SQL/bash dari Airflow/Composer bisa disalin apa adanya, bentuk Jinja yang umum juga diterima dan bisa dicampur dengan gaya Go:
+
+| Jinja (Airflow) | diterjemahkan jadi |
+|---|---|
+| `{{ ds }}`, `{{ ds_nodash }}`, `{{ ts }}`, `{{ run_id }}` | `{{ .ds }}` dst. |
+| `{{ params.project_id }}` | `{{ .params.project_id }}` |
+| `{{ dag_run.conf['x'] }}` / `{{ dag_run.conf.x }}` | `{{ .conf.x }}` |
+| `{{ var.value.region }}` | `{{ var "region" }}` |
+| `{{ macros.ds_add(ds, -1) }}` | `{{ ds_add .ds -1 }}` |
+| `{{ ti.xcom_pull(task_ids='a', key='k') }}` | `{{ xcom_pull "a" "k" }}` |
+
+Seperti Airflow, `params` milik task BigQuery digabung ke `{{ params }}`. Yang belum didukung: statement Jinja (`{% if %}`, `{% include %}`) dan filter (`| upper`).
+
 ## CLI
 
 ```bash

@@ -183,6 +183,11 @@ func (c *TaskContext) Render(raw string, extra map[string]any) (string, error) {
 			return t.AddDate(0, 0, days).Format("2006-01-02"), nil
 		},
 	}
+	known := make(map[string]bool, len(data))
+	for k := range data {
+		known[k] = true
+	}
+	raw = jinjaCompat(raw, known)
 	tmpl, err := template.New(c.Task.ID).Option("missingkey=error").Funcs(funcs).Parse(raw)
 	if err != nil {
 		return "", err
