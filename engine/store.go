@@ -1,14 +1,16 @@
 package engine
 
 import (
-	"encoding/json"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"dagsflow-go/dag"
@@ -44,6 +46,8 @@ type TaskInstance struct {
 	// 0 = retries+1. Clearing extends it (Airflow: max_tries = try_number + retries),
 	// so the try number keeps growing across clears instead of restarting at 1.
 	MaxTries int `json:"max_tries,omitempty"`
+	// JobID: the task-queue job of the current attempt (remote executors).
+	JobID int64 `json:"job_id,omitempty"`
 }
 
 // MaxTriesFor returns the effective max tries of a task instance.
@@ -56,7 +60,7 @@ func (ti *TaskInstance) MaxTriesFor(retries int) int {
 
 // clearTI resets a task instance so it runs again, keeping its try number.
 func clearTI(r *DagRun, ti *TaskInstance, retries int) {
-	ti.State, ti.StartDate, ti.EndDate, ti.Error = dag.StateNone, nil, nil, ""
+	ti.State, ti.StartDate, ti.EndDate, ti.Error, ti.JobID = dag.StateNone, nil, nil, "", 0
 	if ti.TryNumber > 0 {
 		ti.MaxTries = ti.TryNumber + retries + 1
 	}
@@ -123,6 +127,9 @@ type DagRun struct {
 	// Rendered template fields per task instance slot (task or task#mapIndex).
 	Rendered map[string]map[string]string `json:"rendered_fields,omitempty"`
 	Note     string                       `json:"note,omitempty"`
+
+	version int64 // row version when loaded (Postgres optimistic concurrency)
+	owned   bool  // executed by this process
 }
 
 type SLAMiss struct {
@@ -141,16 +148,241 @@ type DagMeta struct {
 	DatasetConsumed map[string]time.Time `json:"dataset_consumed,omitempty"`
 }
 
-// Store persists metadata as JSON files under $DAGSFLOW_HOME/state.
-// It plays the role of Airflow's metadata database.
-type Store struct{ Home string }
+// Store is the metadata database (Airflow's metadata DB). The data lives in
+// a backend: JSON files under $DAGSFLOW_HOME/state (default, one machine) or
+// Postgres (DAGSFLOW_DATABASE_URL: HA schedulers, workers, several webservers).
+type Store struct {
+	Home string
+	// ID identifies this process as owner of runs, leases and pool slots.
+	ID string
 
-func NewStore(home string) *Store { return &Store{Home: home} }
+	b      backend
+	compMu sync.Mutex
 
-func (s *Store) runsDir(dagID string) string { return filepath.Join(s.Home, "state", "runs", dagID) }
-func (s *Store) metaPath(dagID string) string {
-	return filepath.Join(s.Home, "state", "dags", dagID+".json")
+	// runs this process is executing, and what the last lease renewal said
+	leaseMu   sync.Mutex
+	held      map[string]time.Time
+	renewed   map[string]bool
+	renewedAt time.Time
+
+	bgStop chan struct{}
+	bgDone chan struct{}
+	comp   Component
 }
+
+// NewStore opens the JSON-file store under home.
+func NewStore(home string) *Store {
+	return &Store{Home: home, ID: processID(), b: &jsonBackend{home: home}}
+}
+
+// OpenStore opens Postgres when dsn is set, the JSON store otherwise.
+func OpenStore(home, dsn string) (*Store, error) {
+	if dsn == "" {
+		return NewStore(home), nil
+	}
+	pg, err := openPG(dsn)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{Home: home, ID: processID(), b: pg}, nil
+}
+
+var randRead = rand.Read
+
+func processID() string {
+	host, _ := os.Hostname()
+	raw := make([]byte, 3)
+	_, _ = rand.Read(raw)
+	return fmt.Sprintf("%s:%d:%s", host, os.Getpid(), hex.EncodeToString(raw))
+}
+
+func (s *Store) be() backend {
+	if s.b == nil { // zero-value Store{Home: ...}
+		s.b = &jsonBackend{home: s.Home}
+	}
+	return s.b
+}
+
+// Backend is "json" or "postgres".
+func (s *Store) Backend() string { return s.be().kind() }
+
+// Distributed reports whether several processes/machines can share this store.
+func (s *Store) Distributed() bool { return s.Backend() == "postgres" }
+
+// Register records this process in the component table and keeps its
+// heartbeat (and the leases of the runs it owns) fresh until Close. A process
+// that is both webserver and scheduler (standalone) registers as scheduler.
+func (s *Store) Register(kind string, info map[string]any) {
+	s.compMu.Lock()
+	if s.bgStop != nil {
+		if kind == "scheduler" && s.comp.Kind != "scheduler" {
+			old := s.comp.ID
+			s.comp.Kind, s.comp.Info = kind, info
+			if !s.Distributed() {
+				s.comp.ID = "scheduler"
+			}
+			c := s.comp
+			s.compMu.Unlock()
+			if old != c.ID {
+				s.be().removeComponent(old)
+			}
+			_ = s.be().heartbeat(c)
+			return
+		}
+		s.compMu.Unlock()
+		return
+	}
+	host, _ := os.Hostname()
+	now := time.Now()
+	s.comp = Component{ID: s.ID, Kind: kind, Host: host, PID: os.Getpid(), Started: now, Heartbeat: now, Info: info}
+	if kind == "scheduler" && !s.Distributed() {
+		s.comp.ID = "scheduler"
+	}
+	c := s.comp
+	s.bgStop, s.bgDone = make(chan struct{}), make(chan struct{})
+	stop, done := s.bgStop, s.bgDone
+	s.compMu.Unlock()
+	_ = s.be().heartbeat(c)
+	go func() {
+		defer close(done)
+		every := heartbeatInterval
+		if !s.Distributed() {
+			every = time.Second // the JSON scheduler pid file expects 1s updates
+		}
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				s.compMu.Lock()
+				s.comp.Heartbeat = time.Now()
+				c := s.comp
+				s.compMu.Unlock()
+				if err := s.be().heartbeat(c); err != nil {
+					metricErrors.inc("heartbeat")
+				}
+				s.renew()
+			}
+		}
+	}()
+}
+
+func runKey(dagID, runID string) string { return dagID + "\x1f" + runID }
+
+// renew extends the leases of the runs this process executes.
+func (s *Store) renew() {
+	s.leaseMu.Lock()
+	keys := make([]string, 0, len(s.held))
+	for k := range s.held {
+		keys = append(keys, k)
+	}
+	s.leaseMu.Unlock()
+	start := time.Now()
+	got, err := s.be().renewLeases(s.ID, keys)
+	if err != nil {
+		metricErrors.inc("lease_renew")
+		return
+	}
+	s.leaseMu.Lock()
+	s.renewed, s.renewedAt = got, start
+	s.leaseMu.Unlock()
+}
+
+// holdRun / releaseRun: the runs this process is executing (their leases
+// are renewed; others it may still own expire and get adopted).
+func (s *Store) holdRun(dagID, runID string) {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	if s.held == nil {
+		s.held = map[string]time.Time{}
+	}
+	s.held[runKey(dagID, runID)] = time.Now()
+}
+
+func (s *Store) releaseRun(dagID, runID string) {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	delete(s.held, runKey(dagID, runID))
+}
+
+// OwnsRun reports whether this process can still trust its ownership of a
+// run it executes: the last lease renewal included it, and renewals are
+// recent enough that the lease cannot have expired (e.g. database
+// unreachable). When false the run must stop here (fencing).
+func (s *Store) OwnsRun(dagID, runID string) bool {
+	if !s.Distributed() {
+		return true
+	}
+	k := runKey(dagID, runID)
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	heldAt := s.held[k]
+	if s.renewedAt.After(heldAt) && !s.renewed[k] {
+		return false // renewal found it owned by someone else (or gone)
+	}
+	last := s.renewedAt
+	if heldAt.After(last) {
+		last = heldAt
+	}
+	return time.Since(last) < runLease-2*heartbeatInterval
+}
+
+// Unregister stops the heartbeat and removes this process from the
+// component table (its pool slots and leases are released).
+func (s *Store) Unregister() {
+	s.compMu.Lock()
+	stop, done, id := s.bgStop, s.bgDone, s.comp.ID
+	s.bgStop = nil
+	s.compMu.Unlock()
+	if stop != nil {
+		close(stop)
+		<-done
+		s.be().removeComponent(id)
+	}
+}
+
+// Close unregisters the process and closes the backend.
+func (s *Store) Close() {
+	s.Unregister()
+	s.be().close()
+}
+
+// ensureRegistered: owning runs or pool slots needs a heartbeat (Postgres).
+func (s *Store) ensureRegistered() {
+	if s.Distributed() {
+		s.Register("cli", nil)
+	}
+}
+
+// Ping checks the metadata database connection.
+func (s *Store) Ping() error {
+	if p, ok := s.be().(*pgBackend); ok {
+		return p.ping()
+	}
+	_, err := os.Stat(s.Home)
+	return err
+}
+
+// SchemaStatus returns the applied and expected schema versions (Postgres).
+func (s *Store) SchemaStatus() (applied, expected int, err error) {
+	if p, ok := s.be().(*pgBackend); ok {
+		applied, err = p.schemaVersion()
+		return applied, SchemaVersion(), err
+	}
+	return 0, 0, nil
+}
+
+// Components lists registered processes (schedulers, webservers, workers).
+func (s *Store) Components() ([]Component, error) { return s.be().components() }
+
+// TryLease acquires or renews a named lease (e.g. scheduler leadership).
+func (s *Store) TryLease(name string, ttl time.Duration) bool {
+	ok, err := s.be().tryLease(name, s.ID, ttl)
+	return ok && err == nil
+}
+
 func (s *Store) LogsDir() string { return filepath.Join(s.Home, "logs") }
 
 func mappedKey(taskID string, idx int) string { return fmt.Sprintf("%s#%d", taskID, idx) }
@@ -159,113 +391,42 @@ func safeName(runID string) string {
 	return strings.NewReplacer(":", "_", "/", "_", "\\", "_").Replace(runID)
 }
 
-func (s *Store) runPath(dagID, runID string) string {
-	return filepath.Join(s.runsDir(dagID), safeName(runID)+".json")
+// SaveRun writes a run. A run owned by this process (being executed here) is
+// written unconditionally; any other run only if nobody executes it and it
+// did not change since it was loaded, else ErrConflict (Postgres). A new run
+// that already exists is an ErrConflict as well.
+func (s *Store) SaveRun(r *DagRun) error { return s.be().saveRun(r, s.ID) }
+
+// CreateRun inserts a new run; false when it already exists.
+func (s *Store) CreateRun(r *DagRun) (bool, error) {
+	if s.RunExists(r.DagID, r.RunID) {
+		return false, nil
+	}
+	err := s.SaveRun(r)
+	if errors.Is(err, ErrConflict) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
-func writeJSONAtomic(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := fmt.Sprintf("%s.tmp%d", path, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return renameReplace(tmp, path)
-}
-
-// renameReplace atomically replaces path. On Windows the replace fails while
-// another process (e.g. the webserver) has the file open, so it is retried
-// for up to ~2s instead of losing the write.
-func renameReplace(tmp, path string) error {
-	var err error
-	for i := 0; i < 30; i++ {
-		if err = os.Rename(tmp, path); err == nil {
-			return nil
-		}
-		if runtime.GOOS != "windows" {
-			break
-		}
-		time.Sleep(time.Duration(10+i*5) * time.Millisecond)
-	}
-	_ = os.Remove(tmp)
-	return err
-}
-
-func readJSON(path string, v any) error {
-	var b []byte
-	var err error
-	for i := 0; i < 10; i++ { // Windows: the file may be mid-replace (sharing violation)
-		if b, err = os.ReadFile(path); err == nil || os.IsNotExist(err) || runtime.GOOS != "windows" {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(b, v)
-}
-
-func (s *Store) SaveRun(r *DagRun) error { return writeJSONAtomic(s.runPath(r.DagID, r.RunID), r) }
-
-func (s *Store) DeleteRun(dagID, runID string) error {
-	if err := os.Remove(s.runPath(dagID, runID)); err != nil {
-		return err
-	}
-	_ = os.RemoveAll(filepath.Join(s.LogsDir(), "dag_id="+dagID, "run_id="+safeName(runID)))
-	return nil
-}
+func (s *Store) DeleteRun(dagID, runID string) error { return s.be().deleteRun(dagID, runID) }
 
 // DeleteDagData removes every run, the DAG's metadata and its logs (Airflow's
 // "Delete DAG"): the definition itself stays and shows up again empty.
-func (s *Store) DeleteDagData(dagID string) error {
-	for _, p := range []string{s.runsDir(dagID), s.metaPath(dagID), filepath.Join(s.LogsDir(), "dag_id="+dagID)} {
-		if err := os.RemoveAll(p); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+func (s *Store) DeleteDagData(dagID string) error { return s.be().deleteDagData(dagID) }
 
-func (s *Store) RunExists(dagID, runID string) bool {
-	_, err := os.Stat(s.runPath(dagID, runID))
-	return err == nil
-}
+func (s *Store) RunExists(dagID, runID string) bool { return s.be().runExists(dagID, runID) }
 
-func (s *Store) LoadRun(dagID, runID string) (*DagRun, error) {
-	var r DagRun
-	if err := readJSON(s.runPath(dagID, runID), &r); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("dag run %s/%s not found", dagID, runID)
-		}
-		return nil, err
-	}
-	return &r, nil
-}
+func (s *Store) LoadRun(dagID, runID string) (*DagRun, error) { return s.be().loadRun(dagID, runID) }
 
 // ListRuns returns runs of a DAG ordered by logical date (oldest first).
-func (s *Store) ListRuns(dagID string) ([]*DagRun, error) {
-	entries, err := os.ReadDir(s.runsDir(dagID))
+func (s *Store) ListRuns(dagID string) ([]*DagRun, error) { return s.ListRunsByState(dagID) }
+
+// ListRunsByState: runs in one of the given states (all when none given).
+func (s *Store) ListRunsByState(dagID string, states ...string) ([]*DagRun, error) {
+	out, err := s.be().listRuns(dagID, states)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
-	}
-	var out []*DagRun
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		var r DagRun
-		if err := readJSON(filepath.Join(s.runsDir(dagID), e.Name()), &r); err == nil {
-			out = append(out, &r)
-		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].LogicalDate.Equal(out[j].LogicalDate) {
@@ -276,13 +437,52 @@ func (s *Store) ListRuns(dagID string) ([]*DagRun, error) {
 	return out, nil
 }
 
-func (s *Store) GetDagMeta(dagID string) *DagMeta {
-	m := &DagMeta{DagID: dagID}
-	_ = readJSON(s.metaPath(dagID), m)
-	return m
+// ClaimRun atomically moves a queued run to running, owned by this process,
+// unless the DAG already has maxActive running runs (across all schedulers).
+// Returns nil when the run was not claimed.
+func (s *Store) ClaimRun(dagID, runID string, maxActive int) (*DagRun, error) {
+	s.ensureRegistered()
+	return s.be().claimRun(dagID, runID, s.ID, maxActive)
 }
 
-func (s *Store) SaveDagMeta(m *DagMeta) error { return writeJSONAtomic(s.metaPath(m.DagID), m) }
+// TakeOwnership marks r running and owned by this process (e.g. `dags test`).
+func (s *Store) TakeOwnership(r *DagRun) error {
+	if r.owned {
+		return nil
+	}
+	s.ensureRegistered()
+	return s.be().takeOwnership(r, s.ID)
+}
+
+// RequeueOrphans re-queues running runs whose owner died (lease expired).
+func (s *Store) RequeueOrphans() ([]string, error) { return s.be().requeueOrphans() }
+
+// DagIDs lists DAG ids that have runs or metadata.
+func (s *Store) DagIDs() ([]string, error) { return s.be().dagIDs() }
+
+func (s *Store) GetDagMeta(dagID string) *DagMeta { return s.be().getDagMeta(dagID) }
+
+func (s *Store) SaveDagMeta(m *DagMeta) error { return s.be().saveDagMeta(m) }
+
+func (s *Store) readTable(name string, v any) error { return s.be().readTable(name, v) }
+
+func (s *Store) updateTable(name string, v any, fn func() error) error {
+	return s.be().updateTable(name, v, fn)
+}
+
+// SecretKey is the shared webserver session signing key.
+func (s *Store) SecretKey() ([]byte, error) { return s.be().secretKey() }
+
+// OpenTaskLog opens (appends to) the log of one attempt. The returned string
+// says where it lives (a path, or db://... for Postgres).
+func (s *Store) OpenTaskLog(k LogKey) (io.WriteCloser, string, error) { return s.be().openLog(k) }
+
+// ReadTaskLog returns the log of one attempt.
+func (s *Store) ReadTaskLog(k LogKey) ([]byte, error) { return s.be().readLog(k) }
+
+// Cleanup deletes finished runs, event logs, jobs and logs older than before
+// (Airflow's `db clean`).
+func (s *Store) Cleanup(before time.Time) (CleanupStats, error) { return s.be().cleanup(before) }
 
 // NewDagRun builds a run with one TaskInstance per task in state none.
 func NewDagRun(d *dag.DAG, runType, runID string, logical, start, end time.Time, conf map[string]any) *DagRun {

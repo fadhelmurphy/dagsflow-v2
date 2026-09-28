@@ -164,8 +164,10 @@ Default hanya listen di localhost. Kalau diekspos, aktifkan basic auth:
 - Run untuk interval `[start, end)` dibuat setelah `end` lewat; `logical_date = start`.
 - `catchup=false` (default): hanya interval terakhir yang dibuat saat telat/restart.
 - Tidak membuat run baru selama jumlah run queued+running ≥ `max_active_runs` (default 1).
-- Stop scheduler → task yang sedang jalan dibatalkan & run kembali `queued`; saat start lagi,
+- Stop scheduler (executor `local`) → task yang sedang jalan dibatalkan & run kembali `queued`; saat start lagi,
   task yang sudah sukses tidak diulang. Run yatim (crash) juga di-resume.
+- Dengan executor `worker`/`kubernetes`, stop/crash scheduler **tidak** membunuh task: scheduler lain
+  (atau scheduler yang sama setelah restart) mengambil alih run-nya dan menyambung ke job yang masih jalan.
 - DAG yang di-pause tidak menjalankan run apa pun (termasuk manual trigger).
 
 ## Windows
@@ -198,12 +200,14 @@ Buka http://localhost:8080 dan login dengan admin dari `.env`.
 
 | Service | Fungsi |
 |---|---|
-| `dagsflow-init` | membuat user admin (idempotent) dan meng-compile DAG Go sekali, lalu selesai |
-| `dagsflow-scheduler` | scheduler + executor; **jalankan 1 replika saja** (store masih JSON) |
+| `postgres` | metadata database |
+| `dagsflow-init` | migrasi schema, membuat user admin (idempotent), compile DAG Go sekali, lalu selesai |
+| `dagsflow-scheduler` | 2 replika (HA): satu jadi leader (membuat run), semuanya mengeksekusi run |
+| `dagsflow-worker` | 2 replika: menjalankan task dari antrean (`--scale dagsflow-worker=N`) |
 | `dagsflow-webserver` | UI + REST API di port 8080 |
 
 - `./dags` di-mount sebagai DAG folder. Tambah/ubah file `.go` atau `.yaml` di host, dan dalam ±30 detik DAG-nya muncul tanpa rebuild image.
-- State, logs, hasil compile bundle, dan build cache Go disimpan di named volume, jadi aman saat container di-recreate.
+- Metadata, log task, XCom, dan antrean task ada di Postgres, jadi service bisa di-recreate atau dipindah host tanpa shared volume. Hasil compile bundle dan build cache Go ada di named volume.
 - Image berisi Go toolchain + source dagsflow-go karena dibutuhkan untuk compile DAG Go. Build cache sudah dipanaskan di image, jadi compile DAG pertama cepat.
 - BigQuery: taruh service account di `./keys` lalu set `GOOGLE_APPLICATION_CREDENTIALS=/opt/dagsflow-home/keys/<file>.json` di `.env`.
 - User tambahan: `docker compose exec dagsflow-webserver dagsflow-go users create --username fadhel --role Op`.
@@ -393,11 +397,59 @@ curl -H "$H" -X PATCH $B/dags/custom_dag -d '{"is_paused":true}'
 ```
 Endpoint lain: `dagRuns/{run}/clear`, `DELETE dagRuns/{run}`, `pools`, `variables`, `connections` (nilai sensitif di-mask), `datasets`, `importErrors`, `users`, `users/{u}/tokens`, `health`, `me`.
 
+## Production
+
+Untuk production pakai **Postgres** sebagai metadata database. Tanpa `DAGSFLOW_DATABASE_URL`, dagsflow tetap memakai file JSON (cocok untuk laptop / satu mesin, satu scheduler).
+
+```bash
+export DAGSFLOW_DATABASE_URL='postgres://dagsflow:***@db:5432/dagsflow?sslmode=require'   # atau DAGSFLOW_DATABASE_URL_FILE
+dagsflow-go db migrate                      # juga otomatis saat start
+dagsflow-go scheduler --executor worker     # jalankan 2+ di mesin berbeda
+dagsflow-go worker -c 8 -q default          # sebanyak yang dibutuhkan
+dagsflow-go webserver --addr 0.0.0.0:8080   # boleh beberapa replika di belakang load balancer
+```
+
+**Scheduler HA**
+- Beberapa scheduler boleh jalan bersamaan. Satu jadi *leader* (lease 15 detik): membuat run terjadwal/dataset, mengadopsi run yatim, dan menjalankan retensi. Semua scheduler mengeksekusi run.
+- Run di-*claim* secara atomik (`queued → running`), jadi tidak ada run yang dijalankan dua kali. `max_active_runs` dan pools berlaku global untuk semua scheduler.
+- Run yang sedang jalan dimiliki satu scheduler dengan lease 30 detik yang diperpanjang tiap 5 detik. Kalau scheduler mati, leader memasukkan run-nya kembali ke antrean dan scheduler lain melanjutkan. Scheduler lama yang ternyata masih hidup (misalnya habis ter-pause) langsung berhenti menulis (fencing).
+- Tulis dari webserver/CLI memakai optimistic concurrency: kalau run berubah di tempat lain, API menjawab `409` dan tinggal diulang.
+
+**Executor**
+
+| `--executor` | Task jalan di | Catatan |
+|---|---|---|
+| `local` (default) | proses scheduler | seperti LocalExecutor |
+| `worker` | proses `dagsflow-go worker` | seperti CeleryExecutor, antrean di Postgres. Routing: `dag.WithQueue("heavy")` / `queue:` di YAML, lalu `worker -q heavy` |
+| `kubernetes` | satu pod per task | seperti KubernetesExecutor. Lihat `deploy/kubernetes/dagsflow.yaml`. Per task: `dag.WithPodOverride(...)` / `pod_override:` di YAML |
+
+- Worker butuh DAG folder dan connections yang sama dengan scheduler. XCom, rendered template, dataset extra, dan log dikirim lewat database, jadi tidak perlu shared volume.
+- Worker yang mati (heartbeat hilang 60 detik) membuat attempt gagal, lalu `retries` berlaku. Pod yang gagal start (ImagePullBackOff, OOMKilled, dll.) juga membuat attempt gagal, tidak menggantung.
+- `worker --grace 10m`: saat shutdown, task yang sedang jalan diberi waktu untuk selesai.
+- Sensor di worker/pod selalu mode `poke`.
+
+**Observability**
+- `GET /metrics` (webserver; scheduler dan worker lewat `--metrics-addr :9102`) dalam format Prometheus. Isinya: durasi dan jumlah run/task per state, task yang running/antre, pool terpakai, komponen yang hidup, kedalaman antrean, import error, dan status leader. Metrics di webserver bisa diberi token (`DAGSFLOW_METRICS_TOKEN`) atau dimatikan (`DAGSFLOW_METRICS=off`).
+- `GET /health` (liveness), `GET /ready` (DB bisa dijangkau), `GET /api/v1/health` (status metadatabase + scheduler).
+- Admin → **Components** (atau `dagsflow-go db check`) menampilkan scheduler, webserver, dan worker beserta heartbeat-nya.
+- `DAGSFLOW_LOG_FORMAT=json`: log komponen jadi satu objek JSON per baris (Cloud Logging, Loki, ELK).
+
+**Keamanan**
+- HTTPS langsung: `webserver --tls-cert cert.pem --tls-key key.pem`. Kalau di belakang proxy, teruskan `X-Forwarded-Proto`.
+- Login dan Basic auth dikunci 15 menit setelah 5 kali gagal per username/IP. `X-Forwarded-For` hanya dipercaya kalau `DAGSFLOW_TRUST_PROXY_HEADERS=true`.
+- Header keamanan: CSP, HSTS (untuk HTTPS), X-Frame-Options, nosniff. Request mengubah data butuh header CSRF (`X-Dagsflow`) atau Bearer token. Server punya timeout dan batas ukuran body.
+- Set `DAGSFLOW_FERNET_KEY` (variables/connections terenkripsi) dan `DAGSFLOW_SECRET_KEY` (sama di semua replika webserver). Kalau `SECRET_KEY` kosong, key dibuat sekali dan disimpan di metadata DB.
+
+**Operasional**
+- Retensi: `--retention-days 90` / `DAGSFLOW_RETENTION_DAYS` (dijalankan leader tiap jam), atau manual `dagsflow-go db clean --older-than 90d --yes`.
+- Backup/restore: `dagsflow-go db export -f backup.json` / `db import -f backup.json`. Untuk pindah dari JSON ke Postgres: jalankan `db export` tanpa `DAGSFLOW_DATABASE_URL`, lalu `db import` dengan `DAGSFLOW_DATABASE_URL` di-set. Log task tidak ikut di-export. Untuk backup rutin Postgres tetap pakai `pg_dump` / snapshot managed DB.
+- Upgrade: schema dimigrasi otomatis saat start, dengan lock supaya aman kalau beberapa proses start bersamaan. Binary lama menolak jalan kalau schema DB lebih baru. Rolling restart scheduler aman (lihat HA di atas).
+
 ## Batasan saat ini
 
-- Executor masih satu proses (LocalExecutor). Executor terdistribusi butuh metadata DB transaksional (Postgres) dan direncanakan berikutnya.
-- Metadata disimpan sebagai JSON; tulis bersamaan dari beberapa proses = last-writer-wins. Jalankan satu scheduler.
-- Task Go berjalan sebagai goroutine; task yang tidak menghormati `ctx` tetap jalan setelah timeout. Bash task di-kill satu process group.
+- Task Go berjalan sebagai goroutine; task yang tidak menghormati `ctx` tetap jalan setelah timeout. Bash task di-kill satu process group. Di worker/pod, cancel dari scheduler juga bergantung pada `ctx`.
+- Dengan store JSON hanya boleh satu scheduler (dijaga lock file). HA, worker, dan pod butuh Postgres.
+- Rate limit login disimpan per proses webserver (tidak dibagi antar replika).
 
 ## Connections
 

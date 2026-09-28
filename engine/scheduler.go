@@ -6,8 +6,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 
 	"dagsflow-go/dag"
@@ -26,6 +24,13 @@ type Scheduler struct {
 	Reload      func()
 	ReloadEvery time.Duration
 	lastReload  time.Time
+	// RetentionDays > 0: the leader deletes finished runs, logs, event logs
+	// and jobs older than this, once an hour (~ `airflow db clean`).
+	RetentionDays int
+
+	leader      bool
+	lastOrphans time.Time
+	lastCleanup time.Time
 }
 
 func NewScheduler(e *Engine) *Scheduler {
@@ -33,13 +38,26 @@ func NewScheduler(e *Engine) *Scheduler {
 }
 
 func (s *Scheduler) Run(ctx context.Context) error {
-	if err := s.writeHeartbeat(); err != nil {
-		return err
+	if !s.Store.Distributed() {
+		// JSON files are not safe for several schedulers: hold an exclusive lock
+		unlock, err := lockFile(filepath.Join(s.Store.Home, "state", "scheduler.lock"))
+		if err != nil {
+			pid, _ := SchedulerInfo(s.Store)
+			return fmt.Errorf("another scheduler is already running (pid %d); several schedulers need the Postgres metadata database", pid)
+		}
+		defer unlock()
 	}
-	defer os.Remove(heartbeatPath(s.Store))
+	exec := "local"
+	if s.Engine.Executor != nil {
+		exec = s.Engine.Executor.Name()
+	}
+	s.Store.Register("scheduler", map[string]any{"executor": exec, "parallelism": s.Engine.slots.parallelism})
+	defer s.Store.Unregister()
 
-	s.Log.Printf("started, pid=%d, dags=%d", os.Getpid(), len(dag.List()))
-	s.recoverOrphans()
+	s.Log.Printf("started, id=%s, store=%s, executor=%s, dags=%d", s.Store.ID, s.Store.Backend(), exec, len(dag.List()))
+	if !s.Store.Distributed() {
+		s.recoverOrphans()
+	}
 	for id, err := range dag.ImportErrors() {
 		s.Log.Printf("IMPORT ERROR %s: %v", id, err)
 	}
@@ -57,7 +75,6 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			s.Engine.Wait()
 			return nil
 		case <-t.C:
-			_ = s.writeHeartbeat()
 			if _, err := os.Stat(stopPath(s.Store)); err == nil { // `scheduler stop` (works on every OS)
 				_ = os.Remove(stopPath(s.Store))
 				s.Log.Printf("stop requested")
@@ -76,9 +93,40 @@ func RequestStop(st *Store) error {
 }
 
 func (s *Scheduler) loop(ctx context.Context, now time.Time) {
+	defer func() { metricLoop.observe(time.Since(now).Seconds()) }()
 	if s.Reload != nil && now.Sub(s.lastReload) >= s.ReloadEvery {
 		s.Reload()
 		s.lastReload = now
+	}
+	// Leader election: one scheduler creates runs and adopts orphans; every
+	// scheduler executes queued runs (claimed atomically).
+	leader := s.Store.TryLease("scheduler_leader", 15*time.Second)
+	if leader != s.leader {
+		s.leader = leader
+		if s.Store.Distributed() {
+			s.Log.Printf("leadership: %v", leader)
+		}
+	}
+	metricLeader.set(map[bool]float64{true: 1, false: 0}[leader])
+	if leader && s.Store.Distributed() && now.Sub(s.lastOrphans) >= 5*time.Second {
+		s.lastOrphans = now
+		if ids, err := s.Store.RequeueOrphans(); err != nil {
+			metricErrors.inc("requeue_orphans")
+		} else {
+			for _, id := range ids {
+				metricOrphans.inc()
+				s.Log.Printf("re-queued orphaned run %s (its scheduler stopped)", id)
+			}
+		}
+	}
+	if leader && s.RetentionDays > 0 && now.Sub(s.lastCleanup) >= time.Hour {
+		s.lastCleanup = now
+		before := now.AddDate(0, 0, -s.RetentionDays)
+		if st, err := s.Store.Cleanup(before); err != nil {
+			s.Log.Printf("retention cleanup: %v", err)
+		} else if st != (CleanupStats{}) {
+			s.Log.Printf("retention cleanup (older than %d days): %+v", s.RetentionDays, st)
+		}
 	}
 	for _, d := range dag.List() {
 		meta := s.Store.GetDagMeta(d.ID)
@@ -87,7 +135,7 @@ func (s *Scheduler) loop(ctx context.Context, now time.Time) {
 		}
 		// Like Airflow: no new scheduled runs while max_active_runs is reached,
 		// so slow DAGs don't pile up an endless queue.
-		if pending := s.pendingRuns(d.ID); pending < d.MaxActiveRuns {
+		if pending := s.pendingRuns(d.ID); leader && pending < d.MaxActiveRuns {
 			if d.IsDatasetScheduled() {
 				s.createDatasetRun(d, meta, now)
 			} else if !d.IsManualOnly() {
@@ -141,12 +189,13 @@ func (s *Scheduler) createScheduledRuns(d *dag.DAG, meta *DagMeta, now time.Time
 	}
 	for _, iv := range due {
 		runID := "scheduled__" + iv.start.UTC().Format(time.RFC3339)
-		if s.Store.RunExists(d.ID, runID) {
+		r := NewDagRun(d, RunTypeScheduled, runID, iv.start, iv.start, iv.end, nil)
+		created, err := s.Store.CreateRun(r)
+		if err != nil {
+			s.Log.Printf("create run %s/%s: %v", d.ID, runID, err)
 			continue
 		}
-		r := NewDagRun(d, RunTypeScheduled, runID, iv.start, iv.start, iv.end, nil)
-		if err := s.Store.SaveRun(r); err != nil {
-			s.Log.Printf("create run %s/%s: %v", d.ID, runID, err)
+		if !created {
 			continue
 		}
 		s.Log.Printf("created %s/%s (interval %s → %s)", d.ID, runID, iv.start.Format(time.RFC3339), iv.end.Format(time.RFC3339))
@@ -180,7 +229,7 @@ func (s *Scheduler) createDatasetRun(d *dag.DAG, meta *DagMeta, now time.Time) {
 		events[uri] = fresh
 	}
 	r := NewDagRun(d, RunTypeDataset, "", now.UTC(), now.UTC(), now.UTC(), map[string]any{"triggering_dataset_events": events})
-	if err := s.Store.SaveRun(r); err != nil {
+	if _, err := s.Store.CreateRun(r); err != nil {
 		s.Log.Printf("create dataset run %s: %v", d.ID, err)
 		return
 	}
@@ -192,30 +241,35 @@ func (s *Scheduler) createDatasetRun(d *dag.DAG, meta *DagMeta, now time.Time) {
 }
 
 func (s *Scheduler) pendingRuns(dagID string) int {
-	runs, _ := s.Store.ListRuns(dagID)
-	n := 0
-	for _, r := range runs {
-		if r.State == RunQueued || r.State == RunRunning {
-			n++
-		}
-	}
-	return n
+	runs, _ := s.Store.ListRunsByState(dagID, RunQueued, RunRunning)
+	return len(runs)
 }
 
 func (s *Scheduler) startQueuedRuns(ctx context.Context, d *dag.DAG) {
-	runs, err := s.Store.ListRuns(d.ID)
+	runs, err := s.Store.ListRunsByState(d.ID, RunQueued)
 	if err != nil {
+		metricErrors.inc("list_runs")
 		return
 	}
 	for _, r := range runs {
-		if r.State != RunQueued || s.Engine.IsActive(d.ID, r.RunID) {
+		if s.Engine.IsActive(d.ID, r.RunID) {
 			continue
 		}
 		if s.Engine.ActiveCount(d.ID) >= d.MaxActiveRuns {
 			return
 		}
+		// atomic queued -> running (max_active_runs checked across schedulers)
+		claimed, err := s.Store.ClaimRun(d.ID, r.RunID, d.MaxActiveRuns)
+		if err != nil {
+			metricErrors.inc("claim_run")
+			s.Log.Printf("claim %s/%s: %v", d.ID, r.RunID, err)
+			continue
+		}
+		if claimed == nil {
+			continue // another scheduler took it, or max_active_runs reached
+		}
 		s.Log.Printf("starting %s/%s", d.ID, r.RunID)
-		if _, err := s.Engine.Submit(ctx, r); err != nil {
+		if _, err := s.Engine.Submit(ctx, claimed); err != nil {
 			s.Log.Printf("submit %s/%s: %v", d.ID, r.RunID, err)
 		}
 	}
@@ -236,31 +290,36 @@ func (s *Scheduler) recoverOrphans() {
 	}
 }
 
-// ---- heartbeat / pid ---------------------------------------------------------
+// ---- liveness ------------------------------------------------------------------
 
-func heartbeatPath(st *Store) string { return filepath.Join(st.Home, "state", "scheduler.pid") }
-
-func (s *Scheduler) writeHeartbeat() error {
-	p := heartbeatPath(s.Store)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(p, []byte(fmt.Sprintf("%d %d", os.Getpid(), time.Now().Unix())), 0o644)
-}
-
-// SchedulerInfo returns the scheduler pid and whether its heartbeat is fresh.
+// SchedulerInfo returns the pid of a live scheduler and whether there is one.
 func SchedulerInfo(st *Store) (pid int, alive bool) {
-	b, err := os.ReadFile(heartbeatPath(st))
+	cs, err := st.Components()
 	if err != nil {
 		return 0, false
 	}
-	f := strings.Fields(string(b))
-	if len(f) != 2 {
-		return 0, false
+	for _, c := range cs {
+		if c.Kind == "scheduler" && c.Alive() {
+			return c.PID, true
+		}
 	}
-	pid, _ = strconv.Atoi(f[0])
-	ts, _ := strconv.ParseInt(f[1], 10, 64)
-	return pid, time.Since(time.Unix(ts, 0)) < 10*time.Second
+	return 0, false
 }
 
 func schedulerAlive(st *Store) bool { _, ok := SchedulerInfo(st); return ok }
+
+// LocalSchedulerInfo is SchedulerInfo restricted to this machine (for
+// signalling it: pids are only meaningful locally).
+func LocalSchedulerInfo(st *Store) (pid int, alive bool) {
+	cs, err := st.Components()
+	if err != nil {
+		return 0, false
+	}
+	host, _ := os.Hostname()
+	for _, c := range cs {
+		if c.Kind == "scheduler" && c.Alive() && (c.Host == "" || c.Host == host) {
+			return c.PID, true
+		}
+	}
+	return 0, false
+}

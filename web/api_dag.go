@@ -182,7 +182,7 @@ func (s *Server) mark(w http.ResponseWriter, r *http.Request, m engine.MarkReque
 		return
 	}
 	if err := s.Store.SaveRun(run); err != nil {
-		fail(w, 500, "%v", err)
+		failStore(w, err)
 		return
 	}
 	s.audit(r, "mark_"+string(m.State), d.ID, run.RunID, m.TaskID, extra)
@@ -251,7 +251,7 @@ func (s *Server) setNote(w http.ResponseWriter, r *http.Request, m engine.MarkRe
 		return
 	}
 	if err := s.Store.SaveRun(run); err != nil {
-		fail(w, 500, "%v", err)
+		failStore(w, err)
 		return
 	}
 	s.audit(r, "set_note", d.ID, run.RunID, m.TaskID, extra)

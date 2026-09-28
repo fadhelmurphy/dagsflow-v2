@@ -363,7 +363,7 @@ td .toggle{margin-left:4px}
     <a href="#/admin?tab=datasets" data-nav="datasets">Datasets</a>
     <div class="dd" data-nav="security"><button type="button" aria-haspopup="true">Security</button><div class="ddm"><a class="needs-Admin" href="#/admin?tab=users">List Users</a><a href="#/admin?tab=roles">List Roles</a></div></div>
     <div class="dd" data-nav="browse"><button type="button" aria-haspopup="true">Browse</button><div class="ddm"><a href="#/admin?tab=tis">Task Instances</a><a href="#/admin?tab=events">Event Log</a><a href="#/admin?tab=errors">DAG Import Errors</a></div></div>
-    <div class="dd" data-nav="admin"><button type="button" aria-haspopup="true">Admin</button><div class="ddm"><a href="#/admin?tab=pools">Pools</a><a class="needs-Op" href="#/admin?tab=variables">Variables</a><a class="needs-Op" href="#/admin?tab=connections">Connections</a></div></div>
+    <div class="dd" data-nav="admin"><button type="button" aria-haspopup="true">Admin</button><div class="ddm"><a href="#/admin?tab=pools">Pools</a><a class="needs-Op" href="#/admin?tab=variables">Variables</a><a class="needs-Op" href="#/admin?tab=connections">Connections</a><a href="#/admin?tab=components">Components</a></div></div>
   </nav>
   <div class="sched" id="sched" title="Scheduler status"><i></i><span>Checking scheduler…</span></div>
   <span class="clock" id="clock"></span>
@@ -1183,7 +1183,7 @@ async function viewAdmin(tab){
   if(tab==="roles"){ $app.innerHTML = await rolesPage(); return; }
   if(tab==="events"){ $app.innerHTML = await eventsPage(); return; }
   if(tab==="tis"){ $app.innerHTML = await tisPage(); return; }
-  const titles = {pools:"Pools", variables:"Variables", connections:"Connections", datasets:"Datasets", errors:"DAG Import Errors"};
+  const titles = {pools:"Pools", variables:"Variables", connections:"Connections", datasets:"Datasets", errors:"DAG Import Errors", components:"Components"};
   let h = `<h1 class="pageTitle">${titles[tab]||"Admin"}</h1>`;
   if(tab==="pools"){
     const {pools} = await api("/pools");
@@ -1208,6 +1208,13 @@ async function viewAdmin(tab){
   if(tab==="datasets"){
     const {datasets} = await api("/datasets");
     h += `<div class="panel"><table class="list"><thead><tr><th>Dataset</th><th>Last updated</th><th>Produced by</th><th>Triggers</th></tr></thead><tbody>${datasets.length?datasets.map(d=>`<tr><td class="id">${esc(d.uri)}</td><td>${fmt(d.last_updated)}</td><td class="id">${esc(d.producing_tasks.join(", ")||"–")}</td><td>${d.consuming_dags.map(x=>`<a class="id" href="#/dags/${enc(x)}">${esc(x)}</a>`).join(", ")||"–"}</td></tr>`).join(""):`<tr><td colspan="4" class="muted">No datasets. Declare outlets on a task and a dataset schedule on a DAG.</td></tr>`}</tbody></table></div>`;
+  }
+  if(tab==="components"){
+    const {backend, components} = await api("/components");
+    const ago = s => s<60 ? `${Math.round(s)}s ago` : s<3600 ? `${Math.round(s/60)}m ago` : `${Math.round(s/3600)}h ago`;
+    const info = c => Object.entries(c.info||{}).map(([k,v])=>`${esc(k)}=${esc(Array.isArray(v)?v.join(","):String(v))}`).join(" ");
+    h += `<div class="panel"><table class="list"><thead><tr><th>Kind</th><th>Status</th><th>Host</th><th>PID</th><th>Started</th><th>Heartbeat</th><th>Info</th><th>ID</th></tr></thead><tbody>${components.length?components.map(c=>`<tr><td>${esc(c.kind)}</td><td><span class="stateTag"><i style="background:${color(c.alive?"success":"failed")}"></i>${c.alive?"alive":"dead"}</span></td><td>${esc(c.host||"–")}</td><td>${c.pid||"–"}</td><td>${c.started_at&&!c.started_at.startsWith("0001")?fmt(c.started_at):"–"}</td><td>${ago(c.heartbeat_age_seconds)}</td><td class="id">${info(c)}</td><td class="id">${esc(c.id)}</td></tr>`).join(""):`<tr><td colspan="8" class="muted">No components registered.</td></tr>`}</tbody></table></div>
+      <p class="sub">Metadata store: <b>${esc(backend)}</b>. ${backend==="postgres" ? "Several schedulers (one is leader), webservers and workers can share it; a process without heartbeat for 30s is dead and its runs are adopted by another scheduler." : "JSON files: one scheduler per DAGSFLOW_HOME. Set DAGSFLOW_DATABASE_URL (Postgres) for HA schedulers and workers."}</p>`;
   }
   if(tab==="errors"){
     const {import_errors} = await api("/importErrors"); const e = Object.entries(import_errors);

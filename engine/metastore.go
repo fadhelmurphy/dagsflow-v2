@@ -13,40 +13,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"dagsflow-go/dag"
 )
-
-// Small JSON "tables" next to the runs. A process-wide mutex serialises
-// read-modify-write within one process; cross-process writes are last-writer-wins.
-var tableMu sync.Mutex
-
-func (s *Store) tablePath(name string) string { return filepath.Join(s.Home, "state", name+".json") }
-
-func (s *Store) readTable(name string, v any) error {
-	err := readJSON(s.tablePath(name), v)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
-}
-
-func (s *Store) updateTable(name string, v any, fn func() error) error {
-	tableMu.Lock()
-	defer tableMu.Unlock()
-	if err := s.readTable(name, v); err != nil {
-		return err
-	}
-	if err := fn(); err != nil {
-		return err
-	}
-	return writeJSONAtomic(s.tablePath(name), v)
-}
 
 // ---- encryption (Airflow's fernet_key) ----------------------------------------
 

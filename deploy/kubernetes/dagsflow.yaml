@@ -1,0 +1,153 @@
+# dagsflow on Kubernetes with the KubernetesExecutor (a pod per task).
+#
+#   kubectl create namespace dagsflow
+#   kubectl -n dagsflow create secret generic dagsflow-env \
+#     --from-literal=DAGSFLOW_DATABASE_URL='postgres://USER:PASS@HOST:5432/dagsflow?sslmode=require' \
+#     --from-literal=DAGSFLOW_FERNET_KEY="$(dagsflow-go config gen-key)" \
+#     --from-literal=DAGSFLOW_SECRET_KEY="$(openssl rand -hex 32)"
+#   kubectl -n dagsflow apply -f deploy/kubernetes/dagsflow.yaml
+#   kubectl -n dagsflow exec deploy/dagsflow-webserver -- dagsflow-go users create --username admin --role Admin
+#
+# Use a managed Postgres (Cloud SQL, RDS, ...). The image must contain the DAG
+# folder (bake it in: COPY dags/ /opt/dagsflow-home/dags/) or sync it (git-sync
+# sidecar); every component and task pod needs the same DAGs.
+# Replace IMAGE below with your image.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dagsflow
+---
+# the schedulers create, watch and delete task pods in this namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dagsflow-pod-launcher
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dagsflow-pod-launcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dagsflow-pod-launcher
+subjects:
+  - kind: ServiceAccount
+    name: dagsflow
+---
+# template for task pods; the container named "base" runs `dagsflow-go worker --job-id N`.
+# Per task: dag.WithPodOverride(...) / pod_override: in YAML is merged into it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dagsflow-pod-template
+data:
+  pod-template.yaml: |
+    apiVersion: v1
+    kind: Pod
+    spec:
+      serviceAccountName: dagsflow-task   # no Kubernetes API access needed by tasks
+      containers:
+        - name: base
+          image: IMAGE
+          envFrom:
+            - secretRef:
+                name: dagsflow-env
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {memory: 2Gi}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dagsflow-task
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dagsflow-scheduler
+spec:
+  replicas: 2   # HA: one leader creates runs; all execute; a dead one is taken over in ~30s
+  selector:
+    matchLabels: {app: dagsflow-scheduler}
+  template:
+    metadata:
+      labels: {app: dagsflow-scheduler}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9102"
+    spec:
+      serviceAccountName: dagsflow
+      terminationGracePeriodSeconds: 30   # task pods keep running; another scheduler re-attaches
+      containers:
+        - name: scheduler
+          image: IMAGE
+          args: ["scheduler", "--executor", "kubernetes", "--parallelism", "64", "--metrics-addr", ":9102"]
+          envFrom:
+            - secretRef: {name: dagsflow-env}
+          env:
+            - {name: DAGSFLOW_K8S_POD_TEMPLATE, value: /etc/dagsflow/pod-template.yaml}
+            - {name: DAGSFLOW_RETENTION_DAYS, value: "90"}
+            - {name: DAGSFLOW_LOG_FORMAT, value: json}
+          ports:
+            - {name: metrics, containerPort: 9102}
+          livenessProbe:
+            httpGet: {path: /health, port: metrics}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 200m, memory: 256Mi}
+          volumeMounts:
+            - {name: pod-template, mountPath: /etc/dagsflow}
+      volumes:
+        - name: pod-template
+          configMap: {name: dagsflow-pod-template}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dagsflow-webserver
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: dagsflow-webserver}
+  template:
+    metadata:
+      labels: {app: dagsflow-webserver}
+    spec:
+      serviceAccountName: dagsflow-task
+      containers:
+        - name: webserver
+          image: IMAGE
+          args: ["webserver", "--addr", "0.0.0.0:8080"]
+          envFrom:
+            - secretRef: {name: dagsflow-env}
+          env:
+            - {name: DAGSFLOW_TRUST_PROXY_HEADERS, value: "true"}   # behind the ingress
+            - {name: DAGSFLOW_LOG_FORMAT, value: json}
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dagsflow-webserver
+spec:
+  selector: {app: dagsflow-webserver}
+  ports:
+    - {name: http, port: 80, targetPort: http}

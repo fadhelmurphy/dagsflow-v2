@@ -102,8 +102,9 @@ func dagsCmd() *cobra.Command {
 			st := newStore()
 			r := engine.NewDagRun(d, engine.RunTypeManual, "", logical, logical, logical, parseConf(conf))
 			r.RunID = "test__" + time.Now().UTC().Format(time.RFC3339Nano)
-			r.State = engine.RunRunning // so a live scheduler won't also pick it up
-			_ = st.SaveRun(r)
+			if err := st.TakeOwnership(r); err != nil { // so a live scheduler won't also pick it up
+				exitf("%v", err)
+			}
 			runAndReport(d, st, r)
 		},
 	}
@@ -189,8 +190,9 @@ func dagsCmd() *cobra.Command {
 					fmt.Printf("skip %s (state %s, use --rerun-failed)\n", runID, r.State)
 					continue
 				}
-				r.State = engine.RunRunning
-				_ = st.SaveRun(r)
+				if err := st.TakeOwnership(r); err != nil {
+					exitf("%v", err)
+				}
 				if !runAndReport(d, st, r) {
 					return
 				}

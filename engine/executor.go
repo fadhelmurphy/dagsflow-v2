@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
-	"path/filepath"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -20,6 +20,10 @@ import (
 type Engine struct {
 	Store *Store
 	slots *slotManager
+
+	// Executor runs task attempts elsewhere (worker processes, Kubernetes
+	// pods). nil = in this process (LocalExecutor).
+	Executor TaskExecutor
 
 	mu     sync.Mutex
 	active map[string]chan struct{} // dagID/runID -> closed when done
@@ -44,8 +48,19 @@ func (e *Engine) poolSize(name string) int {
 	e.poolMu.Lock()
 	defer e.poolMu.Unlock()
 	if e.poolCache == nil || time.Since(e.poolAt) > 5*time.Second {
-		if p, err := e.Store.Pools(); err == nil {
-			e.poolCache, e.poolAt = p, time.Now()
+		// a failed lookup must not read as "pool does not exist": keep the
+		// cached pools, and on a cold cache retry for a while
+		for i := 0; ; i++ {
+			p, err := e.Store.Pools()
+			if err == nil {
+				e.poolCache, e.poolAt = p, time.Now()
+				break
+			}
+			metricErrors.inc("pool_lookup")
+			if e.poolCache != nil || i >= 10 {
+				break
+			}
+			time.Sleep(time.Second)
 		}
 	}
 	if p, ok := e.poolCache[name]; ok {
@@ -132,6 +147,8 @@ type runCtx struct {
 	r      *DagRun
 	mu     sync.Mutex
 	ctx    context.Context
+	abort  context.CancelFunc
+	lost   sync.Once
 	events chan tiKey
 	weight map[string]int
 
@@ -140,14 +157,50 @@ type runCtx struct {
 	overrides map[tiKey]dag.State                 // state to finish a cancelled TI with
 	runMark   dag.State                           // run marked success/failed while executing
 	outletX   map[tiKey]map[string]map[string]any // dataset event extras set by tasks
+	attach    map[tiKey]int64                     // failover: jobs still running for these TIs
 }
 
-func (rc *runCtx) save() {
+// detached: the run is being let go (scheduler shutdown or lost ownership);
+// remote attempts keep running and the next owner re-attaches to them.
+func (rc *runCtx) detached() bool { return rc.ctx.Err() != nil && rc.e.Executor != nil }
+
+func (rc *runCtx) save() { _ = rc.trySave() }
+
+// ownershipLost stops executing the run here (fencing).
+func (rc *runCtx) ownershipLost(why string) {
+	rc.lost.Do(func() {
+		fmt.Fprintf(os.Stderr, "run %s/%s: %s; stopping local execution\n", rc.r.DagID, rc.r.RunID, why)
+		metricErrors.inc("run_ownership_lost")
+		rc.abort()
+	})
+}
+
+// saveFinal retries transient errors, so a finished run is not left behind
+// as "running" because of one failed write.
+func (rc *runCtx) saveFinal() {
+	for i := 0; i < 30; i++ {
+		err := rc.trySave()
+		if err == nil || errors.Is(err, ErrConflict) {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+func (rc *runCtx) trySave() error {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
-	if err := rc.e.Store.SaveRun(rc.r); err != nil {
+	err := rc.e.Store.SaveRun(rc.r)
+	switch {
+	case errors.Is(err, ErrConflict) && rc.r.owned:
+		// another scheduler adopted the run (our lease expired, e.g. after a
+		// long pause or network partition): stop executing it here (fencing)
+		rc.ownershipLost(err.Error())
+	case err != nil:
+		metricErrors.inc("save_run")
 		fmt.Fprintf(os.Stderr, "save run %s: %v\n", rc.r.RunID, err)
 	}
+	return err
 }
 
 func (rc *runCtx) tiLocked(k tiKey) *TaskInstance {
@@ -215,24 +268,38 @@ func (rc *runCtx) XComPush(taskID string, idx int, k string, v any) error {
 func (rc *runCtx) XComPull(taskID, k string) (any, bool) {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
+	return pullXCom(rc.d, rc.r.XCom, mappedLens(rc.r), taskID, k)
+}
+
+func mappedLens(r *DagRun) map[string]int {
+	out := make(map[string]int, len(r.Mapped))
+	for id, kids := range r.Mapped {
+		out[id] = len(kids)
+	}
+	return out
+}
+
+// pullXCom: a mapped task yields a list with one entry per map index; taskID
+// "" searches every task in topological order.
+func pullXCom(d *dag.DAG, xcom map[string]map[string]any, mapped map[string]int, taskID, k string) (any, bool) {
 	pull := func(id string) (any, bool) {
-		if kids, mapped := rc.r.Mapped[id]; mapped {
-			out := make([]any, len(kids))
+		if n, ok := mapped[id]; ok {
+			out := make([]any, n)
 			found := false
-			for i := range kids {
-				if v, ok := rc.r.XCom[mappedKey(id, i)][k]; ok {
+			for i := 0; i < n; i++ {
+				if v, ok := xcom[mappedKey(id, i)][k]; ok {
 					out[i], found = v, true
 				}
 			}
 			return out, found
 		}
-		v, ok := rc.r.XCom[id][k]
+		v, ok := xcom[id][k]
 		return v, ok
 	}
 	if taskID != "" {
 		return pull(taskID)
 	}
-	for _, t := range rc.d.Tasks() {
+	for _, t := range d.Tasks() {
 		if v, ok := pull(t.ID); ok {
 			return v, true
 		}
@@ -317,15 +384,16 @@ func (rc *runCtx) TriggerDagRun(ctx context.Context, dagID string, conf map[stri
 	}
 	now := time.Now().UTC()
 	r := NewDagRun(target, RunTypeManual, "", now, now, now, conf)
-	if err := rc.e.Store.SaveRun(r); err != nil {
+	if !wait && schedulerAlive(rc.e.Store) {
+		// Leave it queued: the scheduler picks it up (respects max_active_runs/pause).
+		return r.RunID, rc.e.Store.SaveRun(r)
+	}
+	// executed here (waiting, or `dags test` without a scheduler): created
+	// already owned, so no scheduler can claim it in between
+	if err := rc.e.Store.TakeOwnership(r); err != nil {
 		return "", err
 	}
 	if !wait {
-		// Leave it queued: the scheduler picks it up (respects max_active_runs/pause).
-		// In `dags test` mode there's no scheduler, so run it here.
-		if schedulerAlive(rc.e.Store) {
-			return r.RunID, nil
-		}
 		_, err := rc.e.Submit(context.WithoutCancel(ctx), r)
 		return r.RunID, err
 	}
@@ -358,9 +426,16 @@ func (e *Engine) Execute(ctx context.Context, r *DagRun) error {
 	if !ok {
 		return fmt.Errorf("dag %s not found", r.DagID)
 	}
-	rc := &runCtx{e: e, d: d, r: r, ctx: ctx, events: make(chan tiKey), weight: downstreamWeights(d),
+	if err := e.Store.TakeOwnership(r); err != nil {
+		return err
+	}
+	ctx, abort := context.WithCancel(ctx)
+	defer abort()
+	e.Store.holdRun(r.DagID, r.RunID)
+	defer e.Store.releaseRun(r.DagID, r.RunID)
+	rc := &runCtx{e: e, d: d, r: r, ctx: ctx, abort: abort, events: make(chan tiKey), weight: downstreamWeights(d),
 		cancels: map[tiKey]context.CancelFunc{}, overrides: map[tiKey]dag.State{}}
-	defer e.Store.DropCommands(r.DagID, r.RunID)
+	metricRunsStarted.inc(r.DagID)
 
 	now := time.Now()
 	rc.mu.Lock()
@@ -373,17 +448,41 @@ func (e *Engine) Execute(ctx context.Context, r *DagRun) error {
 	if r.StartDate == nil {
 		r.StartDate = &now
 	}
-	for id, ti := range r.Tasks { // interrupted attempts from a previous process
+	// interrupted attempts from a previous process: rerun them, or with a
+	// remote executor re-attach to their jobs, which may still be running
+	rc.attach = map[tiKey]int64{}
+	var stale []int64
+	reset := func(k tiKey, ti *TaskInstance) {
+		if ti.JobID == 0 && ti.TryNumber > 0 && e.Executor != nil {
+			// crashed between dispatching the job and recording its id
+			if j, err := e.Store.be().findActiveJob(r.DagID, r.RunID, k.task, k.idx, ti.TryNumber); err == nil && j != nil {
+				ti.JobID = j.ID
+			}
+		}
+		if ti.JobID != 0 {
+			if e.Executor != nil {
+				rc.attach[k] = ti.JobID
+			} else {
+				stale = append(stale, ti.JobID)
+				ti.JobID = 0
+			}
+		}
+		ti.State = dag.StateNone
+	}
+	for id, ti := range r.Tasks {
 		if !ti.State.Finished() {
-			ti.State = dag.StateNone
-			for _, c := range r.Mapped[id] {
+			reset(tiKey{id, -1}, ti)
+			for i, c := range r.Mapped[id] {
 				if !c.State.Finished() {
-					c.State = dag.StateNone
+					reset(tiKey{id, i}, c)
 				}
 			}
 		}
 	}
 	rc.mu.Unlock()
+	for _, id := range stale { // local executor now: stop the old remote attempts
+		_ = e.Store.be().cancelJob(id)
+	}
 	rc.save()
 
 	stopSLA := rc.watchSLAs()
@@ -457,8 +556,13 @@ func (e *Engine) Execute(ctx context.Context, r *DagRun) error {
 				rc.aggregateMapped(k.task)
 			}
 		case <-poll.C:
-			for _, m := range e.Store.TakeMarks(r.DagID, r.RunID) {
-				rc.applyMarkLive(m)
+			if !e.Store.OwnsRun(r.DagID, r.RunID) {
+				rc.ownershipLost("lease lost (not renewed in time, or taken over)")
+			}
+			if ctx.Err() == nil { // after fencing, marks belong to the new owner
+				for _, m := range e.Store.TakeMarks(r.DagID, r.RunID) {
+					rc.applyMarkLive(m)
+				}
 			}
 		}
 	}
@@ -477,8 +581,17 @@ func (e *Engine) Execute(ctx context.Context, r *DagRun) error {
 		r.EndDate = &end
 	}
 	cc := dag.CallbackContext{DagID: r.DagID, RunID: r.RunID, MapIndex: -1, LogicalDate: r.LogicalDate, State: dag.State(r.State)}
+	if !interrupted {
+		metricRunsDone.inc(r.DagID, r.State)
+		if r.StartDate != nil {
+			metricRunDuration.observe(end.Sub(*r.StartDate).Seconds(), r.DagID, r.State)
+		}
+	}
 	rc.mu.Unlock()
-	rc.save()
+	rc.saveFinal()
+	if !interrupted {
+		e.Store.DropCommands(r.DagID, r.RunID)
+	}
 
 	if !interrupted {
 		if r.State == RunSuccess {
@@ -710,8 +823,35 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 		return ok
 	}
 
-	for {
+	holder := fmt.Sprintf("%s|%s|%s|%s|%d", e.Store.ID, rc.r.DagID, rc.r.RunID, t.ID, k.idx)
+	acquire := func() error {
+		metricTIWaiting.add(1)
+		defer metricTIWaiting.add(-1)
 		if err := e.slots.acquire(base, t.Pool(), t.PoolSlots(), prio); err != nil {
+			return err
+		}
+		if err := e.acquireGlobalPool(base, t, holder); err != nil {
+			e.slots.release(t.Pool(), t.PoolSlots())
+			return err
+		}
+		return nil
+	}
+	for {
+		// failover: an attempt still running on a worker is followed without
+		// waiting for capacity (it already runs); only its pool slot is re-recorded
+		rc.mu.Lock()
+		attachID := rc.attach[k]
+		delete(rc.attach, k)
+		rc.mu.Unlock()
+		local := attachID == 0
+		acq := acquire
+		if !local {
+			acq = func() error { return e.forceGlobalPool(t, holder) }
+		}
+		if err := acq(); err != nil {
+			if !local && rc.ctx.Err() == nil {
+				_ = e.Store.be().cancelJob(attachID) // could not follow it: stop it
+			}
 			if marked() {
 				return
 			}
@@ -726,21 +866,26 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 		held := true
 		release := func() {
 			if held {
-				e.slots.release(t.Pool(), t.PoolSlots())
+				e.Store.be().releasePoolSlot(holder)
+				if local {
+					e.slots.release(t.Pool(), t.PoolSlots())
+				}
 				held = false
 			}
 		}
 		reacquire := func() error {
-			if err := e.slots.acquire(base, t.Pool(), t.PoolSlots(), prio); err != nil {
+			if err := acquire(); err != nil {
 				return err
 			}
-			held = true
+			held, local = true, true
 			return nil
 		}
 
 		rc.mu.Lock()
 		ti := rc.tiLocked(k)
-		ti.TryNumber++
+		if attachID == 0 {
+			ti.TryNumber++
+		}
 		ti.Pool = t.Pool()
 		try := ti.TryNumber
 		info := dag.RunInfo{
@@ -748,7 +893,9 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 			DataIntervalStart: rc.r.DataIntervalStart, DataIntervalEnd: rc.r.DataIntervalEnd,
 			Conf: rc.r.Conf, TryNumber: try, MapIndex: k.idx, Item: item,
 		}
-		ti.StartDate = nil // new attempt
+		if attachID == 0 {
+			ti.StartDate = nil // new attempt
+		}
 		maxT := ti.MaxTriesFor(t.Retries())
 		rc.mu.Unlock()
 		rc.setState(k, dag.StateRunning, "")
@@ -758,24 +905,53 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 		if logF != nil {
 			out = logF
 		}
-		fmt.Fprintf(out, "=== %s.%s run_id=%s map_index=%d try=%d/%d pool=%s priority=%d ===\n",
-			rc.r.DagID, t.ID, rc.r.RunID, k.idx, try, maxT, t.Pool(), prio)
+		if attachID == 0 {
+			fmt.Fprintf(out, "=== %s.%s run_id=%s map_index=%d try=%d/%d pool=%s priority=%d ===\n",
+				rc.r.DagID, t.ID, rc.r.RunID, k.idx, try, maxT, t.Pool(), prio)
+		}
 
 		tctx, cancel := context.WithCancel(base)
 		if t.Timeout() > 0 {
 			tctx, cancel = context.WithTimeout(base, t.Timeout())
 		}
-		taskCtx := dag.NewTaskContext(tctx, t, info, rc, out)
-
+		started := time.Now()
+		metricTIRunning.add(1)
 		var selected []string
 		var err error
-		if sn := t.Sensor(); sn != nil {
-			err = rc.sense(taskCtx, k, sn, out, release, reacquire)
+		if e.Executor != nil && attachID != 0 {
+			selected, err = rc.resumeRemote(tctx, k, t, attachID, out)
+		} else if e.Executor != nil {
+			selected, err = rc.runRemote(tctx, k, t, info, out)
+			if errors.Is(err, context.DeadlineExceeded) && tctx.Err() != nil {
+				err = fmt.Errorf("task timed out after %s", t.Timeout())
+			}
 		} else {
-			selected, err = safeRun(taskCtx, t)
+			taskCtx := dag.NewTaskContext(tctx, t, info, rc, out)
+			if sn := t.Sensor(); sn != nil {
+				err = rc.sense(taskCtx, k, sn, out, release, reacquire)
+			} else {
+				selected, err = safeRun(taskCtx, t)
+			}
 		}
+		metricTIRunning.add(-1)
 		cancel()
 		release()
+		if errors.Is(err, errDetached) {
+			// scheduler shutdown / failover: the attempt goes on on its worker
+			closeLog(logF)
+			return
+		}
+		rc.mu.Lock()
+		rc.tiLocked(k).JobID = 0
+		rc.mu.Unlock()
+		{
+			st := "success"
+			if err != nil {
+				st = "failed"
+			}
+			metricTIDone.inc(rc.d.ID, t.ID, st)
+			metricTIDuration.observe(time.Since(started).Seconds(), rc.d.ID, st)
+		}
 
 		if base.Err() != nil && rc.ctx.Err() == nil {
 			fmt.Fprintf(out, "Task instance was marked manually; stopping\n")
@@ -926,29 +1102,59 @@ func safeRun(ctx *dag.TaskContext, t *dag.Task) ([]string, error) {
 	}
 }
 
-// TaskLogPath mirrors Airflow's log layout (map_index dir only for mapped tasks).
+// TaskLogPath mirrors Airflow's log layout (map_index dir only for mapped
+// tasks). Only meaningful for the JSON store; use Store.ReadTaskLog to read.
 func TaskLogPath(s *Store, dagID, runID, taskID string, mapIndex, try int) string {
-	parts := []string{s.LogsDir(), "dag_id=" + dagID, "run_id=" + safeName(runID), "task_id=" + taskID}
-	if mapIndex >= 0 {
-		parts = append(parts, fmt.Sprintf("map_index=%d", mapIndex))
-	}
-	parts = append(parts, fmt.Sprintf("attempt=%d.log", try))
-	return filepath.Join(parts...)
+	return (&jsonBackend{home: s.Home}).logPath(LogKey{dagID, runID, taskID, mapIndex, try})
 }
 
-func openTaskLog(s *Store, dagID, runID, taskID string, mapIndex, try int) (*os.File, string) {
-	p := TaskLogPath(s, dagID, runID, taskID, mapIndex, try)
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+func openTaskLog(s *Store, dagID, runID, taskID string, mapIndex, try int) (io.WriteCloser, string) {
+	w, where, err := s.OpenTaskLog(LogKey{dagID, runID, taskID, mapIndex, try})
 	if err != nil {
-		return nil, p
+		return nil, where
 	}
-	return f, p
+	return w, where
 }
 
-func closeLog(f *os.File) {
+func closeLog(f io.WriteCloser) {
 	if f != nil {
 		_ = f.Close()
+	}
+}
+
+// forceGlobalPool records the pool slot of an attempt that is already
+// running (failover re-attach), even if the pool is momentarily full.
+func (e *Engine) forceGlobalPool(t *dag.Task, holder string) error {
+	if !e.Store.Distributed() {
+		return nil
+	}
+	_, err := e.Store.be().acquirePoolSlot(t.Pool(), t.PoolSlots(), math.MaxInt32, holder, e.Store.ID)
+	return err
+}
+
+// acquireGlobalPool: with Postgres, pool slots are shared by every scheduler.
+func (e *Engine) acquireGlobalPool(ctx context.Context, t *dag.Task, holder string) error {
+	if !e.Store.Distributed() {
+		return nil
+	}
+	limit := e.poolSize(t.Pool())
+	for {
+		if limit < 0 {
+			return fmt.Errorf("pool %q does not exist (create it with `dagsflow-go pools set`)", t.Pool())
+		}
+		ok, err := e.Store.be().acquirePoolSlot(t.Pool(), t.PoolSlots(), limit, holder, e.Store.ID)
+		if err != nil {
+			metricErrors.inc("pool_acquire")
+		}
+		if ok {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+			limit = e.poolSize(t.Pool())
+		}
 	}
 }
 

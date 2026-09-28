@@ -31,7 +31,38 @@ func home() string {
 	return "."
 }
 
-func newStore() *engine.Store { return engine.NewStore(home()) }
+var (
+	storeOnce sync.Once
+	theStore  *engine.Store
+)
+
+// databaseURL: DAGSFLOW_DATABASE_URL, or the file named by
+// DAGSFLOW_DATABASE_URL_FILE (Docker/Kubernetes secrets). Empty = JSON files.
+func databaseURL() string {
+	if v := os.Getenv("DAGSFLOW_DATABASE_URL"); v != "" {
+		return v
+	}
+	if f := os.Getenv("DAGSFLOW_DATABASE_URL_FILE"); f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			exitf("DAGSFLOW_DATABASE_URL_FILE: %v", err)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	return ""
+}
+
+// newStore returns the process-wide metadata store (one connection pool).
+func newStore() *engine.Store {
+	storeOnce.Do(func() {
+		st, err := engine.OpenStore(home(), databaseURL())
+		if err != nil {
+			exitf("metadata database: %v", err)
+		}
+		theStore = st
+	})
+	return theStore
+}
 
 // loadConnections is kept as a no-op hook: connections/variables are resolved
 // lazily through the secrets backends configured in setup().
@@ -110,7 +141,7 @@ func setup(cmd *cobra.Command) {
 		dag.FileBackend{Dir: filepath.Join(home(), "connections")})
 	for c := cmd; c != nil; c = c.Parent() {
 		switch c.Name() {
-		case "variables", "connections", "pools", "users", "config", "stop", "status", "help", "completion":
+		case "variables", "connections", "pools", "users", "config", "stop", "status", "help", "completion", "db":
 			return
 		}
 	}
@@ -171,8 +202,8 @@ var schedulerCmd = &cobra.Command{
 	Short: "Run the scheduler for all DAGs (foreground; -D to daemonize)",
 	Run: func(cmd *cobra.Command, args []string) {
 		st := newStore()
-		if _, alive := engine.SchedulerInfo(st); alive {
-			exitf("a scheduler is already running (see `scheduler status`)")
+		if _, alive := engine.SchedulerInfo(st); alive && !st.Distributed() {
+			exitf("a scheduler is already running (see `scheduler status`); several schedulers need the Postgres metadata database")
 		}
 		if daemon, _ := cmd.Flags().GetBool("daemon"); daemon {
 			_ = os.MkdirAll(st.LogsDir(), 0o755)
@@ -180,7 +211,8 @@ var schedulerCmd = &cobra.Command{
 			if err != nil {
 				exitf("%v", err)
 			}
-			pid, err := spawnDetached(lf, "scheduler", "--parallelism", fmt.Sprint(parallelism), "--dag-dir-list-interval", reloadEvery.String())
+			pid, err := spawnDetached(lf, "scheduler", "--parallelism", fmt.Sprint(parallelism), "--dag-dir-list-interval", reloadEvery.String(),
+				"--executor", executorName, "--retention-days", fmt.Sprint(retentionDays), "--metrics-addr", metricsAddr)
 			if err != nil {
 				exitf("start scheduler: %v", err)
 			}
@@ -192,6 +224,7 @@ var schedulerCmd = &cobra.Command{
 		defer cancel()
 		reloadLoop(ctx)
 		s := newScheduler(st)
+		serveMetrics(ctx, metricsAddr, st)
 		if err := s.Run(ctx); err != nil {
 			exitf("%v", err)
 		}
@@ -203,9 +236,9 @@ var schedulerStopCmd = &cobra.Command{
 	Short: "Stop the background scheduler (running runs resume on next start)",
 	Run: func(cmd *cobra.Command, args []string) {
 		st := newStore()
-		pid, alive := engine.SchedulerInfo(st)
+		pid, alive := engine.LocalSchedulerInfo(st)
 		if !alive {
-			exitf("no scheduler running")
+			exitf("no scheduler running on this machine")
 		}
 		if err := terminate(st, pid); err != nil {
 			exitf("stop pid %d: %v", pid, err)
@@ -218,18 +251,60 @@ var schedulerStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show scheduler status",
 	Run: func(cmd *cobra.Command, args []string) {
-		if pid, alive := engine.SchedulerInfo(newStore()); alive {
-			fmt.Printf("scheduler is running (pid %d)\n", pid)
-		} else {
-			fmt.Println("scheduler is not running")
+		st := newStore()
+		if !st.Distributed() {
+			if pid, alive := engine.SchedulerInfo(st); alive {
+				fmt.Printf("scheduler is running (pid %d)\n", pid)
+			} else {
+				fmt.Println("scheduler is not running")
+			}
+			return
 		}
+		printComponents(st)
 	},
 }
 
 var reloadEvery time.Duration
 
+var (
+	executorName  string
+	retentionDays int
+	metricsAddr   string
+	tlsCert       string
+	tlsKey        string
+)
+
 func newScheduler(st *engine.Store) *engine.Scheduler {
-	return engine.NewScheduler(engine.NewEngine(st, parallelism))
+	e := engine.NewEngine(st, parallelism)
+	ex, err := engine.NewExecutor(executorName, st)
+	if err != nil {
+		exitf("%v", err)
+	}
+	e.Executor = ex
+	s := engine.NewScheduler(e)
+	s.RetentionDays = retentionDays
+	s.Log = newLogger("scheduler")
+	if !st.Distributed() && os.Getenv("DAGSFLOW_FERNET_KEY") == "" {
+		s.Log.Printf("WARNING: DAGSFLOW_FERNET_KEY is not set: variables and connections are stored unencrypted")
+	}
+	return s
+}
+
+func envDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		var n int
+		if _, err := fmt.Sscan(v, &n); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 // reloadLoop rescans the DAG folder in the background (compiling Go DAGs can
@@ -268,7 +343,8 @@ func newWebServer(st *engine.Store) *web.Server {
 	if len(users) == 0 {
 		fmt.Println("[webserver] no users defined: auth disabled (localhost only). Create one with `users create` to enable RBAC.")
 	}
-	return &web.Server{Store: st, Reparse: reparseDag}
+	st.Register("webserver", map[string]any{"addr": webAddr})
+	return &web.Server{Store: st, Reparse: reparseDag, TLSCert: tlsCert, TLSKey: tlsKey}
 }
 
 func isLoopback(addr string) bool {
@@ -298,7 +374,7 @@ var standaloneCmd = &cobra.Command{
 	Short: "Run scheduler + web UI in one process (like `airflow standalone`)",
 	Run: func(cmd *cobra.Command, args []string) {
 		st := newStore()
-		if _, alive := engine.SchedulerInfo(st); alive {
+		if _, alive := engine.SchedulerInfo(st); alive && !st.Distributed() {
 			exitf("a scheduler is already running; use `webserver` instead")
 		}
 		loadConnections()
@@ -319,6 +395,15 @@ var standaloneCmd = &cobra.Command{
 func Execute() {
 	webserverCmd.Flags().StringVar(&webAddr, "addr", "127.0.0.1:8080", "listen address")
 	standaloneCmd.Flags().StringVar(&webAddr, "addr", "127.0.0.1:8080", "listen address")
+	for _, c := range []*cobra.Command{webserverCmd, standaloneCmd} {
+		c.Flags().StringVar(&tlsCert, "tls-cert", os.Getenv("DAGSFLOW_TLS_CERT"), "TLS certificate file (serve HTTPS)")
+		c.Flags().StringVar(&tlsKey, "tls-key", os.Getenv("DAGSFLOW_TLS_KEY"), "TLS private key file")
+	}
+	for _, c := range []*cobra.Command{schedulerCmd, standaloneCmd} {
+		c.Flags().StringVar(&executorName, "executor", envDefault("DAGSFLOW_EXECUTOR", "local"), "local | worker | kubernetes (worker/kubernetes need Postgres)")
+		c.Flags().IntVar(&retentionDays, "retention-days", envInt("DAGSFLOW_RETENTION_DAYS", 0), "delete finished runs, logs and event logs older than N days (0 = keep)")
+	}
+	schedulerCmd.Flags().StringVar(&metricsAddr, "metrics-addr", os.Getenv("DAGSFLOW_METRICS_ADDR"), "serve /metrics and /health on this address (e.g. :9102)")
 	standaloneCmd.Flags().IntVar(&parallelism, "parallelism", 16, "max concurrent task instances")
 	webserverCmd.Flags().DurationVar(&reloadEvery, "dag-dir-list-interval", 30*time.Second, "how often to rescan the DAG folder")
 	for _, c := range []*cobra.Command{schedulerCmd, standaloneCmd} {
@@ -331,8 +416,12 @@ func Execute() {
 	schedulerCmd.PersistentFlags().IntVar(&parallelism, "parallelism", 16, "max concurrent task instances")
 	schedulerCmd.AddCommand(schedulerStopCmd, schedulerStatusCmd)
 
-	rootCmd.AddCommand(schedulerCmd, dagsCmd(), tasksCmd())
-	if err := rootCmd.Execute(); err != nil {
+	rootCmd.AddCommand(schedulerCmd, dagsCmd(), tasksCmd(), workerCmd(), dbCmd())
+	err := rootCmd.Execute()
+	if theStore != nil {
+		theStore.Close()
+	}
+	if err != nil {
 		os.Exit(1)
 	}
 }

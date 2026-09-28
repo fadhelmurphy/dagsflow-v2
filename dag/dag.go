@@ -12,7 +12,10 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-const DefaultPool = "default_pool"
+const (
+	DefaultPool  = "default_pool"
+	DefaultQueue = "default"
+)
 
 // DefaultArgs mirrors Airflow's default_args: applied to every task unless overridden.
 type DefaultArgs struct {
@@ -21,6 +24,7 @@ type DefaultArgs struct {
 	RetryDelay     time.Duration
 	Timeout        time.Duration // execution_timeout
 	Pool           string
+	Queue          string // executor queue (worker executor); default "default"
 	PriorityWeight int
 	SLA            time.Duration
 	OnFailure      []Callback
@@ -127,6 +131,8 @@ type Task struct {
 	timeout     time.Duration
 	pool        string
 	poolSlots   int
+	queue       string
+	podOverride map[string]any
 	priority    int
 	sla         time.Duration
 	outlets     []string
@@ -148,10 +154,21 @@ func WithTimeout(d time.Duration) TaskOption   { return func(t *Task) { t.timeou
 func WithRetries(n int, delay time.Duration) TaskOption {
 	return func(t *Task) { t.retries, t.retryDelay = n, delay }
 }
-func WithPool(name string) TaskOption     { return func(t *Task) { t.pool = name } }
-func WithPoolSlots(n int) TaskOption      { return func(t *Task) { t.poolSlots = n } }
-func WithPriorityWeight(n int) TaskOption { return func(t *Task) { t.priority = n } }
-func WithSLA(d time.Duration) TaskOption  { return func(t *Task) { t.sla = d } }
+func WithPool(name string) TaskOption { return func(t *Task) { t.pool = name } }
+func WithPoolSlots(n int) TaskOption  { return func(t *Task) { t.poolSlots = n } }
+
+// WithQueue routes the task to workers listening on that queue (worker
+// executor, ~ Airflow's queue with the CeleryExecutor).
+func WithQueue(name string) TaskOption { return func(t *Task) { t.queue = name } }
+
+// WithPodOverride is merged into the pod of this task with the Kubernetes
+// executor (~ executor_config={"pod_override": ...}), e.g.
+//
+//	dag.WithPodOverride(map[string]any{"spec": map[string]any{"containers": []any{
+//		map[string]any{"name": "base", "resources": map[string]any{"requests": map[string]any{"memory": "2Gi"}}}}}})
+func WithPodOverride(pod map[string]any) TaskOption { return func(t *Task) { t.podOverride = pod } }
+func WithPriorityWeight(n int) TaskOption           { return func(t *Task) { t.priority = n } }
+func WithSLA(d time.Duration) TaskOption            { return func(t *Task) { t.sla = d } }
 func WithOutlets(uris ...string) TaskOption {
 	return func(t *Task) { t.outlets = append(t.outlets, uris...) }
 }
@@ -202,7 +219,7 @@ func (d *DAG) addTask(id string, fn TaskFunc, br BranchFunc, sn *SensorSpec, opt
 		ID: id, dag: d, execute: fn, branch: br, sensor: sn,
 		triggerRule: AllSuccess,
 		retries:     da.Retries, retryDelay: da.RetryDelay, timeout: da.Timeout,
-		pool: da.Pool, poolSlots: 1, priority: da.PriorityWeight, sla: da.SLA,
+		pool: da.Pool, poolSlots: 1, queue: da.Queue, priority: da.PriorityWeight, sla: da.SLA,
 		onSuccess: append([]Callback(nil), da.OnSuccess...),
 		onFailure: append([]Callback(nil), da.OnFailure...),
 		onRetry:   append([]Callback(nil), da.OnRetry...),
@@ -223,6 +240,9 @@ func (d *DAG) addTask(id string, fn TaskFunc, br BranchFunc, sn *SensorSpec, opt
 	}
 	if t.poolSlots < 1 {
 		t.poolSlots = 1
+	}
+	if t.queue == "" {
+		t.queue = DefaultQueue
 	}
 	if t.priority == 0 {
 		t.priority = 1
@@ -366,6 +386,8 @@ func (t *Task) Timeout() time.Duration         { return t.timeout }
 func (t *Task) IsBranch() bool                 { return t.branch != nil }
 func (t *Task) Pool() string                   { return t.pool }
 func (t *Task) PoolSlots() int                 { return t.poolSlots }
+func (t *Task) Queue() string                  { return t.queue }
+func (t *Task) PodOverride() map[string]any    { return t.podOverride }
 func (t *Task) PriorityWeight() int            { return t.priority }
 func (t *Task) SLA() time.Duration             { return t.sla }
 func (t *Task) Outlets() []string              { return t.outlets }

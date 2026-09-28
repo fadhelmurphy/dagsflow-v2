@@ -480,7 +480,7 @@ func (p *proxy) build(s DagSpec) *dag.DAG {
 	for _, ts := range s.Tasks {
 		ts := ts
 		o := []dag.TaskOption{dag.WithTriggerRule(dag.TriggerRule(ts.TriggerRule)), dag.WithRetries(ts.Retries, ts.RetryDelay),
-			dag.WithTimeout(ts.Timeout), dag.WithPool(ts.Pool), dag.WithPoolSlots(ts.PoolSlots),
+			dag.WithTimeout(ts.Timeout), dag.WithPool(ts.Pool), dag.WithPoolSlots(ts.PoolSlots), dag.WithQueue(ts.Queue), dag.WithPodOverride(ts.PodOverride),
 			dag.WithPriorityWeight(ts.Priority), dag.WithSLA(ts.SLA), dag.WithOutlets(ts.Outlets...)}
 		if ts.Operator != "" {
 			o = append(o, dag.WithOperatorName(ts.Operator))

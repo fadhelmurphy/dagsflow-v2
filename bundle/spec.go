@@ -48,6 +48,8 @@ type TaskSpec struct {
 	Timeout     time.Duration       `json:"timeout"`
 	Pool        string              `json:"pool"`
 	PoolSlots   int                 `json:"pool_slots"`
+	Queue       string              `json:"queue,omitempty"`
+	PodOverride map[string]any      `json:"pod_override,omitempty"`
 	Priority    int                 `json:"priority_weight"`
 	SLA         time.Duration       `json:"sla"`
 	Outlets     []string            `json:"outlets"`
@@ -78,7 +80,7 @@ func describe() Describe {
 			Datasets: d.Datasets, OnSuccess: len(d.OnSuccess), OnFailure: len(d.OnFailure), OnSLAMiss: len(d.OnSLAMiss)}
 		for _, t := range d.Tasks() {
 			ts := TaskSpec{ID: t.ID, TriggerRule: string(t.TriggerRule()), Retries: t.Retries(),
-				RetryDelay: t.RetryDelay(), Timeout: t.Timeout(), Pool: t.Pool(), PoolSlots: t.PoolSlots(),
+				RetryDelay: t.RetryDelay(), Timeout: t.Timeout(), Pool: t.Pool(), PoolSlots: t.PoolSlots(), Queue: t.Queue(), PodOverride: t.PodOverride(),
 				Priority: t.PriorityWeight(), SLA: t.SLA(), Outlets: t.Outlets(), Branch: t.IsBranch(),
 				Map: t.MapSource(), Templates: t.TemplateFields(), Operator: t.Operator(), ExtraLinks: t.ExtraLinks(), OnSuccess: len(t.OnSuccessCallbacks()),
 				OnFailure: len(t.OnFailureCallbacks()), OnRetry: len(t.OnRetryCallbacks())}

@@ -2,17 +2,16 @@ package web
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
+	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dagsflow-go/engine"
@@ -38,31 +37,80 @@ func (s *Server) secret() ([]byte, error) {
 		s.key = []byte(k)
 		return s.key, nil
 	}
-	p := filepath.Join(s.Store.Home, "state", "webserver_secret_key")
-	if b, err := os.ReadFile(p); err == nil && len(b) >= 32 {
-		s.key = b
-		return b, nil
+	// generated once and shared through the metadata store (file or database),
+	// so every webserver replica accepts the same cookies
+	key, err := s.Store.SecretKey()
+	if err != nil {
+		return nil, err
 	}
-	raw := make([]byte, 32)
-	_, _ = rand.Read(raw)
-	key := []byte(hex.EncodeToString(raw))
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	// O_EXCL: if another replica created it first, use theirs
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err == nil {
-		_, err = f.Write(key)
-		f.Close()
-		if err != nil {
-			return nil, err
+	s.key = key
+	return key, nil
+}
+
+// loginLimiter slows down password guessing: after 5 failures for the same
+// username or client IP within 15 minutes, logins are refused for a while
+// (per webserver process).
+type loginLimiter struct {
+	mu   sync.Mutex
+	hits map[string][]time.Time
+}
+
+const (
+	loginWindow   = 15 * time.Minute
+	loginMaxFails = 5
+)
+
+func (l *loginLimiter) prune(k string, now time.Time) []time.Time {
+	kept := l.hits[k][:0]
+	for _, t := range l.hits[k] {
+		if now.Sub(t) < loginWindow {
+			kept = append(kept, t)
 		}
-		s.key = key
-		return key, nil
 	}
-	if b, err := os.ReadFile(p); err == nil && len(b) >= 32 {
-		s.key = b
-		return b, nil
+	if len(kept) == 0 {
+		delete(l.hits, k)
+		return nil
 	}
-	return nil, errors.New("cannot create webserver secret key")
+	l.hits[k] = kept
+	return kept
+}
+
+// blocked returns how long the keys are locked out (0 = allowed).
+func (l *loginLimiter) blocked(keys ...string) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	var wait time.Duration
+	for _, k := range keys {
+		if h := l.prune(k, now); len(h) >= loginMaxFails {
+			if w := loginWindow - now.Sub(h[len(h)-loginMaxFails]); w > wait {
+				wait = w
+			}
+		}
+	}
+	return wait
+}
+
+func (l *loginLimiter) fail(keys ...string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.hits == nil {
+		l.hits = map[string][]time.Time{}
+	}
+	if len(l.hits) > 100000 { // bound memory under a flood
+		l.hits = map[string][]time.Time{}
+	}
+	for _, k := range keys {
+		l.hits[k] = append(l.hits[k], time.Now())
+	}
+}
+
+func (l *loginLimiter) reset(keys ...string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, k := range keys {
+		delete(l.hits, k)
+	}
 }
 
 func userFingerprint(u *engine.User) string {
@@ -149,13 +197,23 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid body")
 		return
 	}
-	u, ok := s.Store.Authenticate(strings.TrimSpace(body.Username), body.Password, "")
+	name := strings.TrimSpace(body.Username)
+	keys := []string{"u:" + strings.ToLower(name), "ip:" + clientIP(r)}
+	if wait := s.limiter.blocked(keys...); wait > 0 {
+		s.Store.Audit(engine.AuditEvent{User: name, Event: "login_blocked", Extra: clientIP(r)})
+		w.Header().Set("Retry-After", fmt.Sprint(int(wait.Seconds())+1))
+		fail(w, http.StatusTooManyRequests, "Too many failed logins. Try again in %s.", wait.Round(time.Minute))
+		return
+	}
+	u, ok := s.Store.Authenticate(name, body.Password, "")
 	if !ok {
-		s.Store.Audit(engine.AuditEvent{User: strings.TrimSpace(body.Username), Event: "login_failed", Extra: clientIP(r)})
+		s.limiter.fail(keys...)
+		s.Store.Audit(engine.AuditEvent{User: name, Event: "login_failed", Extra: clientIP(r)})
 		time.Sleep(400 * time.Millisecond) // slow down guessing
 		fail(w, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
+	s.limiter.reset(keys...)
 	s.Store.RecordLogin(u.Username)
 	s.Store.Audit(engine.AuditEvent{User: u.Username, Event: "login", Extra: clientIP(r)})
 	if err := s.setSession(w, r, u); err != nil {
@@ -166,7 +224,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func clientIP(r *http.Request) string {
-	if f := r.Header.Get("X-Forwarded-For"); f != "" {
+	// X-Forwarded-For is only trusted behind a proxy that sets it
+	// (DAGSFLOW_TRUST_PROXY_HEADERS=true), otherwise clients could spoof it
+	if f := r.Header.Get("X-Forwarded-For"); f != "" && trustProxy() {
 		return strings.TrimSpace(strings.Split(f, ",")[0])
 	}
 	host := r.RemoteAddr
@@ -182,4 +242,9 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	clearSession(w, r)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func trustProxy() bool {
+	v := strings.ToLower(os.Getenv("DAGSFLOW_TRUST_PROXY_HEADERS"))
+	return v == "1" || v == "true" || v == "yes"
 }

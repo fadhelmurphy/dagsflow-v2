@@ -1,12 +1,9 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -73,16 +70,20 @@ func tasksCmd() *cobra.Command {
 				fmt.Println("nothing to clear")
 				return
 			}
+			if now, _ := cmd.Flags().GetBool("run-now"); now {
+				if err := st.TakeOwnership(r); err != nil {
+					exitf("%v", err)
+				}
+				fmt.Printf("cleared %v in %s/%s\n", cleared, d.ID, r.RunID)
+				loadConnections()
+				runAndReport(d, st, r)
+				return
+			}
 			if err := st.SaveRun(r); err != nil {
 				exitf("%v", err)
 			}
 			fmt.Printf("cleared %v in %s/%s (run re-queued)\n", cleared, d.ID, r.RunID)
-			if now, _ := cmd.Flags().GetBool("run-now"); now {
-				loadConnections()
-				r.State = engine.RunRunning
-				_ = st.SaveRun(r)
-				runAndReport(d, st, r)
-			} else if _, alive := engine.SchedulerInfo(st); !alive {
+			if _, alive := engine.SchedulerInfo(st); !alive {
 				fmt.Println("note: scheduler is not running; start it, or use --run-now")
 			}
 		},
@@ -178,7 +179,7 @@ func tasksCmd() *cobra.Command {
 				try = ti.TryNumber
 			}
 			follow, _ := cmd.Flags().GetBool("follow")
-			tail(engine.TaskLogPath(st, args[0], args[1], args[2], idx, try), follow)
+			tailLog(st, engine.LogKey{DagID: args[0], RunID: args[1], TaskID: args[2], MapIndex: idx, Try: try}, follow)
 		},
 	}
 	logs.Flags().Int("try", 0, "attempt number (default: latest)")
@@ -219,24 +220,23 @@ func tasksCmd() *cobra.Command {
 	return c
 }
 
-func tail(path string, follow bool) {
-	f, err := os.Open(path)
-	if err != nil {
-		exitf("%v", err)
-	}
-	defer f.Close()
-	rd := bufio.NewReader(f)
+// tailLog prints a task log (from files or the database); with follow it
+// keeps printing new output until interrupted.
+func tailLog(st *engine.Store, k engine.LogKey, follow bool) {
+	printed := 0
 	for {
-		line, err := rd.ReadString('\n')
-		fmt.Print(line)
-		if errors.Is(err, io.EOF) {
-			if !follow {
-				return
-			}
-			time.Sleep(500 * time.Millisecond)
-		} else if err != nil {
-			exitf("%v", err)
+		b, err := st.ReadTaskLog(k)
+		if err != nil && !follow {
+			exitf("no log for %s try %d: %v", k.TaskID, k.Try, err)
 		}
+		if len(b) > printed {
+			os.Stdout.Write(b[printed:])
+			printed = len(b)
+		}
+		if !follow {
+			return
+		}
+		time.Sleep(time.Second)
 	}
 }
 

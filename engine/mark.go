@@ -1,10 +1,7 @@
 package engine
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
@@ -277,45 +274,18 @@ func dedupe(in []string) []string {
 
 // ---- command queue for runs the scheduler is executing ------------------------
 
-func (s *Store) commandDir(dagID, runID string) string {
-	return filepath.Join(s.Home, "state", "commands", dagID, safeName(runID))
-}
-
 // EnqueueMark hands a mark request to the scheduler that is executing the run.
 func (s *Store) EnqueueMark(dagID, runID string, m MarkRequest) error {
-	dir := s.commandDir(dagID, runID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
 	if m.At.IsZero() {
 		m.At = time.Now()
 	}
-	return writeJSONAtomic(filepath.Join(dir, fmt.Sprintf("%020d.json", m.At.UnixNano())), m)
+	return s.be().enqueueCommand(dagID, runID, m)
 }
 
 // TakeMarks returns and removes pending mark requests for a run (oldest first).
 func (s *Store) TakeMarks(dagID, runID string) []MarkRequest {
-	dir := s.commandDir(dagID, runID)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var out []MarkRequest
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		p := filepath.Join(dir, e.Name())
-		b, err := os.ReadFile(p)
-		_ = os.Remove(p)
-		var m MarkRequest
-		if err == nil && json.Unmarshal(b, &m) == nil {
-			out = append(out, m)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
-	return out
+	return s.be().takeCommands(dagID, runID)
 }
 
 // DropCommands removes leftovers once a run is done.
-func (s *Store) DropCommands(dagID, runID string) { _ = os.RemoveAll(s.commandDir(dagID, runID)) }
+func (s *Store) DropCommands(dagID, runID string) { s.be().dropCommands(dagID, runID) }

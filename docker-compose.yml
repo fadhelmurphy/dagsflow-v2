@@ -1,60 +1,91 @@
 # docker compose up -d   →  http://localhost:8080 (login with DAGSFLOW_ADMIN_* from .env)
+#
+# Production layout: Postgres metadata DB, 2 schedulers (HA, one is leader),
+# workers that execute the tasks (executor=worker), and the webserver.
+# Scale with: docker compose up -d --scale dagsflow-worker=4 --scale dagsflow-scheduler=2
 x-dagsflow: &dagsflow
   build: .
   image: dagsflow-go:local
   env_file: .env
   environment:
     DAGSFLOW_BASE_URL: ${DAGSFLOW_BASE_URL:-http://localhost:8080}
+    DAGSFLOW_DATABASE_URL: postgres://${POSTGRES_USER:-dagsflow}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-dagsflow}?sslmode=disable
+    DAGSFLOW_EXECUTOR: ${DAGSFLOW_EXECUTOR:-worker}
+    DAGSFLOW_RETENTION_DAYS: ${DAGSFLOW_RETENTION_DAYS:-90}
+    DAGSFLOW_LOG_FORMAT: ${DAGSFLOW_LOG_FORMAT:-text}
   volumes:
-    - ./dags:/opt/dagsflow-home/dags              # DAG folder: .go and .yaml, hot reloaded
-    - ./connections:/opt/dagsflow-home/connections # optional file-based connections
+    - ./dags:/opt/dagsflow-home/dags:ro           # DAG folder: .go and .yaml, hot reloaded
+    - ./connections:/opt/dagsflow-home/connections:ro # optional file-based connections
     - ./keys:/opt/dagsflow-home/keys:ro            # optional: GCP service-account JSON
-    - dagsflow-state:/opt/dagsflow-home/state      # metadata (JSON store)
-    - dagsflow-logs:/opt/dagsflow-home/logs        # task logs
     - dagsflow-build:/opt/dagsflow-home/build      # compiled Go DAG bundles
     - go-build-cache:/root/.cache/go-build         # shared Go build cache
     - go-mod-cache:/go/pkg/mod                     # modules for DAGs with extra imports
   restart: unless-stopped
+  depends_on:
+    dagsflow-init:
+      condition: service_completed_successfully
 
 services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dagsflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-dagsflow}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   dagsflow-init:
     <<: *dagsflow
     restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
         : "$${DAGSFLOW_ADMIN_USERNAME:?set DAGSFLOW_ADMIN_USERNAME in .env}"
         : "$${DAGSFLOW_ADMIN_PASSWORD:?set DAGSFLOW_ADMIN_PASSWORD in .env}"
+        dagsflow-go db migrate
         DAGSFLOW_PASSWORD="$$DAGSFLOW_ADMIN_PASSWORD" dagsflow-go users create --exists-ok \
           --username "$$DAGSFLOW_ADMIN_USERNAME" --role Admin
-        # compile Go DAGs once so scheduler and webserver start from the cache
+        # compile Go DAGs once so the other services start from the cache
         dagsflow-go dags list
 
   dagsflow-scheduler:
     <<: *dagsflow
-    command: ["scheduler", "--parallelism", "${DAGSFLOW_PARALLELISM:-16}"]
-    depends_on:
-      dagsflow-init:
-        condition: service_completed_successfully
+    command: ["scheduler", "--parallelism", "${DAGSFLOW_PARALLELISM:-32}", "--metrics-addr", ":9102"]
+    deploy:
+      replicas: 2          # HA: one leader creates runs, all execute; a dead one is taken over in ~30s
+    stop_grace_period: 30s # running tasks keep going on the workers; another scheduler re-attaches
+
+  dagsflow-worker:
+    <<: *dagsflow
+    command: ["worker", "--concurrency", "${DAGSFLOW_WORKER_CONCURRENCY:-8}", "--metrics-addr", ":9103"]
+    deploy:
+      replicas: 2
+    stop_grace_period: 10m # let running tasks finish (see --grace)
 
   dagsflow-webserver:
     <<: *dagsflow
     command: ["webserver", "--addr", "0.0.0.0:8080"]
     ports:
       - "${DAGSFLOW_WEB_PORT:-8080}:8080"
-    depends_on:
-      dagsflow-init:
-        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/v1/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/ready"]
       interval: 30s
       timeout: 5s
       retries: 3
 
 volumes:
-  dagsflow-state:
-  dagsflow-logs:
+  postgres-data:
   dagsflow-build:
   go-build-cache:
   go-mod-cache:

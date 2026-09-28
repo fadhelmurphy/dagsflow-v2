@@ -3,6 +3,8 @@ package web
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -39,6 +41,11 @@ type Server struct {
 	// Reparse reloads a DAG's source file in this process and asks the other
 	// processes (scheduler) to do the same. Set by the CLI.
 	Reparse func(d *dag.DAG) error
+
+	// TLSCert/TLSKey: serve HTTPS.
+	TLSCert, TLSKey string
+
+	limiter loginLimiter
 }
 
 type authEntry struct {
@@ -65,6 +72,7 @@ func (s *Server) Handler() http.Handler {
 	V, U, O, A := engine.RoleViewer, engine.RoleUser, engine.RoleOp, engine.RoleAdmin
 	routes := []route{
 		{"GET /api/v1/health", "", s.health},
+		{"GET /api/v1/components", V, s.components},
 		{"POST /api/v1/login", "", s.login},
 		{"POST /api/v1/logout", "", s.logout},
 		{"DELETE /api/v1/dags/{dag}", O, s.deleteDag},
@@ -117,6 +125,20 @@ func (s *Server) Handler() http.Handler {
 	for _, rt := range routes {
 		mux.Handle(rt.pattern, s.require(rt.role, rt.h))
 	}
+	// probes and Prometheus: no data, no auth (metrics can be turned off or
+	// protected with DAGSFLOW_METRICS_TOKEN)
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.Store.Ping(); err != nil {
+			http.Error(w, "metadata database unreachable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ready\n"))
+	})
+	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "no such endpoint: %s %s", r.Method, r.URL.Path)
 	})
@@ -149,6 +171,11 @@ func secureHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if secureRequest(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -197,7 +224,17 @@ func (s *Server) authenticate(r *http.Request) (*engine.User, bool, bool) {
 	if !ok {
 		return nil, false, false
 	}
-	u, ok := s.cached("b:"+name+"\x00"+pw, func() (*engine.User, bool) { return s.Store.Authenticate(name, pw, "") })
+	keys := []string{"u:" + strings.ToLower(name), "ip:" + clientIP(r)}
+	u, ok := s.cached("b:"+name+"\x00"+pw, func() (*engine.User, bool) {
+		if s.limiter.blocked(keys...) > 0 { // same lockout as the login form
+			return nil, false
+		}
+		u, ok := s.Store.Authenticate(name, pw, "")
+		if !ok {
+			s.limiter.fail(keys...)
+		}
+		return u, ok
+	})
 	return u, false, ok
 }
 
@@ -223,20 +260,52 @@ func (s *Server) cached(k string, fn func() (*engine.User, bool)) (*engine.User,
 	return u, ok
 }
 
-// Serve runs the HTTP server until ctx is cancelled.
+// Serve runs the HTTP server until ctx is cancelled (then drains requests
+// for up to 15s).
 func (s *Server) Serve(ctx context.Context, addr string) error {
-	srv := &http.Server{Addr: addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second,
+		WriteTimeout: 120 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10,
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
 	go func() {
 		<-ctx.Done()
-		sh, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sh, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sh)
 	}()
-	fmt.Printf("[webserver] listening on http://%s (API: /api/v1)\n", addr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	var err error
+	if s.TLSCert != "" || s.TLSKey != "" {
+		if s.TLSCert == "" || s.TLSKey == "" {
+			return errors.New("both --tls-cert and --tls-key are needed for HTTPS")
+		}
+		fmt.Printf("[webserver] listening on https://%s (API: /api/v1)\n", addr)
+		err = srv.ListenAndServeTLS(s.TLSCert, s.TLSKey)
+	} else {
+		fmt.Printf("[webserver] listening on http://%s (API: /api/v1)\n", addr)
+		err = srv.ListenAndServe()
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+// metrics serves Prometheus metrics. DAGSFLOW_METRICS=off disables it;
+// DAGSFLOW_METRICS_TOKEN requires "Authorization: Bearer <token>".
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	if strings.EqualFold(os.Getenv("DAGSFLOW_METRICS"), "off") {
+		fail(w, 404, "metrics are disabled")
+		return
+	}
+	if tok := os.Getenv("DAGSFLOW_METRICS_TOKEN"); tok != "" {
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(tok)) != 1 {
+			fail(w, http.StatusUnauthorized, "metrics token required")
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	engine.WriteMetrics(w, s.Store)
 }
 
 // ---- helpers -----------------------------------------------------------------
@@ -249,6 +318,16 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func fail(w http.ResponseWriter, code int, format string, a ...any) {
 	writeJSON(w, code, map[string]any{"status": code, "error": fmt.Sprintf(format, a...)})
+}
+
+// failStore: a concurrent change (another webserver, or a scheduler that just
+// started the run) is a 409 the client can retry, anything else a 500.
+func failStore(w http.ResponseWriter, err error) {
+	if errors.Is(err, engine.ErrConflict) {
+		fail(w, http.StatusConflict, "%v", err)
+		return
+	}
+	fail(w, 500, "%v", err)
 }
 
 func (s *Server) dagOr404(w http.ResponseWriter, r *http.Request) (*dag.DAG, bool) {
@@ -333,9 +412,46 @@ func scheduleLabel(d *dag.DAG) string {
 	return d.Schedule
 }
 
+// health ~ Airflow's /health: metadatabase + scheduler status (public, no data).
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	pid, alive := engine.SchedulerInfo(s.Store)
-	writeJSON(w, 200, map[string]any{"scheduler_alive": alive, "scheduler_pid": pid})
+	db := map[string]any{"status": "healthy", "backend": s.Store.Backend()}
+	if err := s.Store.Ping(); err != nil {
+		db = map[string]any{"status": "unhealthy", "backend": s.Store.Backend()}
+	}
+	sched := map[string]any{"status": map[bool]string{true: "healthy", false: "unhealthy"}[alive]}
+	out := map[string]any{"metadatabase": db, "scheduler": sched,
+		// kept for older clients
+		"scheduler_alive": alive, "scheduler_pid": pid}
+	if cs, err := s.Store.Components(); err == nil && s.Store.Distributed() {
+		counts := map[string]int{}
+		for _, c := range cs {
+			if c.Alive() {
+				counts[c.Kind]++
+			}
+		}
+		out["components"] = counts
+	}
+	writeJSON(w, 200, out)
+}
+
+// components lists schedulers, webservers and workers (Admin → Components).
+func (s *Server) components(w http.ResponseWriter, r *http.Request) {
+	cs, err := s.Store.Components()
+	if err != nil {
+		fail(w, 500, "%v", err)
+		return
+	}
+	type item struct {
+		engine.Component
+		Alive bool    `json:"alive"`
+		Age   float64 `json:"heartbeat_age_seconds"`
+	}
+	out := []item{}
+	for _, c := range cs {
+		out = append(out, item{c, c.Alive(), time.Since(c.Heartbeat).Seconds()})
+	}
+	writeJSON(w, 200, map[string]any{"backend": s.Store.Backend(), "components": out})
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
@@ -593,7 +709,7 @@ func (s *Server) trigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Store.SaveRun(run); err != nil {
-		fail(w, 500, "%v", err)
+		failStore(w, err)
 		return
 	}
 	extra := ""
@@ -621,7 +737,7 @@ func (s *Server) deleteRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Store.DeleteRun(d.ID, run.RunID); err != nil {
-		fail(w, 500, "%v", err)
+		failStore(w, err)
 		return
 	}
 	s.audit(r, "delete_run", d.ID, run.RunID, "", "")
@@ -656,7 +772,7 @@ func (s *Server) clear(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(cleared) > 0 {
 		if err := s.Store.SaveRun(run); err != nil {
-			fail(w, 500, "%v", err)
+			failStore(w, err)
 			return
 		}
 		task := ""
@@ -701,7 +817,7 @@ func (s *Server) log(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("map_index"); v != "" {
 		idx, _ = strconv.Atoi(v)
 	}
-	b, err := os.ReadFile(engine.TaskLogPath(s.Store, d.ID, r.PathValue("run"), r.PathValue("task"), idx, try))
+	b, err := s.Store.ReadTaskLog(engine.LogKey{DagID: d.ID, RunID: r.PathValue("run"), TaskID: r.PathValue("task"), MapIndex: idx, Try: try})
 	if err != nil {
 		fail(w, 404, "no log for try %d yet", try)
 		return

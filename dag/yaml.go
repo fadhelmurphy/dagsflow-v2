@@ -26,6 +26,7 @@ type yamlCommon struct {
 	Timeout        string   `yaml:"timeout"`
 	Pool           string   `yaml:"pool"`
 	PoolSlots      int      `yaml:"pool_slots"`
+	Queue          string   `yaml:"queue"`
 	PriorityWeight int      `yaml:"priority_weight"`
 	SLA            string   `yaml:"sla"`
 	OnFailure      []string `yaml:"on_failure"`
@@ -49,6 +50,8 @@ type yamlTask struct {
 	TriggerRule string      `yaml:"trigger_rule"`
 	Outlets     []string    `yaml:"outlets"`
 	Expand      *yamlExpand `yaml:"expand"`
+
+	PodOverride map[string]any `yaml:"pod_override"` // kubernetes executor
 
 	Command string            `yaml:"command"` // bash
 	Env     map[string]string `yaml:"env"`
@@ -139,6 +142,9 @@ func (c yamlCommon) options() ([]TaskOption, error) {
 	if c.PoolSlots > 0 {
 		opts = append(opts, WithPoolSlots(c.PoolSlots))
 	}
+	if c.Queue != "" {
+		opts = append(opts, WithQueue(c.Queue))
+	}
 	if c.PriorityWeight != 0 {
 		opts = append(opts, WithPriorityWeight(c.PriorityWeight))
 	}
@@ -209,6 +215,9 @@ func (y yamlDAG) build(baseDir string) (*DAG, error) {
 		topts := append(append([]TaskOption{}, defaults...), own...)
 		if yt.TriggerRule != "" {
 			topts = append(topts, WithTriggerRule(TriggerRule(yt.TriggerRule)))
+		}
+		if yt.PodOverride != nil {
+			topts = append(topts, WithPodOverride(yt.PodOverride))
 		}
 		if len(yt.Outlets) > 0 {
 			topts = append(topts, WithOutlets(yt.Outlets...))
