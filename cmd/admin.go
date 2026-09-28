@@ -16,7 +16,7 @@ import (
 )
 
 func adminCmds() []*cobra.Command {
-	return []*cobra.Command{variablesCmd(), connectionsCmd(), poolsCmd(), usersCmd(), datasetsCmd(), configCmd()}
+	return []*cobra.Command{variablesCmd(), connectionsCmd(), poolsCmd(), usersCmd(), rolesCmd(), datasetsCmd(), configCmd()}
 }
 
 func warnPlaintext() {
@@ -221,32 +221,28 @@ func readPassword() string {
 }
 
 func usersCmd() *cobra.Command {
-	c := &cobra.Command{Use: "users", Short: "Manage web/API users and roles (Viewer, User, Op, Admin)"}
+	c := &cobra.Command{Use: "users", Short: "Manage web/API users (roles: Viewer, User, Op, Admin or custom, see `roles`)"}
 	create := &cobra.Command{Use: "create", Short: "Create a user (password from prompt or DAGSFLOW_PASSWORD)",
 		Run: func(cmd *cobra.Command, _ []string) {
 			u, _ := cmd.Flags().GetString("username")
-			r, _ := cmd.Flags().GetString("role")
-			role, err := engine.ParseRole(r)
-			if err != nil {
-				exitf("%v", err)
-			}
+			roles, _ := cmd.Flags().GetStringSlice("role")
 			if ok, _ := cmd.Flags().GetBool("exists-ok"); ok {
 				if users, _ := newStore().Users(); users[u] != nil {
 					fmt.Printf("user %s already exists\n", u)
 					return
 				}
 			}
-			if err := newStore().CreateUser(u, readPassword(), role); err != nil {
+			if err := newStore().CreateUser(u, readPassword(), roles...); err != nil {
 				exitf("%v", err)
 			}
 			fn, _ := cmd.Flags().GetString("first-name")
 			ln, _ := cmd.Flags().GetString("last-name")
 			em, _ := cmd.Flags().GetString("email")
 			_ = newStore().UpdateUser(u, engine.UserUpdate{FirstName: &fn, LastName: &ln, Email: &em})
-			fmt.Printf("user %s created with role %s\n", u, role)
+			fmt.Printf("user %s created with roles %s\n", u, strings.Join(roles, ", "))
 		}}
 	create.Flags().String("username", "", "username")
-	create.Flags().String("role", "Viewer", "Viewer | User | Op | Admin")
+	create.Flags().StringSlice("role", []string{"Viewer"}, "role(s), comma separated: Viewer, User, Op, Admin or a custom role")
 	create.Flags().Bool("exists-ok", false, "do nothing if the user already exists (for container init)")
 	_ = create.MarkFlagRequired("username")
 
@@ -262,12 +258,9 @@ func usersCmd() *cobra.Command {
 				return &v
 			}
 			up.FirstName, up.LastName, up.Email = str("first-name"), str("last-name"), str("email")
-			if r := str("role"); r != nil {
-				role, err := engine.ParseRole(*r)
-				if err != nil {
-					exitf("%v", err)
-				}
-				up.Role = &role
+			if f.Changed("role") {
+				roles, _ := f.GetStringSlice("role")
+				up.Roles = &roles
 			}
 			if f.Changed("active") {
 				v, _ := f.GetBool("active")
@@ -282,7 +275,7 @@ func usersCmd() *cobra.Command {
 			}
 			fmt.Println("user updated:", a[0])
 		}}
-	update.Flags().String("role", "", "Viewer | User | Op | Admin")
+	update.Flags().StringSlice("role", nil, "replace the user's roles (comma separated)")
 	update.Flags().Bool("active", true, "--active=false deactivates the user")
 	update.Flags().String("first-name", "", "first name")
 	update.Flags().String("last-name", "", "last name")
@@ -299,14 +292,14 @@ func usersCmd() *cobra.Command {
 				exitf("%v", err)
 			}
 			w := table()
-			fmt.Fprintln(w, "USERNAME\tNAME\tEMAIL\tROLE\tACTIVE\tAPI_TOKENS\tLAST_LOGIN")
+			fmt.Fprintln(w, "USERNAME\tNAME\tEMAIL\tROLES\tACTIVE\tAPI_TOKENS\tLAST_LOGIN")
 			for _, u := range users {
 				last := "-"
 				if u.LastLogin != nil {
 					last = u.LastLogin.Local().Format(time.DateTime)
 				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%v\t%d\t%s\n", u.Username, strings.TrimSpace(u.FirstName+" "+u.LastName),
-					u.Email, u.Role, u.Active(), len(u.Tokens), last)
+					u.Email, strings.Join(u.RoleNames(), ","), u.Active(), len(u.Tokens), last)
 			}
 			w.Flush()
 		}},
@@ -390,5 +383,105 @@ func configCmd() *cobra.Command {
 	c := &cobra.Command{Use: "config", Short: "Configuration helpers"}
 	c.AddCommand(&cobra.Command{Use: "gen-key", Short: "Generate a DAGSFLOW_FERNET_KEY for encrypting variables/connections",
 		Run: func(*cobra.Command, []string) { fmt.Println(engine.GenerateKey()) }})
+	return c
+}
+
+func rolesCmd() *cobra.Command {
+	c := &cobra.Command{Use: "roles", Short: "Manage roles and permissions (custom roles, DAG-level access)",
+		Long: `A role is a set of permissions. DAG permissions take a resource: "*" (all DAGs),
+a DAG id, a glob (sales_*) or a tag (tag:finance). Examples:
+
+  dagsflow-go roles create --name sales-team \
+    --perm dag.read:sales_* --perm dag.trigger:sales_* --perm dag.edit:tag:sales --perm pools.read
+  dagsflow-go users update fadhel --role Viewer,sales-team
+
+Actions: ` + func() string {
+			var n []string
+			for _, a := range engine.Actions {
+				n = append(n, a.Name)
+			}
+			return strings.Join(n, ", ")
+		}()}
+	parse := func(perms []string) []engine.Permission {
+		var out []engine.Permission
+		for _, p := range perms {
+			pp, err := engine.ParsePermission(p)
+			if err != nil {
+				exitf("%v", err)
+			}
+			out = append(out, pp)
+		}
+		return out
+	}
+	create := &cobra.Command{Use: "create", Short: "Create a custom role",
+		Run: func(cmd *cobra.Command, _ []string) {
+			name, _ := cmd.Flags().GetString("name")
+			desc, _ := cmd.Flags().GetString("description")
+			perms, _ := cmd.Flags().GetStringArray("perm")
+			if err := newStore().CreateRole(engine.RoleDef{Name: name, Description: desc, Permissions: parse(perms)}); err != nil {
+				exitf("%v", err)
+			}
+			fmt.Println("role created:", name)
+		}}
+	create.Flags().String("name", "", "role name")
+	create.Flags().String("description", "", "description")
+	create.Flags().StringArray("perm", nil, "permission, repeatable: action[:resource], e.g. dag.read:sales_*")
+	_ = create.MarkFlagRequired("name")
+
+	update := &cobra.Command{Use: "update <role>", Short: "Replace a custom role's permissions (and description)", Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, a []string) {
+			rs, err := newStore().Roles()
+			if err != nil {
+				exitf("%v", err)
+			}
+			old := rs[a[0]]
+			if old == nil {
+				exitf("role %q not found", a[0])
+			}
+			def := *old
+			if cmd.Flags().Changed("description") {
+				def.Description, _ = cmd.Flags().GetString("description")
+			}
+			if cmd.Flags().Changed("perm") {
+				perms, _ := cmd.Flags().GetStringArray("perm")
+				def.Permissions = parse(perms)
+			}
+			if err := newStore().UpdateRole(a[0], def); err != nil {
+				exitf("%v", err)
+			}
+			fmt.Println("role updated:", a[0])
+		}}
+	update.Flags().String("description", "", "description")
+	update.Flags().StringArray("perm", nil, "the complete new permission list (repeatable)")
+
+	c.AddCommand(create, update,
+		&cobra.Command{Use: "list", Short: "List roles and their permissions", Run: func(*cobra.Command, []string) {
+			rs, err := newStore().Roles()
+			if err != nil {
+				exitf("%v", err)
+			}
+			w := table()
+			fmt.Fprintln(w, "ROLE\tTYPE\tPERMISSIONS")
+			for _, r := range engine.SortedRoles(rs) {
+				kind := "custom"
+				if r.Builtin {
+					kind = "built-in"
+				}
+				var ps []string
+				for _, p := range r.Permissions {
+					ps = append(ps, p.String())
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\n", r.Name, kind, strings.Join(ps, " "))
+			}
+			w.Flush()
+		}},
+		&cobra.Command{Use: "delete <role>", Short: "Delete a custom role (must not be assigned)", Args: cobra.ExactArgs(1),
+			Run: func(_ *cobra.Command, a []string) {
+				if err := newStore().DeleteRole(a[0]); err != nil {
+					exitf("%v", err)
+				}
+				fmt.Println("role deleted:", a[0])
+			}},
+	)
 	return c
 }

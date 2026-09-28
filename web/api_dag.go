@@ -92,12 +92,27 @@ func (s *Server) eventLogs(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	evs, err := s.Store.AuditEvents(q.Get("dag_id"), q.Get("run_id"), q.Get("task_id"), limit)
+	a := accessFrom(r)
+	if d := q.Get("dag_id"); d != "" && !a.DAG(engine.ActDagRead, d) {
+		fail(w, 403, "you cannot read DAG %s", d)
+		return
+	}
+	// fetch extra so filtering out unreadable DAGs still fills the page
+	evs, err := s.Store.AuditEvents(q.Get("dag_id"), q.Get("run_id"), q.Get("task_id"), limit*4)
 	if err != nil {
 		fail(w, 500, "%v", err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"event_logs": evs})
+	out := evs[:0]
+	for _, ev := range evs {
+		if ev.DagID == "" || a.DAG(engine.ActDagRead, ev.DagID) {
+			out = append(out, ev)
+		}
+		if len(out) == limit {
+			break
+		}
+	}
+	writeJSON(w, 200, map[string]any{"event_logs": out})
 }
 
 // ---- mark state ------------------------------------------------------------------------
@@ -289,7 +304,11 @@ func (s *Server) taskInstances(w http.ResponseWriter, r *http.Request) {
 	} else {
 		dags = dag.List()
 	}
+	a := accessFrom(r)
 	for _, d := range dags {
+		if !a.CanDAG(engine.ActDagRead, d.ID, d.Tags) {
+			continue
+		}
 		runs, _ := s.Store.ListRuns(d.ID)
 		for i := len(runs) - 1; i >= 0; i-- {
 			run := runs[i]

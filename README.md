@@ -255,18 +255,46 @@ Pilihan dan filter disimpan di URL, jadi bisa dibagikan dan tidak hilang saat au
 
 ### Users & RBAC
 
-Security → **List Users** (Admin): tambah, edit (nama, email, role, aktif/nonaktif, reset password), buat API token, hapus. Security → **List Roles** menampilkan izin tiap role:
+Security → **List Users** (`users.manage`): tambah, edit (nama, email, **beberapa role sekaligus**, aktif/nonaktif, reset password), buat API token, hapus.
 
-| Role | Izin |
+Security → **List Roles**: role bawaan (Viewer, User, Op, Admin; tidak bisa diubah, tapi bisa di-*Copy*) dan **role custom** yang bisa ditambah, diedit, dan dihapus (`roles.manage`). Satu role = kumpulan permission. Kalau user punya beberapa role, permission-nya dijumlahkan.
+
+| Permission | Artinya |
 |---|---|
-| Viewer | lihat DAG, run, log, XCom, code, pools, datasets, event log |
-| User | + trigger, pause, clear, mark state, reparse |
-| Op | + pools, variables, connections, hapus run/metadata DAG |
-| Admin | + kelola user dan API token |
+| `dag.read` / `dag.edit` / `dag.trigger` / `dag.delete` | lihat · pause/clear/mark/note/reparse · trigger · hapus run. Berlaku per DAG, lihat di bawah |
+| `pools.read`, `pools.edit`, `variables.read`, `variables.edit`, `connections.read`, `connections.edit` | halaman Admin |
+| `events.read`, `datasets.read`, `system.read` | event log, datasets, import errors + components |
+| `users.manage`, `roles.manage` | kelola user/token dan role |
+
+Permission DAG diberi *resource*:
+- `*` untuk semua DAG,
+- satu `dag_id`,
+- pola seperti `sales_*`,
+- atau tag seperti `tag:finance`.
+
+`edit`, `trigger`, dan `delete` otomatis termasuk `read`. DAG yang tidak boleh dibaca user tidak muncul di list, task instances, maupun event log. Tombol yang tidak diizinkan disembunyikan, dan API-nya menjawab `403`.
+
+| Role bawaan | Isi |
+|---|---|
+| Viewer | `dag.read:*`, pools/events/datasets/system read |
+| User | Viewer + `dag.edit:*`, `dag.trigger:*` |
+| Op | User + `dag.delete:*`, pools/variables/connections edit |
+| Admin | Op + `users.manage`, `roles.manage` |
+
+```bash
+dagsflow-go roles create --name sales-team --description "Pipeline sales" \
+  --perm 'dag.read:sales_*' --perm 'dag.trigger:sales_*' --perm 'dag.edit:tag:sales' --perm pools.read
+dagsflow-go users create --username fadhel --role Viewer,sales-team
+dagsflow-go users update fadhel --role sales-team
+dagsflow-go roles list
+dagsflow-go roles update sales-team --perm 'dag.read:sales_*'   # daftar permission baru (mengganti semua)
+dagsflow-go roles delete sales-team                              # hanya kalau tidak dipakai user mana pun
+```
+API: `GET /roles`, `GET /permissions`, `POST /roles`, `PATCH|DELETE /roles/{role}` dengan body `{"name":"sales-team","description":"...","permissions":["dag.read:sales_*","pools.read"]}`. User: `{"roles":["Viewer","sales-team"]}`.
 
 User nonaktif tidak bisa login dan token API-nya ditolak. Reset password mencabut semua token user itu. Admin aktif terakhir tidak bisa diturunkan, dinonaktifkan, atau dihapus, dan user tidak bisa menghapus akunnya sendiri.
 
-CLI: `users update <username> --role Op --active=false --email x@y --reset-password`, dan `users create` sekarang menerima `--first-name --last-name --email`.
+CLI: `users update <username> --role Op,sales-team --active=false --email x@y --reset-password`, dan `users create` menerima `--first-name --last-name --email`.
 
 API baru: `POST /dags/{dag}/reparse`, `GET /dags/{dag}/source`, `POST /dags/{dag}/dagRuns/{run}/mark` dan `.../taskInstances/{task}/mark` (body `{"new_state":"success","include_downstream":true,"map_index":0}`), `GET /eventLogs?dag_id=&run_id=&task_id=`, `GET /roles`, `GET|PATCH /users/{user}`. `GET /dags/{dag}` menerima `runs`, `base_date`, `run_type`, `state`.
 
@@ -380,10 +408,10 @@ Urutan lookup (secrets backend): env (`DAGSFLOW_VAR_REGION`, `DAGSFLOW_CONN_MY_A
 ## RBAC & REST API
 
 ```bash
-dagsflow-go users create --username fadhel --role Admin   # Viewer | User | Op | Admin
+dagsflow-go users create --username fadhel --role Admin   # Viewer | User | Op | Admin | role custom (lihat Users & RBAC)
 dagsflow-go users token fadhel                            # API token (tampil sekali)
 ```
-Tanpa user, auth mati dan webserver hanya boleh di localhost. Role: **Viewer** baca; **User** + trigger/pause/clear; **Op** + pools/variables/connections/hapus run; **Admin** + users.
+Tanpa user, auth mati dan webserver hanya boleh di localhost. Role dan permission per DAG: lihat **Users & RBAC**.
 
 Auth: HTTP Basic atau `Authorization: Bearer <token>`. Request non-GET via Basic wajib header `X-Dagsflow: 1` (CSRF).
 

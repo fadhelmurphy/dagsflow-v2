@@ -141,7 +141,7 @@ func setup(cmd *cobra.Command) {
 		dag.FileBackend{Dir: filepath.Join(home(), "connections")})
 	for c := cmd; c != nil; c = c.Parent() {
 		switch c.Name() {
-		case "variables", "connections", "pools", "users", "config", "stop", "status", "help", "completion", "db":
+		case "variables", "connections", "pools", "users", "roles", "config", "stop", "status", "help", "completion", "db":
 			return
 		}
 	}

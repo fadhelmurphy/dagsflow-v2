@@ -494,7 +494,7 @@ func TestPGBackupRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = js.SetVariable("k", "v", "")
-	_ = js.CreateUser("admin", "password123", RoleAdmin)
+	_ = js.CreateUser("admin", "password123", string(RoleAdmin))
 	js.Audit(AuditEvent{Event: "hello", DagID: d.ID})
 	b, err := js.Export(1000)
 	if err != nil {

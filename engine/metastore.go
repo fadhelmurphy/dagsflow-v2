@@ -323,24 +323,15 @@ const (
 	RoleAdmin  Role = "Admin"  // + users
 )
 
-func (r Role) Level() int {
-	return map[Role]int{RoleViewer: 1, RoleUser: 2, RoleOp: 3, RoleAdmin: 4}[r]
-}
-
-func ParseRole(s string) (Role, error) {
-	r := Role(s)
-	if r.Level() == 0 {
-		return "", fmt.Errorf("unknown role %q (Viewer, User, Op, Admin)", s)
-	}
-	return r, nil
-}
+func isAdminRole(name string) bool { return name == string(RoleAdmin) }
 
 type User struct {
 	Username     string     `json:"username"`
 	FirstName    string     `json:"first_name,omitempty"`
 	LastName     string     `json:"last_name,omitempty"`
 	Email        string     `json:"email,omitempty"`
-	Role         Role       `json:"role"`
+	Role         Role       `json:"role"`               // first role (kept for older clients)
+	Roles        []string   `json:"roles,omitempty"`    // all roles (built-in or custom)
 	Disabled     bool       `json:"disabled,omitempty"` // inactive users cannot sign in
 	PasswordHash string     `json:"password_hash"`
 	Tokens       []string   `json:"api_token_hashes,omitempty"` // sha256 of issued tokens
@@ -352,21 +343,35 @@ type User struct {
 
 func (u *User) Active() bool { return !u.Disabled }
 
-// RolePermissions describes what each role may do (shown on Security → List Roles).
-var RolePermissions = []struct {
-	Role        Role     `json:"role"`
-	Permissions []string `json:"permissions"`
-}{
-	{RoleViewer, []string{"View DAGs, runs, task instances, logs, XComs, code", "View pools, datasets, import errors, event log"}},
-	{RoleUser, []string{"Everything Viewer can do", "Trigger DAGs, pause/unpause", "Clear tasks and runs, mark state as success/failed", "Reparse DAG files"}},
-	{RoleOp, []string{"Everything User can do", "Manage pools, variables, connections", "Delete DAG runs and DAG metadata"}},
-	{RoleAdmin, []string{"Everything Op can do", "Manage users, roles and API tokens"}},
+// RoleNames: the user's roles (users created before multi-role have Role only).
+func (u *User) RoleNames() []string {
+	if len(u.Roles) > 0 {
+		return u.Roles
+	}
+	if u.Role != "" {
+		return []string{string(u.Role)}
+	}
+	return nil
+}
+
+func (u *User) isAdmin() bool {
+	for _, r := range u.RoleNames() {
+		if isAdminRole(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func (u *User) setRoles(roles []string) {
+	u.Roles = roles
+	u.Role = Role(roles[0])
 }
 
 // UserUpdate: nil fields are left unchanged.
 type UserUpdate struct {
 	FirstName, LastName, Email *string
-	Role                       *Role
+	Roles                      *[]string // validated with Store.ValidateRoles
 	Active                     *bool
 	Password                   *string
 }
@@ -374,7 +379,7 @@ type UserUpdate struct {
 func activeAdmins(m map[string]*User, except string) int {
 	n := 0
 	for name, u := range m {
-		if name != except && u.Role == RoleAdmin && u.Active() {
+		if name != except && u.isAdmin() && u.Active() {
 			n++
 		}
 	}
@@ -385,14 +390,28 @@ func (s *Store) UpdateUser(username string, up UserUpdate) error {
 	if up.Password != nil && len(*up.Password) < 8 {
 		return errors.New("password must be at least 8 characters")
 	}
+	if up.Roles != nil {
+		roles, err := s.ValidateRoles(*up.Roles)
+		if err != nil {
+			return err
+		}
+		up.Roles = &roles
+	}
 	m := map[string]*User{}
 	return s.updateTable("users", &m, func() error {
 		u, ok := m[username]
 		if !ok {
 			return fmt.Errorf("user %q not found", username)
 		}
-		losesAdmin := (up.Role != nil && *up.Role != RoleAdmin) || (up.Active != nil && !*up.Active)
-		if u.Role == RoleAdmin && u.Active() && losesAdmin && activeAdmins(m, username) == 0 {
+		keepsAdmin := true
+		if up.Roles != nil {
+			keepsAdmin = false
+			for _, r := range *up.Roles {
+				keepsAdmin = keepsAdmin || isAdminRole(r)
+			}
+		}
+		losesAdmin := !keepsAdmin || (up.Active != nil && !*up.Active)
+		if u.isAdmin() && u.Active() && losesAdmin && activeAdmins(m, username) == 0 {
 			return errors.New("cannot demote or deactivate the last active Admin")
 		}
 		if up.FirstName != nil {
@@ -404,8 +423,11 @@ func (s *Store) UpdateUser(username string, up UserUpdate) error {
 		if up.Email != nil {
 			u.Email = strings.TrimSpace(*up.Email)
 		}
-		if up.Role != nil {
-			u.Role = *up.Role
+		if up.Roles != nil {
+			if len(*up.Roles) == 0 {
+				return errors.New("at least one role is required")
+			}
+			u.setRoles(*up.Roles)
 		}
 		if up.Active != nil {
 			u.Disabled = !*up.Active
@@ -490,16 +512,22 @@ func (s *Store) Users() (map[string]*User, error) {
 	return m, s.readTable("users", &m)
 }
 
-func (s *Store) CreateUser(username, password string, role Role) error {
+func (s *Store) CreateUser(username, password string, roles ...string) error {
 	if username == "" || len(password) < 8 {
 		return errors.New("username required and password must be at least 8 characters")
+	}
+	roles, err := s.ValidateRoles(roles)
+	if err != nil {
+		return err
 	}
 	m := map[string]*User{}
 	return s.updateTable("users", &m, func() error {
 		if _, ok := m[username]; ok {
 			return fmt.Errorf("user %q already exists", username)
 		}
-		m[username] = &User{Username: username, Role: role, PasswordHash: hashPassword(password), CreatedAt: time.Now()}
+		u := &User{Username: username, PasswordHash: hashPassword(password), CreatedAt: time.Now()}
+		u.setRoles(roles)
+		m[username] = u
 		return nil
 	})
 }
@@ -511,7 +539,7 @@ func (s *Store) DeleteUser(username string) error {
 		if !ok {
 			return fmt.Errorf("user %q not found", username)
 		}
-		if u.Role == RoleAdmin && u.Active() && activeAdmins(m, username) == 0 {
+		if u.isAdmin() && u.Active() && activeAdmins(m, username) == 0 {
 			return errors.New("cannot delete the last active Admin")
 		}
 		delete(m, username)

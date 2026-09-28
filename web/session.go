@@ -189,7 +189,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	users, _ := s.Store.Users()
 	if len(users) == 0 {
-		writeJSON(w, 200, map[string]any{"username": "anonymous", "role": engine.RoleAdmin, "auth_enabled": false})
+		a := engine.FullAccess()
+		writeJSON(w, 200, map[string]any{"username": "anonymous", "role": engine.RoleAdmin, "roles": a.Roles,
+			"permissions": a.Permissions(), "can": a.Global(), "auth_enabled": false})
 		return
 	}
 	var body struct{ Username, Password string }
@@ -220,7 +222,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "%v", err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"username": u.Username, "role": u.Role, "auth_enabled": true})
+	a := s.access(u)
+	writeJSON(w, 200, map[string]any{"username": u.Username, "role": u.Role, "roles": a.Roles,
+		"permissions": a.Permissions(), "can": a.Global(), "auth_enabled": true})
 }
 
 func clientIP(r *http.Request) string {

@@ -46,6 +46,9 @@ type Server struct {
 	TLSCert, TLSKey string
 
 	limiter loginLimiter
+
+	rolesCache map[string]*engine.RoleDef
+	rolesAt    time.Time
 }
 
 type authEntry struct {
@@ -55,75 +58,81 @@ type authEntry struct {
 
 type ctxKey struct{}
 
-var anonymousAdmin = &engine.User{Username: "anonymous", Role: engine.RoleAdmin}
+var anonymousAdmin = &engine.User{Username: "anonymous", Role: engine.RoleAdmin, Roles: []string{string(engine.RoleAdmin)}}
 
 func userFrom(r *http.Request) *engine.User {
-	u, _ := r.Context().Value(ctxKey{}).(*engine.User)
-	return u
+	if p, _ := r.Context().Value(ctxKey{}).(*principal); p != nil {
+		return p.u
+	}
+	return nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	type route struct {
 		pattern string
-		role    engine.Role
+		perm    string // "" public, "auth" any signed-in user, else an engine.Act* action
 		h       http.HandlerFunc
 	}
-	V, U, O, A := engine.RoleViewer, engine.RoleUser, engine.RoleOp, engine.RoleAdmin
+	const auth = "auth"
 	routes := []route{
 		{"GET /api/v1/health", "", s.health},
-		{"GET /api/v1/components", V, s.components},
+		{"GET /api/v1/components", engine.ActSystemRead, s.components},
 		{"POST /api/v1/login", "", s.login},
 		{"POST /api/v1/logout", "", s.logout},
-		{"DELETE /api/v1/dags/{dag}", O, s.deleteDag},
-		{"GET /api/v1/me", V, s.me},
-		{"GET /api/v1/dags", V, s.listDags},
-		{"GET /api/v1/dags/{dag}", V, s.getDag},
-		{"PATCH /api/v1/dags/{dag}", U, s.patchDag},
-		{"GET /api/v1/dags/{dag}/dagRuns", V, s.listRuns},
-		{"POST /api/v1/dags/{dag}/dagRuns", U, s.trigger},
-		{"GET /api/v1/dags/{dag}/dagRuns/{run}", V, s.getRun},
-		{"DELETE /api/v1/dags/{dag}/dagRuns/{run}", O, s.deleteRun},
-		{"POST /api/v1/dags/{dag}/dagRuns/{run}/clear", U, s.clear},
-		{"GET /api/v1/dags/{dag}/dagRuns/{run}/taskInstances", V, s.listTIs},
-		{"GET /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/logs/{try}", V, s.log},
-		{"GET /api/v1/importErrors", V, s.importErrors},
-		{"GET /api/v1/datasets", V, s.datasets},
-		{"GET /api/v1/pools", V, s.listPools},
-		{"PUT /api/v1/pools/{name}", O, s.putPool},
-		{"POST /api/v1/pools", O, s.putPool},
-		{"PUT /api/v1/pools", O, s.putPool},
-		{"DELETE /api/v1/pools/{name}", O, s.deletePool},
-		{"GET /api/v1/variables", O, s.listVariables},
-		{"GET /api/v1/variables/{key}", O, s.getVariable},
-		{"PUT /api/v1/variables/{key}", O, s.putVariable},
-		{"POST /api/v1/variables", O, s.putVariable},
-		{"PUT /api/v1/variables", O, s.putVariable},
-		{"DELETE /api/v1/variables/{key}", O, s.deleteVariable},
-		{"GET /api/v1/connections", O, s.listConnections},
-		{"PUT /api/v1/connections/{id}", O, s.putConnection},
-		{"POST /api/v1/connections", O, s.putConnection},
-		{"PUT /api/v1/connections", O, s.putConnection},
-		{"DELETE /api/v1/connections/{id}", O, s.deleteConnection},
-		{"GET /api/v1/dags/{dag}/source", V, s.dagSource},
-		{"POST /api/v1/dags/{dag}/reparse", U, s.reparse},
-		{"POST /api/v1/dags/{dag}/dagRuns/{run}/mark", U, s.markRun},
-		{"POST /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/mark", U, s.markTask},
-		{"GET /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/rendered", V, s.rendered},
-		{"GET /api/v1/eventLogs", V, s.eventLogs},
-		{"GET /api/v1/taskInstances", V, s.taskInstances},
-		{"PUT /api/v1/dags/{dag}/dagRuns/{run}/note", U, s.runNote},
-		{"PUT /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/note", U, s.tiNote},
-		{"GET /api/v1/roles", V, s.roles},
-		{"GET /api/v1/users", A, s.listUsers},
-		{"POST /api/v1/users", A, s.createUser},
-		{"GET /api/v1/users/{user}", A, s.getUser},
-		{"PATCH /api/v1/users/{user}", A, s.patchUser},
-		{"DELETE /api/v1/users/{user}", A, s.deleteUser},
-		{"POST /api/v1/users/{user}/tokens", A, s.issueToken},
+		{"GET /api/v1/me", auth, s.me},
+		{"GET /api/v1/dags", auth, s.listDags}, // filtered by dag.read
+		{"GET /api/v1/dags/{dag}", engine.ActDagRead, s.getDag},
+		{"PATCH /api/v1/dags/{dag}", engine.ActDagEdit, s.patchDag},
+		{"DELETE /api/v1/dags/{dag}", engine.ActDagDelete, s.deleteDag},
+		{"GET /api/v1/dags/{dag}/dagRuns", engine.ActDagRead, s.listRuns},
+		{"POST /api/v1/dags/{dag}/dagRuns", engine.ActDagTrigger, s.trigger},
+		{"GET /api/v1/dags/{dag}/dagRuns/{run}", engine.ActDagRead, s.getRun},
+		{"DELETE /api/v1/dags/{dag}/dagRuns/{run}", engine.ActDagDelete, s.deleteRun},
+		{"POST /api/v1/dags/{dag}/dagRuns/{run}/clear", engine.ActDagEdit, s.clear},
+		{"GET /api/v1/dags/{dag}/dagRuns/{run}/taskInstances", engine.ActDagRead, s.listTIs},
+		{"GET /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/logs/{try}", engine.ActDagRead, s.log},
+		{"GET /api/v1/dags/{dag}/source", engine.ActDagRead, s.dagSource},
+		{"POST /api/v1/dags/{dag}/reparse", engine.ActDagEdit, s.reparse},
+		{"POST /api/v1/dags/{dag}/dagRuns/{run}/mark", engine.ActDagEdit, s.markRun},
+		{"POST /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/mark", engine.ActDagEdit, s.markTask},
+		{"GET /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/rendered", engine.ActDagRead, s.rendered},
+		{"PUT /api/v1/dags/{dag}/dagRuns/{run}/note", engine.ActDagEdit, s.runNote},
+		{"PUT /api/v1/dags/{dag}/dagRuns/{run}/taskInstances/{task}/note", engine.ActDagEdit, s.tiNote},
+		{"GET /api/v1/taskInstances", auth, s.taskInstances}, // filtered by dag.read
+		{"GET /api/v1/eventLogs", engine.ActEventsRead, s.eventLogs},
+		{"GET /api/v1/importErrors", engine.ActSystemRead, s.importErrors},
+		{"GET /api/v1/datasets", engine.ActDatasets, s.datasets},
+		{"GET /api/v1/pools", engine.ActPoolsRead, s.listPools},
+		{"PUT /api/v1/pools/{name}", engine.ActPoolsEdit, s.putPool},
+		{"POST /api/v1/pools", engine.ActPoolsEdit, s.putPool},
+		{"PUT /api/v1/pools", engine.ActPoolsEdit, s.putPool},
+		{"DELETE /api/v1/pools/{name}", engine.ActPoolsEdit, s.deletePool},
+		{"GET /api/v1/variables", engine.ActVarsRead, s.listVariables},
+		{"GET /api/v1/variables/{key}", engine.ActVarsRead, s.getVariable},
+		{"PUT /api/v1/variables/{key}", engine.ActVarsEdit, s.putVariable},
+		{"POST /api/v1/variables", engine.ActVarsEdit, s.putVariable},
+		{"PUT /api/v1/variables", engine.ActVarsEdit, s.putVariable},
+		{"DELETE /api/v1/variables/{key}", engine.ActVarsEdit, s.deleteVariable},
+		{"GET /api/v1/connections", engine.ActConnsRead, s.listConnections},
+		{"PUT /api/v1/connections/{id}", engine.ActConnsEdit, s.putConnection},
+		{"POST /api/v1/connections", engine.ActConnsEdit, s.putConnection},
+		{"PUT /api/v1/connections", engine.ActConnsEdit, s.putConnection},
+		{"DELETE /api/v1/connections/{id}", engine.ActConnsEdit, s.deleteConnection},
+		{"GET /api/v1/roles", auth, s.roles},
+		{"GET /api/v1/permissions", auth, s.permissionsList},
+		{"POST /api/v1/roles", engine.ActRolesManage, s.createRole},
+		{"PATCH /api/v1/roles/{role}", engine.ActRolesManage, s.patchRole},
+		{"DELETE /api/v1/roles/{role}", engine.ActRolesManage, s.deleteRole},
+		{"GET /api/v1/users", engine.ActUsersManage, s.listUsers},
+		{"POST /api/v1/users", engine.ActUsersManage, s.createUser},
+		{"GET /api/v1/users/{user}", engine.ActUsersManage, s.getUser},
+		{"PATCH /api/v1/users/{user}", engine.ActUsersManage, s.patchUser},
+		{"DELETE /api/v1/users/{user}", engine.ActUsersManage, s.deleteUser},
+		{"POST /api/v1/users/{user}/tokens", engine.ActUsersManage, s.issueToken},
 	}
 	for _, rt := range routes {
-		mux.Handle(rt.pattern, s.require(rt.role, rt.h))
+		mux.Handle(rt.pattern, s.require(rt.perm, rt.h))
 	}
 	// probes and Prometheus: no data, no auth (metrics can be turned off or
 	// protected with DAGSFLOW_METRICS_TOKEN)
@@ -180,10 +189,11 @@ func secureHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// require authenticates the request and enforces a minimum role.
-func (s *Server) require(min engine.Role, h http.HandlerFunc) http.Handler {
+// require authenticates the request and checks the permission: a global
+// action, or a DAG action on the DAG in the path.
+func (s *Server) require(perm string, h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if min == "" {
+		if perm == "" {
 			h(w, r)
 			return
 		}
@@ -200,12 +210,56 @@ func (s *Server) require(min engine.Role, h http.HandlerFunc) http.Handler {
 			fail(w, http.StatusForbidden, "missing X-Dagsflow header")
 			return
 		}
-		if u.Role.Level() < min.Level() {
-			fail(w, http.StatusForbidden, "role %s cannot do this (needs %s)", u.Role, min)
-			return
+		a := s.access(u)
+		if perm != "auth" {
+			allowed := false
+			if dagID := r.PathValue("dag"); dagID != "" && strings.HasPrefix(perm, "dag.") {
+				allowed = a.DAG(perm, dagID)
+			} else {
+				allowed = a.Can(perm)
+			}
+			if !allowed {
+				what := perm
+				if dagID := r.PathValue("dag"); dagID != "" {
+					what += " on DAG " + dagID
+				}
+				fail(w, http.StatusForbidden, "your roles (%s) do not allow %s", strings.Join(a.Roles, ", "), what)
+				return
+			}
 		}
-		h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, u)))
+		h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, &principal{u, a})))
 	})
+}
+
+type principal struct {
+	u *engine.User
+	a *engine.Access
+}
+
+// access resolves a user's permissions (roles cached for a few seconds).
+func (s *Server) access(u *engine.User) *engine.Access {
+	if u == anonymousAdmin {
+		return engine.FullAccess()
+	}
+	s.authMu.Lock()
+	roles, fresh := s.rolesCache, time.Since(s.rolesAt) < 5*time.Second
+	s.authMu.Unlock()
+	if !fresh || roles == nil {
+		if rs, err := s.Store.Roles(); err == nil {
+			roles = rs
+			s.authMu.Lock()
+			s.rolesCache, s.rolesAt = rs, time.Now()
+			s.authMu.Unlock()
+		}
+	}
+	return engine.AccessFor(u, roles)
+}
+
+func accessFrom(r *http.Request) *engine.Access {
+	if p, _ := r.Context().Value(ctxKey{}).(*principal); p != nil {
+		return p.a
+	}
+	return &engine.Access{}
 }
 
 func (s *Server) authenticate(r *http.Request) (*engine.User, bool, bool) {
@@ -455,33 +509,39 @@ func (s *Server) components(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	u := userFrom(r)
-	writeJSON(w, 200, map[string]any{"username": u.Username, "role": u.Role, "auth_enabled": u != anonymousAdmin})
+	u, a := userFrom(r), accessFrom(r)
+	writeJSON(w, 200, map[string]any{"username": u.Username, "role": u.Role, "roles": a.Roles,
+		"permissions": a.Permissions(), "can": a.Global(), "auth_enabled": u != anonymousAdmin})
 }
 
 func (s *Server) listDags(w http.ResponseWriter, r *http.Request) {
 	type item struct {
-		DagID       string         `json:"dag_id"`
-		Owner       string         `json:"owner"`
-		Schedule    string         `json:"schedule"`
-		Description string         `json:"description"`
-		Tags        []string       `json:"tags"`
-		Source      string         `json:"source"`
-		IsPaused    bool           `json:"is_paused"`
-		Next        *time.Time     `json:"next_data_interval_start,omitempty"`
-		Recent      []runSummary   `json:"recent_runs"`
-		Active      int            `json:"active_runs"`
-		RunCounts   map[string]int `json:"run_counts"`
-		LastRun     *runSummary    `json:"last_run,omitempty"`
-		TaskCounts  map[string]int `json:"recent_task_counts"`
+		DagID       string          `json:"dag_id"`
+		Owner       string          `json:"owner"`
+		Schedule    string          `json:"schedule"`
+		Description string          `json:"description"`
+		Tags        []string        `json:"tags"`
+		Source      string          `json:"source"`
+		IsPaused    bool            `json:"is_paused"`
+		Next        *time.Time      `json:"next_data_interval_start,omitempty"`
+		Recent      []runSummary    `json:"recent_runs"`
+		Active      int             `json:"active_runs"`
+		RunCounts   map[string]int  `json:"run_counts"`
+		LastRun     *runSummary     `json:"last_run,omitempty"`
+		TaskCounts  map[string]int  `json:"recent_task_counts"`
+		Perms       map[string]bool `json:"permissions"`
 	}
+	a := accessFrom(r)
 	out := []item{}
 	for _, d := range dag.List() {
+		if !a.CanDAG(engine.ActDagRead, d.ID, d.Tags) {
+			continue
+		}
 		m := s.Store.GetDagMeta(d.ID)
 		runs, _ := s.Store.ListRuns(d.ID)
 		it := item{DagID: d.ID, Owner: d.Owner(), Schedule: scheduleLabel(d), Description: d.Description, Tags: d.Tags,
 			Source: d.Source, IsPaused: m.IsPaused, Next: m.NextDataIntervalStart, Recent: []runSummary{},
-			RunCounts: map[string]int{}, TaskCounts: map[string]int{}}
+			RunCounts: map[string]int{}, TaskCounts: map[string]int{}, Perms: a.DagPermissions(d.ID)}
 		if it.Tags == nil {
 			it.Tags = []string{}
 		}
@@ -510,7 +570,11 @@ func (s *Server) listDags(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, it)
 	}
-	writeJSON(w, 200, map[string]any{"dags": out, "total_entries": len(out), "import_errors": importErrMap()})
+	errs := map[string]string{}
+	if a.Can(engine.ActSystemRead) {
+		errs = importErrMap()
+	}
+	writeJSON(w, 200, map[string]any{"dags": out, "total_entries": len(out), "import_errors": errs})
 }
 
 func stateName(s dag.State) string {
@@ -640,6 +704,7 @@ func (s *Server) getDag(w http.ResponseWriter, r *http.Request) {
 		"catchup": d.Catchup, "max_active_runs": d.MaxActiveRuns, "params": d.Params,
 		"datasets": d.Datasets, "is_paused": m.IsPaused, "next_data_interval_start": m.NextDataIntervalStart,
 		"tasks": describeTasks(d), "runs": rs, "total_runs": len(runs), "filtered_runs": len(filtered), "run_counts": counts,
+		"permissions": accessFrom(r).DagPermissions(d.ID),
 	})
 }
 
@@ -1100,7 +1165,7 @@ func (s *Server) deleteConnection(w http.ResponseWriter, r *http.Request) {
 
 func userJSON(u *engine.User) map[string]any {
 	return map[string]any{"username": u.Username, "first_name": u.FirstName, "last_name": u.LastName,
-		"email": u.Email, "role": u.Role, "active": u.Active(), "api_tokens": len(u.Tokens),
+		"email": u.Email, "role": u.Role, "roles": u.RoleNames(), "active": u.Active(), "api_tokens": len(u.Tokens),
 		"created_at": u.CreatedAt, "changed_at": u.ChangedAt, "last_login": u.LastLogin, "login_count": u.LoginCount}
 }
 
@@ -1135,13 +1200,14 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request) {
 }
 
 type userBody struct {
-	Username  string  `json:"username"`
-	Password  *string `json:"password"`
-	FirstName *string `json:"first_name"`
-	LastName  *string `json:"last_name"`
-	Email     *string `json:"email"`
-	Role      *string `json:"role"`
-	Active    *bool   `json:"active"`
+	Username  string    `json:"username"`
+	Password  *string   `json:"password"`
+	FirstName *string   `json:"first_name"`
+	LastName  *string   `json:"last_name"`
+	Email     *string   `json:"email"`
+	Role      *string   `json:"role"`  // one role (older clients)
+	Roles     *[]string `json:"roles"` // one or more roles
+	Active    *bool     `json:"active"`
 }
 
 func (b userBody) update() (engine.UserUpdate, error) {
@@ -1149,12 +1215,11 @@ func (b userBody) update() (engine.UserUpdate, error) {
 	if b.Email != nil && *b.Email != "" && !strings.Contains(*b.Email, "@") {
 		return up, fmt.Errorf("email looks invalid")
 	}
-	if b.Role != nil {
-		role, err := engine.ParseRole(*b.Role)
-		if err != nil {
-			return up, err
-		}
-		up.Role = &role
+	switch {
+	case b.Roles != nil:
+		up.Roles = b.Roles
+	case b.Role != nil:
+		up.Roles = &[]string{*b.Role}
 	}
 	return up, nil
 }
@@ -1166,8 +1231,8 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.Username = strings.TrimSpace(body.Username)
-	if body.Password == nil || body.Role == nil {
-		fail(w, 400, "username, password and role are required")
+	if body.Password == nil || (body.Role == nil && body.Roles == nil) {
+		fail(w, 400, "username, password and roles are required")
 		return
 	}
 	up, err := body.update()
@@ -1175,16 +1240,17 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "%v", err)
 		return
 	}
-	if err := s.Store.CreateUser(body.Username, *body.Password, *up.Role); err != nil {
+	if err := s.Store.CreateUser(body.Username, *body.Password, *up.Roles...); err != nil {
 		fail(w, 400, "%v", err)
 		return
 	}
-	up.Password, up.Role = nil, nil
+	roles := strings.Join(*up.Roles, ",")
+	up.Password, up.Roles = nil, nil
 	if err := s.Store.UpdateUser(body.Username, up); err != nil {
 		fail(w, 400, "%v", err)
 		return
 	}
-	s.audit(r, "user_create", "", "", "", body.Username+" ("+*body.Role+")")
+	s.audit(r, "user_create", "", "", "", body.Username+" ("+roles+")")
 	users, _ := s.Store.Users()
 	writeJSON(w, 201, userJSON(users[body.Username]))
 }
@@ -1211,8 +1277,8 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 	}
 	s.dropAuthCache()
 	var what []string
-	if up.Role != nil {
-		what = append(what, "role="+string(*up.Role))
+	if up.Roles != nil {
+		what = append(what, "roles="+strings.Join(*up.Roles, ","))
 	}
 	if up.Active != nil {
 		what = append(what, fmt.Sprintf("active=%v", *up.Active))
@@ -1244,8 +1310,120 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ---- roles ------------------------------------------------------------------------------
+
 func (s *Server) roles(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"roles": engine.RolePermissions})
+	rs, err := s.Store.Roles()
+	if err != nil {
+		fail(w, 500, "%v", err)
+		return
+	}
+	type item struct {
+		*engine.RoleDef
+		Users []string `json:"users,omitempty"`
+	}
+	holders := map[string][]string{}
+	if accessFrom(r).Can(engine.ActUsersManage) {
+		users, _ := s.Store.Users()
+		for _, u := range users {
+			for _, n := range u.RoleNames() {
+				holders[n] = append(holders[n], u.Username)
+			}
+		}
+	}
+	out := []item{}
+	for _, rd := range engine.SortedRoles(rs) {
+		sort.Strings(holders[rd.Name])
+		out = append(out, item{rd, holders[rd.Name]})
+	}
+	writeJSON(w, 200, map[string]any{"roles": out})
+}
+
+// permissionsList: the actions a role can grant (for the role editor).
+func (s *Server) permissionsList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"actions": engine.Actions})
+}
+
+type roleBody struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"` // "dag.read:sales_*", "pools.read", ...
+}
+
+func (b roleBody) def() (engine.RoleDef, error) {
+	d := engine.RoleDef{Name: b.Name, Description: strings.TrimSpace(b.Description)}
+	for _, ps := range b.Permissions {
+		p, err := engine.ParsePermission(ps)
+		if err != nil {
+			return d, err
+		}
+		d.Permissions = append(d.Permissions, p)
+	}
+	return d, nil
+}
+
+func (s *Server) dropRolesCache() {
+	s.authMu.Lock()
+	s.rolesCache = nil
+	s.authMu.Unlock()
+}
+
+func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
+	var body roleBody
+	if err := readBody(r, &body); err != nil {
+		fail(w, 400, "%v", err)
+		return
+	}
+	d, err := body.def()
+	if err == nil {
+		err = s.Store.CreateRole(d)
+	}
+	if err != nil {
+		fail(w, 400, "%v", err)
+		return
+	}
+	s.dropRolesCache()
+	s.audit(r, "role_create", "", "", "", strings.TrimSpace(body.Name)+": "+strings.Join(body.Permissions, " "))
+	writeJSON(w, 201, map[string]any{"name": strings.TrimSpace(body.Name)})
+}
+
+func (s *Server) patchRole(w http.ResponseWriter, r *http.Request) {
+	var body roleBody
+	if err := readBody(r, &body); err != nil {
+		fail(w, 400, "%v", err)
+		return
+	}
+	name := r.PathValue("role")
+	d, err := body.def()
+	if err == nil {
+		err = s.Store.UpdateRole(name, d)
+	}
+	if err != nil {
+		code := 400
+		if strings.Contains(err.Error(), "not found") {
+			code = 404
+		}
+		fail(w, code, "%v", err)
+		return
+	}
+	s.dropRolesCache()
+	s.audit(r, "role_update", "", "", "", name+": "+strings.Join(body.Permissions, " "))
+	writeJSON(w, 200, map[string]any{"name": name})
+}
+
+func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("role")
+	if err := s.Store.DeleteRole(name); err != nil {
+		code := 400
+		if strings.Contains(err.Error(), "not found") {
+			code = 404
+		}
+		fail(w, code, "%v", err)
+		return
+	}
+	s.dropRolesCache()
+	s.audit(r, "role_delete", "", "", "", name)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {

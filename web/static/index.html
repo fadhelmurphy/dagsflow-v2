@@ -262,7 +262,15 @@ dialog label.chk input{width:auto}
 .secHead{display:flex;align-items:center;gap:12px;margin:6px 0 20px}
 tr.inactive td{color:#9AA5B1}
 .yes{color:var(--s-success);font-weight:700}.no{color:var(--s-failed);font-weight:700}
-ul.perms{margin:0;padding-left:18px}
+ul.perms{margin:0;padding:0;list-style:none;display:flex;flex-wrap:wrap;gap:4px}
+ul.perms li code{display:inline-block;background:var(--bg2,#f1f3f6);border:1px solid var(--line,#e2e6ec);border-radius:4px;padding:1px 6px;font-size:12px}
+ul.perms code .res{color:var(--accent,#1d63ed);font-weight:600}
+dialog.wide{width:min(880px,94vw)}
+.roleChecks{display:flex;flex-wrap:wrap;gap:4px 14px}
+.permGrid{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
+.permGrid .chk{font-size:13px}
+.ruleTable td,.ruleTable th{padding:4px 6px}
+.ruleTable .ruleRes{width:100%;min-width:220px}
 .iconbtn.danger{color:var(--s-failed)}
 .stateTag{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600}
 .stateTag i{width:10px;height:10px;border-radius:2px;border:1px solid rgba(0,0,0,.12)}
@@ -282,7 +290,8 @@ dialog .row{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:8px 16px;border-radius:6px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
 #toast.show{opacity:1}
 .empty{padding:40px;text-align:center;color:var(--muted)}
-body:not(.can-User) .needs-User, body:not(.can-Op) .needs-Op, body:not(.can-Admin) .needs-Admin{display:none!important}
+body:not(.can-users-manage) .needs-users-manage, body:not(.can-roles-manage) .needs-roles-manage, body:not(.can-pools-read) .needs-pools-read, body:not(.can-pools-edit) .needs-pools-edit, body:not(.can-variables-read) .needs-variables-read, body:not(.can-variables-edit) .needs-variables-edit, body:not(.can-connections-read) .needs-connections-read, body:not(.can-connections-edit) .needs-connections-edit, body:not(.can-events-read) .needs-events-read, body:not(.can-datasets-read) .needs-datasets-read, body:not(.can-system-read) .needs-system-read{display:none!important}
+.forbid{display:none!important}
 .adminForm{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;padding:14px;border-top:1px solid #E7EBEF}
 .adminForm label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:3px}
 /* airflow-style DAG list */
@@ -360,10 +369,10 @@ td .toggle{margin-left:4px}
   <a class="brand" href="#/"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><path d="M7 8 L13 18 M19 8 L13 18 M7 8 L19 8" stroke="#8FA3B8" stroke-width="2" fill="none"/><circle cx="7" cy="8" r="4" fill="#0F6FDE"/><circle cx="19" cy="8" r="4" fill="#2E9B57"/><circle cx="13" cy="19" r="4.5" fill="#F0A020"/></svg>dagsflow</a>
   <nav class="menu" aria-label="Main">
     <a href="#/" data-nav="dags">DAGs</a>
-    <a href="#/admin?tab=datasets" data-nav="datasets">Datasets</a>
-    <div class="dd" data-nav="security"><button type="button" aria-haspopup="true">Security</button><div class="ddm"><a class="needs-Admin" href="#/admin?tab=users">List Users</a><a href="#/admin?tab=roles">List Roles</a></div></div>
-    <div class="dd" data-nav="browse"><button type="button" aria-haspopup="true">Browse</button><div class="ddm"><a href="#/admin?tab=tis">Task Instances</a><a href="#/admin?tab=events">Event Log</a><a href="#/admin?tab=errors">DAG Import Errors</a></div></div>
-    <div class="dd" data-nav="admin"><button type="button" aria-haspopup="true">Admin</button><div class="ddm"><a href="#/admin?tab=pools">Pools</a><a class="needs-Op" href="#/admin?tab=variables">Variables</a><a class="needs-Op" href="#/admin?tab=connections">Connections</a><a href="#/admin?tab=components">Components</a></div></div>
+    <a class="needs-datasets-read" href="#/admin?tab=datasets" data-nav="datasets">Datasets</a>
+    <div class="dd" data-nav="security"><button type="button" aria-haspopup="true">Security</button><div class="ddm"><a class="needs-users-manage" href="#/admin?tab=users">List Users</a><a href="#/admin?tab=roles">List Roles</a></div></div>
+    <div class="dd" data-nav="browse"><button type="button" aria-haspopup="true">Browse</button><div class="ddm"><a href="#/admin?tab=tis">Task Instances</a><a class="needs-events-read" href="#/admin?tab=events">Event Log</a><a class="needs-system-read" href="#/admin?tab=errors">DAG Import Errors</a></div></div>
+    <div class="dd" data-nav="admin"><button type="button" aria-haspopup="true">Admin</button><div class="ddm"><a class="needs-pools-read" href="#/admin?tab=pools">Pools</a><a class="needs-variables-read" href="#/admin?tab=variables">Variables</a><a class="needs-connections-read" href="#/admin?tab=connections">Connections</a><a class="needs-system-read" href="#/admin?tab=components">Components</a></div></div>
   </nav>
   <div class="sched" id="sched" title="Scheduler status"><i></i><span>Checking scheduler…</span></div>
   <span class="clock" id="clock"></span>
@@ -414,7 +423,9 @@ async function api(path, opts={}){
   return ct.includes("json") ? res.json() : res.text();
 }
 const post = (path, body, method="POST") => api(path, {method, body:JSON.stringify(body||{})});
-const ME = {role:"Viewer"}; const can = r => ({Viewer:1,User:2,Op:3,Admin:4})[ME.role] >= ({Viewer:1,User:2,Op:3,Admin:4})[r];
+const ME = {role:"Viewer", roles:[], can:{}, permissions:[]};
+const can = a => ME.permissions.includes("*") || !!ME.can?.[a];      // global action (users.manage, pools.edit, ...)
+const dp = (d, k) => d?.permissions && !d.permissions[k] ? " forbid" : ""; // hide unless allowed on this DAG (read/edit/trigger/delete)
 const stateTag = s => `<span class="stateTag"><i style="background:${color(s)}"></i>${esc(st(s))}</span>`;
 const legend = () => `<div class="legend">${STATES.map(s=>`<span><i class="dot" style="background:${color(s)}"></i>${s}</span>`).join("")}</div>`;
 const route = () => { const [path,q] = location.hash.slice(1).split("?"); return {parts:(path||"/").split("/").filter(Boolean).map(decodeURIComponent), q:new URLSearchParams(q||"")}; };
@@ -506,7 +517,7 @@ function renderListTable(){
   for(const d of shown){
     const id = enc(d.dag_id), lr = d.last_run;
     h += `<tr>
-      <td><button class="toggle needs-User" role="switch" aria-checked="${!d.is_paused}" aria-label="${d.is_paused?"Unpause":"Pause"} ${esc(d.dag_id)}" data-pause="${esc(d.dag_id)}" data-paused="${d.is_paused}"></button></td>
+      <td><button class="toggle${dp(d,"edit")}" role="switch" aria-checked="${!d.is_paused}" aria-label="${d.is_paused?"Unpause":"Pause"} ${esc(d.dag_id)}" data-pause="${esc(d.dag_id)}" data-paused="${d.is_paused}"></button></td>
       <td class="dagcell"><a class="dagname" href="#/dags/${id}">${esc(d.dag_id)}</a>
         <div class="tags">${d.source!=="go"?`<span class="badge grey" title="${esc(d.source)}">${/\.ya?ml$/.test(d.source)?"yaml":"go"}</span>`:`<span class="badge grey" title="builtin_dags/: compiled into the binary">built-in</span>`}${d.tags.map(t=>`<a class="badge" href="${listHref({tags:t})}">${esc(t)}</a>`).join("")}</div></td>
       <td class="hideMd"><span class="badge grey">${esc(d.owner)}</span></td>
@@ -516,11 +527,11 @@ function renderListTable(){
       <td class="hideMd"><span class="when">${d.schedule.startsWith("datasets")?"On dataset update":d.is_paused&&!d.next_data_interval_start?"":fmt(d.next_data_interval_start).replace("–","")}</span></td>
       <td class="hideMd"><div class="circles">${TASK_STATES.map(s=>circ(s, d.recent_task_counts[s]||0, s)).join("")}</div></td>
       <td><div class="acts" style="justify-content:center">
-        <button class="needs-User" data-trigger="${esc(d.dag_id)}" title="Trigger DAG" aria-label="Trigger ${esc(d.dag_id)}">${ICON.play}</button>
+        <button class="${dp(d,"trigger")}" data-trigger="${esc(d.dag_id)}" title="Trigger DAG" aria-label="Trigger ${esc(d.dag_id)}">${ICON.play}</button>
         ${d.source!=="go"
-          ? `<button class="needs-User" data-reparse="${esc(d.dag_id)}" title="Reparse DAG" aria-label="Reparse ${esc(d.dag_id)}">${PI.reparse}</button>`
+          ? `<button class="${dp(d,"edit")}" data-reparse="${esc(d.dag_id)}" title="Reparse DAG" aria-label="Reparse ${esc(d.dag_id)}">${PI.reparse}</button>`
           : `<span class="off" title="Compiled into the binary: rebuild to change it">${PI.reparse}</span>`}
-        <button class="del needs-Op" data-deldag="${esc(d.dag_id)}" title="Delete DAG runs and logs" aria-label="Delete ${esc(d.dag_id)} metadata">${ICON.trash}</button></div></td>
+        <button class="del${dp(d,"delete")}" data-deldag="${esc(d.dag_id)}" title="Delete DAG runs and logs" aria-label="Delete ${esc(d.dag_id)} metadata">${ICON.trash}</button></div></td>
       <td><div class="dd"><button type="button" class="dots3" aria-haspopup="true" aria-label="Links for ${esc(d.dag_id)}">···</button>
         <div class="ddm right"><a href="#/dags/${id}?tab=grid">Grid</a><a href="#/dags/${id}?tab=graph">Graph</a><a href="#/dags/${id}?tab=runs">Runs</a><a href="#/dags/${id}?tab=details">Details</a></div></div></td>
     </tr>`;
@@ -628,15 +639,15 @@ async function viewDag(id, q){
 
 function dagTopHtml(d){
   return `<div class="dagTop">
-      <button class="toggle needs-User" role="switch" id="hPause" data-pause="${esc(d.dag_id)}"></button>
+      <button class="toggle${dp(d,"edit")}" role="switch" id="hPause" data-pause="${esc(d.dag_id)}"></button>
       <h1 class="dagTitle"><span>DAG:</span> <a href="#/dags/${enc(d.dag_id)}">${esc(d.dag_id)}</a></h1>
       <span class="grow"></span>
       <span class="hbadge" id="hSched"></span><span class="hbadge" id="hNext"></span>
       <div class="acts">
-        <button class="needs-User" data-trigger="${esc(d.dag_id)}" title="Trigger DAG" aria-label="Trigger DAG">${ICON.play}</button>
-        <button class="needs-User" id="reparseBtn" title="Reparse DAG" aria-label="Reparse DAG">${PI.reparse}</button>
-        <span class="off needs-User" id="reparseOff" title="Compiled into the binary (builtin_dags/): rebuild to change it" hidden>${PI.reparse}</span>
-        <button class="del needs-Op" data-deldag="${esc(d.dag_id)}" title="Delete DAG runs and logs" aria-label="Delete DAG metadata">${ICON.trash}</button>
+        <button class="${dp(d,"trigger")}" data-trigger="${esc(d.dag_id)}" title="Trigger DAG" aria-label="Trigger DAG">${ICON.play}</button>
+        <button class="${dp(d,"edit")}" id="reparseBtn" title="Reparse DAG" aria-label="Reparse DAG">${PI.reparse}</button>
+        <span class="off${dp(d,"edit")}" id="reparseOff" title="Compiled into the binary (builtin_dags/): rebuild to change it" hidden>${PI.reparse}</span>
+        <button class="del${dp(d,"delete")}" data-deldag="${esc(d.dag_id)}" title="Delete DAG runs and logs" aria-label="Delete DAG metadata">${ICON.trash}</button>
       </div>
     </div>`;
 }
@@ -762,10 +773,10 @@ function paneHead(d, sel, run, ti, taskDef){
   if(sel.task) h += `<span class="csep">/</span>${crumb("Task", esc(sel.task)+(sel.mi>=0?" []":""), sel.mi>=0 ? dagHref({mi:null, tab:"mapped"}) : "")}`;
   if(sel.task && sel.mi>=0) h += `<span class="csep">/</span>${crumb("Map Index", String(sel.mi), "")}`;
   h += `</div><div class="pacts">`;
-  const markMenu = `<div class="dd"><button type="button" class="btn primary needs-User" aria-haspopup="true">Mark state as… ${PI.caret}</button>
+  const markMenu = `<div class="dd"><button type="button" class="btn primary${dp(d,"edit")}" aria-haspopup="true">Mark state as… ${PI.caret}</button>
       <div class="ddm right"><button data-act="mark" data-state="success"><i class="sq" style="background:var(--s-success)"></i>success</button><button data-act="mark" data-state="failed"><i class="sq" style="background:var(--s-failed)"></i>failed</button></div></div>`;
-  if(sel.kind==="ti") h += `<button class="btn primary needs-User" data-act="clear">Clear task</button>${markMenu}`;
-  if(sel.kind==="run") h += `<button class="btn primary needs-User" data-act="clear">Clear existing tasks</button>${markMenu}`;
+  if(sel.kind==="ti") h += `<button class="btn primary${dp(d,"edit")}" data-act="clear">Clear task</button>${markMenu}`;
+  if(sel.kind==="run") h += `<button class="btn primary${dp(d,"edit")}" data-act="clear">Clear existing tasks</button>${markMenu}`;
   if(sel.task) h += `<div class="dd"><button type="button" class="btn outline" aria-haspopup="true">Filter DAG by task ${PI.caret}</button>
       <div class="ddm right"><button data-act="filter" data-mode="up">Only upstream</button><button data-act="filter" data-mode="down">Only downstream</button><button data-act="filter" data-mode="both">Both upstream &amp; downstream</button>${new URLSearchParams(location.hash.split("?")[1]||"").get("filter_task")?'<button data-act="unfilter">Reset filter</button>':""}</div></div>`;
   return h + `</div>`;
@@ -820,7 +831,7 @@ function notesBlock(kind, note, target){ // kind: "Task Instance" | "DAG Run"
   return `<section class="notes" data-note-target="${esc(JSON.stringify(target))}">
     <h3 class="ph notesH">${kind} Notes</h3>
     <div class="noteBody">${note ? `<div class="noteText">${esc(note)}</div>` : `<p class="sub">No note yet.</p>`}</div>
-    <div class="noteActs"><button class="btn light needs-User" data-note-edit>${ICON.pencil} ${note?"Edit Note":"Add Note"}</button></div></section>`;
+    <div class="noteActs"><button class="btn light${dp(current,"edit")}" data-note-edit>${ICON.pencil} ${note?"Edit Note":"Add Note"}</button></div></section>`;
 }
 function extraLinksBlock(t, r, sel){
   if(!t.extra_links?.length) return "";
@@ -1046,8 +1057,9 @@ function durationTab(d, sel){
 }
 
 // ---- actions: clear / mark / filter / reparse -----------------------------------------
-function openActDlg({title, body, confirm, danger, onConfirm}){
+function openActDlg({title, body, confirm, danger, onConfirm, wide}){
   const dlg = document.getElementById("actDlg");
+  dlg.classList.toggle("wide", !!wide);
   dlg.innerHTML = `<form method="dialog"><h2>${title}</h2><div class="dlgBody">${body}</div><div class="formerr" id="actErr" role="alert"></div>
     <div class="row"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn ${danger?"dangerFill":"primary"}" value="go" id="actGo">${confirm}</button></div></form>`;
   dlg.querySelector("form").onsubmit = async e => {
@@ -1179,7 +1191,7 @@ document.getElementById("triggerForm").addEventListener("submit", async e=>{
 
 // ---- admin -----------------------------------------------------------------
 async function viewAdmin(tab){
-  if(tab==="users"){ $app.innerHTML = can("Admin") ? await usersPage() : `<div class="banner err">Only Admins can manage users.</div>`; return; }
+  if(tab==="users"){ $app.innerHTML = can("users.manage") ? await usersPage() : `<div class="banner err">Your roles cannot manage users (needs users.manage).</div>`; return; }
   if(tab==="roles"){ $app.innerHTML = await rolesPage(); return; }
   if(tab==="events"){ $app.innerHTML = await eventsPage(); return; }
   if(tab==="tis"){ $app.innerHTML = await tisPage(); return; }
@@ -1187,22 +1199,22 @@ async function viewAdmin(tab){
   let h = `<h1 class="pageTitle">${titles[tab]||"Admin"}</h1>`;
   if(tab==="pools"){
     const {pools} = await api("/pools");
-    h += `<div class="panel"><table class="list"><thead><tr><th>Pool</th><th>Slots</th><th>Running</th><th>Queued</th><th>Description</th><th></th></tr></thead><tbody>${pools.map(p=>`<tr><td class="id">${esc(p.name)}</td><td>${p.slots}</td><td>${p.running_slots}</td><td>${p.queued_slots}</td><td>${esc(p.description)}</td><td style="text-align:right">${p.name!=="default_pool"?`<button class="iconbtn needs-Op" data-admin="delpool" data-k="${esc(p.name)}">Delete</button>`:""}</td></tr>`).join("")}</tbody></table>
-      <div class="adminForm needs-Op"><label>Name<input id="poolName" placeholder="bigquery"></label><label>Slots<input id="poolSlots" type="number" min="0" value="4" style="width:90px"></label><label>Description<input id="poolDesc"></label><button class="btn primary" data-admin="setpool">Save pool</button></div></div>
+    h += `<div class="panel"><table class="list"><thead><tr><th>Pool</th><th>Slots</th><th>Running</th><th>Queued</th><th>Description</th><th></th></tr></thead><tbody>${pools.map(p=>`<tr><td class="id">${esc(p.name)}</td><td>${p.slots}</td><td>${p.running_slots}</td><td>${p.queued_slots}</td><td>${esc(p.description)}</td><td style="text-align:right">${p.name!=="default_pool"?`<button class="iconbtn needs-pools-edit" data-admin="delpool" data-k="${esc(p.name)}">Delete</button>`:""}</td></tr>`).join("")}</tbody></table>
+      <div class="adminForm needs-pools-edit"><label>Name<input id="poolName" placeholder="bigquery"></label><label>Slots<input id="poolSlots" type="number" min="0" value="4" style="width:90px"></label><label>Description<input id="poolDesc"></label><button class="btn primary" data-admin="setpool">Save pool</button></div></div>
       <p class="sub">Tasks join a pool with <code>dag.WithPool("name")</code> or <code>pool:</code> in YAML. A pool limits how many of its tasks run at once across all DAGs.</p>`;
   }
   if(tab==="variables"){
     const {variables, encryption_enabled} = await api("/variables");
     h += encryption_enabled?"":`<div class="banner warn">DAGSFLOW_FERNET_KEY is not set, so variables and connections are stored unencrypted. Generate one with <code>dagsflow-go config gen-key</code>.</div>`;
-    h += `<div class="panel"><table class="list"><thead><tr><th>Key</th><th>Value</th><th>Encrypted</th><th>Description</th><th></th></tr></thead><tbody>${variables.length?variables.map(v=>`<tr><td class="id">${esc(v.key)}</td><td class="id" style="max-width:420px;word-break:break-all">${esc(v.value)}</td><td>${v.encrypted?"yes":"no"}</td><td>${esc(v.description)}</td><td style="text-align:right"><button class="iconbtn" data-admin="delvar" data-k="${esc(v.key)}">Delete</button></td></tr>`).join(""):`<tr><td colspan="5" class="muted">No variables yet.</td></tr>`}</tbody></table>
-      <div class="adminForm"><label>Key<input id="varKey"></label><label>Value<input id="varVal" style="width:280px"></label><label>Description<input id="varDesc"></label><button class="btn primary" data-admin="setvar">Save variable</button></div></div>
+    h += `<div class="panel"><table class="list"><thead><tr><th>Key</th><th>Value</th><th>Encrypted</th><th>Description</th><th></th></tr></thead><tbody>${variables.length?variables.map(v=>`<tr><td class="id">${esc(v.key)}</td><td class="id" style="max-width:420px;word-break:break-all">${esc(v.value)}</td><td>${v.encrypted?"yes":"no"}</td><td>${esc(v.description)}</td><td style="text-align:right"><button class="iconbtn needs-variables-edit" data-admin="delvar" data-k="${esc(v.key)}">Delete</button></td></tr>`).join(""):`<tr><td colspan="5" class="muted">No variables yet.</td></tr>`}</tbody></table>
+      <div class="adminForm needs-variables-edit"><label>Key<input id="varKey"></label><label>Value<input id="varVal" style="width:280px"></label><label>Description<input id="varDesc"></label><button class="btn primary" data-admin="setvar">Save variable</button></div></div>
       <p class="sub">Read in tasks with <code>dag.GetVariable("key")</code> or <code>{{ var "key" }}</code> in templates. Env vars <code>DAGSFLOW_VAR_KEY</code> take precedence.</p>`;
   }
   if(tab==="connections"){
     const {connections, encryption_enabled} = await api("/connections");
     h += encryption_enabled?"":`<div class="banner warn">DAGSFLOW_FERNET_KEY is not set, so connections are stored unencrypted.</div>`;
-    h += `<div class="panel"><table class="list"><thead><tr><th>Conn ID</th><th>Type</th><th>Config</th><th>Encrypted</th><th></th></tr></thead><tbody>${connections.length?connections.map(c=>`<tr><td class="id">${esc(c.conn_id)}</td><td>${esc(c.conn_type)}</td><td class="id">${esc(c.error||JSON.stringify(c.config))}</td><td>${c.encrypted?"yes":"no"}</td><td style="text-align:right"><button class="iconbtn" data-admin="delconn" data-k="${esc(c.conn_id)}">Delete</button></td></tr>`).join(""):`<tr><td colspan="5" class="muted">No connections in the metastore. Files in connections/ and DAGSFLOW_CONN_* env vars also work.</td></tr>`}</tbody></table>
-      <div class="adminForm"><label>Conn ID<input id="connId" placeholder="gchat_alerts"></label><label>Type<input id="connType" placeholder="google_chat"></label><label>Config (JSON)<input id="connCfg" style="width:320px" placeholder='{"webhook_url":"https://chat.googleapis.com/..."}'></label><button class="btn primary" data-admin="setconn">Save connection</button></div></div>
+    h += `<div class="panel"><table class="list"><thead><tr><th>Conn ID</th><th>Type</th><th>Config</th><th>Encrypted</th><th></th></tr></thead><tbody>${connections.length?connections.map(c=>`<tr><td class="id">${esc(c.conn_id)}</td><td>${esc(c.conn_type)}</td><td class="id">${esc(c.error||JSON.stringify(c.config))}</td><td>${c.encrypted?"yes":"no"}</td><td style="text-align:right"><button class="iconbtn needs-connections-edit" data-admin="delconn" data-k="${esc(c.conn_id)}">Delete</button></td></tr>`).join(""):`<tr><td colspan="5" class="muted">No connections in the metastore. Files in connections/ and DAGSFLOW_CONN_* env vars also work.</td></tr>`}</tbody></table>
+      <div class="adminForm needs-connections-edit"><label>Conn ID<input id="connId" placeholder="gchat_alerts"></label><label>Type<input id="connType" placeholder="google_chat"></label><label>Config (JSON)<input id="connCfg" style="width:320px" placeholder='{"webhook_url":"https://chat.googleapis.com/..."}'></label><button class="btn primary" data-admin="setconn">Save connection</button></div></div>
       <p class="sub">Sensitive values are masked here. To replace a connection, save it again with the same ID.</p>`;
   }
   if(tab==="datasets"){
@@ -1365,26 +1377,92 @@ document.addEventListener("click", async e=>{
 });
 
 // ---- Security: users (CRUD) & roles, Browse: event log -------------------------------
-const ROLES = ["Viewer","User","Op","Admin"];
+let ROLES = ["Viewer","User","Op","Admin"];
 async function usersPage(){
   const {users} = await api("/users");
   const rows = users.map(u=>`<tr class="${u.active?"":"inactive"}">
       <td>${esc(u.first_name||"")}</td><td>${esc(u.last_name||"")}</td><td><b>${esc(u.username)}</b>${u.username===ME.username?' <span class="badge grey">you</span>':""}</td>
-      <td>${esc(u.email||"")}</td><td>${u.active?'<span class="yes">✓</span>':'<span class="no">✕</span>'}</td><td><span class="badge">${esc(u.role)}</span></td>
+      <td>${esc(u.email||"")}</td><td>${u.active?'<span class="yes">✓</span>':'<span class="no">✕</span>'}</td><td>${(u.roles||[u.role]).map(r=>`<span class="badge">${esc(r)}</span>`).join(" ")}</td>
       <td class="nowrap">${u.last_login?fmtZ(u.last_login):"–"}</td><td>${u.login_count||0}</td><td>${u.api_tokens}</td>
       <td class="nowrap" style="text-align:right"><button class="iconbtn" data-user="edit" data-k="${esc(u.username)}">Edit</button><button class="iconbtn" data-user="token" data-k="${esc(u.username)}">API token</button>${u.username!==ME.username?`<button class="iconbtn danger" data-user="delete" data-k="${esc(u.username)}">Delete</button>`:""}</td></tr>`).join("");
   return `<div class="secHead"><h1 class="pageTitle" style="margin:0">List Users</h1><span class="grow"></span><button class="btn primary" data-user="add">+ Add user</button></div>
-    <div class="panel"><table class="list"><thead><tr><th>First Name</th><th>Last Name</th><th>User Name</th><th>Email</th><th>Is Active?</th><th>Role</th><th>Last Login</th><th>Login Count</th><th>API tokens</th><th></th></tr></thead>
+    <div class="panel"><table class="list"><thead><tr><th>First Name</th><th>Last Name</th><th>User Name</th><th>Email</th><th>Is Active?</th><th>Roles</th><th>Last Login</th><th>Login Count</th><th>API tokens</th><th></th></tr></thead>
     <tbody>${rows || `<tr><td colspan="10" class="muted">No users: authentication is off (localhost only).</td></tr>`}</tbody></table></div>
     <p class="sub">Deactivating a user or resetting their password signs them out and revokes their API tokens (password reset). The last active Admin cannot be demoted, deactivated or deleted.</p>`;
 }
 async function rolesPage(){
-  const [{roles}, users] = await Promise.all([api("/roles"), can("Admin") ? api("/users").catch(()=>({users:[]})) : {users:[]}]);
-  const count = r => users.users.filter(u=>u.role===r).length;
-  return `<h1 class="pageTitle">List Roles</h1><div class="panel"><table class="list"><thead><tr><th style="width:120px">Role</th><th>Permissions</th>${can("Admin")?"<th>Users</th>":""}</tr></thead><tbody>${roles.map(r=>
-    `<tr><td><span class="badge">${esc(r.role)}</span></td><td><ul class="perms">${r.permissions.map(p=>`<li>${esc(p)}</li>`).join("")}</ul></td>${can("Admin")?`<td>${count(r.role)}</td>`:""}</tr>`).join("")}</tbody></table></div>
-    <p class="sub">Roles are cumulative: each role can do everything the roles above it can. Assign roles in <a href="#/admin?tab=users">List Users</a>.</p>`;
+  const {roles} = await api("/roles");
+  const perm = p => p.resource ? `${p.action} <span class="res">${esc(p.resource)}</span>` : p.action;
+  const rows = roles.map(r=>`<tr>
+      <td class="nowrap"><span class="badge">${esc(r.name)}</span>${r.builtin?' <span class="badge grey">built-in</span>':""}</td>
+      <td>${esc(r.description||"")}</td>
+      <td><ul class="perms">${r.permissions.map(p=>`<li><code>${perm(p)}</code></li>`).join("")||'<li class="muted">no permissions</li>'}</ul></td>
+      ${can("users.manage")?`<td>${(r.users||[]).map(u=>esc(u)).join(", ")||"–"}</td>`:""}
+      <td class="nowrap needs-roles-manage" style="text-align:right">${r.builtin
+        ? `<button class="iconbtn" data-role="copy" data-k="${esc(r.name)}">Copy</button>`
+        : `<button class="iconbtn" data-role="edit" data-k="${esc(r.name)}">Edit</button><button class="iconbtn" data-role="copy" data-k="${esc(r.name)}">Copy</button><button class="iconbtn danger" data-role="delete" data-k="${esc(r.name)}">Delete</button>`}</td></tr>`).join("");
+  return `<div class="secHead"><h1 class="pageTitle" style="margin:0">List Roles</h1><span class="grow"></span><button class="btn primary needs-roles-manage" data-role="add">+ Add role</button></div>
+    <div class="panel"><table class="list"><thead><tr><th style="width:160px">Role</th><th>Description</th><th>Permissions</th>${can("users.manage")?"<th>Users</th>":""}<th class="needs-roles-manage"></th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="sub">A user can have several roles; permissions add up. DAG permissions apply to <code>*</code> (all DAGs), one DAG id, a pattern like <code>sales_*</code>, or a tag like <code>tag:finance</code>. Edit, trigger and delete include read. Built-in roles cannot be changed: copy one to start a custom role. Assign roles in <a href="#/admin?tab=users">List Users</a>.</p>`;
 }
+const DAG_ACTS = [["dag.read","Read"],["dag.edit","Edit"],["dag.trigger","Trigger"],["dag.delete","Delete"]];
+function dagRuleRow(res, acts){
+  return `<tr class="dagRule"><td><input class="ruleRes" list="dagIdList" value="${esc(res)}" placeholder="* · dag_id · sales_* · tag:finance"></td>
+    ${DAG_ACTS.map(([a])=>`<td style="text-align:center"><input type="checkbox" data-pa="${a}" aria-label="${a}" ${acts.includes(a)?"checked":""}></td>`).join("")}
+    <td><button type="button" class="iconbtn danger" data-rule-del>Remove</button></td></tr>`;
+}
+async function roleForm(r, actions){
+  const {dags} = await api("/dags").catch(()=>({dags:[]}));
+  const perms = r?.permissions || [];
+  const rules = {};
+  perms.filter(p=>p.action.startsWith("dag.")).forEach(p=>{ (rules[p.resource||"*"] ||= []).push(p.action); });
+  const glob = actions.filter(a=>!a.dag_scoped);
+  const has = a => perms.some(p=>p.action===a);
+  return `<div class="formgrid">
+    <label for="rName">Name</label><input id="rName" value="${esc(r?.name||"")}" ${r?.name && !r.copy ? "readonly" : 'required autocomplete="off"'}>
+    <label for="rDesc">Description</label><input id="rDesc" value="${esc(r?.description||"")}">
+  </div>
+  <h3 class="ph" style="margin:14px 0 6px">DAG access</h3>
+  <datalist id="dagIdList"><option value="*">${dags.map(d=>`<option value="${esc(d.dag_id)}">`).join("")}${[...new Set(dags.flatMap(d=>d.tags||[]))].map(t=>`<option value="tag:${esc(t)}">`).join("")}</datalist>
+  <table class="list ruleTable"><thead><tr><th>DAGs</th>${DAG_ACTS.map(([,l])=>`<th style="text-align:center">${l}</th>`).join("")}<th></th></tr></thead>
+    <tbody id="ruleBody">${Object.entries(rules).map(([res,acts])=>dagRuleRow(res,acts)).join("") || dagRuleRow("*", ["dag.read"])}</tbody></table>
+  <button type="button" class="btn light" data-rule-add style="margin-top:6px">+ Add DAG rule</button>
+  <h3 class="ph" style="margin:14px 0 6px">Other permissions</h3>
+  <div class="permGrid">${glob.map(a=>`<label class="chk" title="${esc(a.description)}"><input type="checkbox" class="gperm" value="${esc(a.action)}" ${has(a.action)?"checked":""}> <code>${esc(a.action)}</code> <span class="muted">${esc(a.description)}</span></label>`).join("")}</div>`;
+}
+function collectRole(dlg){
+  const perms = [];
+  dlg.querySelectorAll(".dagRule").forEach(tr=>{
+    const res = tr.querySelector(".ruleRes").value.trim() || "*";
+    tr.querySelectorAll("input[data-pa]:checked").forEach(c=>perms.push(`${c.dataset.pa}:${res}`));
+  });
+  dlg.querySelectorAll(".gperm:checked").forEach(c=>perms.push(c.value));
+  return {name: dlg.querySelector("#rName").value.trim(), description: dlg.querySelector("#rDesc").value.trim(), permissions: perms};
+}
+async function roleAction(b){
+  const name = b.dataset.k;
+  if(b.dataset.role==="delete"){
+    openActDlg({title:`Delete role <code>${esc(name)}</code>?`, confirm:"Delete", danger:true, body:`<p>Only roles that no user has can be deleted.</p>`,
+      onConfirm: async () => { await api(`/roles/${enc(name)}`, {method:"DELETE"}); toast(`Deleted ${name}`); render(); }});
+    return;
+  }
+  const [{roles}, {actions}] = await Promise.all([api("/roles"), api("/permissions")]);
+  let r = name ? roles.find(x=>x.name===name) : null;
+  const editing = b.dataset.role==="edit";
+  if(b.dataset.role==="copy") r = {...r, name: `${r.name}-copy`, copy: true};
+  openActDlg({title: editing ? `Edit role <code>${esc(name)}</code>` : "Add role", confirm:"Save", wide:true, body: await roleForm(r, actions),
+    onConfirm: async dlg => {
+      const body = collectRole(dlg);
+      if(!body.name) throw new Error("Name is required.");
+      if(editing) await post(`/roles/${enc(name)}`, body, "PATCH"); else await post("/roles", body);
+      toast(`Saved role ${body.name}`); render();
+    }});
+}
+document.addEventListener("click", e=>{
+  const b = e.target.closest("[data-role]"); if(b && !b.closest("dialog")){ roleAction(b); return; }
+  if(e.target.closest("[data-rule-add]")){ document.getElementById("ruleBody").insertAdjacentHTML("beforeend", dagRuleRow("", ["dag.read"])); return; }
+  const del = e.target.closest("[data-rule-del]"); if(del) del.closest("tr").remove();
+});
 async function eventsPage(){
   const q = route().q, p = new URLSearchParams({limit:"300"}); if(q.get("dag_id")) p.set("dag_id", q.get("dag_id"));
   const {event_logs} = await api(`/eventLogs?${p}`);
@@ -1397,7 +1475,7 @@ function userForm(u){
     ${f("uFirst","First name",u?.first_name,"text",'autocomplete="off"')}${f("uLast","Last name",u?.last_name,"text",'autocomplete="off"')}
     ${f("uName","User name",u?.username,"text", u ? "readonly" : 'required autocomplete="off" autocapitalize="off" spellcheck="false"')}
     ${f("uEmail","Email",u?.email,"email",'autocomplete="off"')}
-    <label for="uRole">Role</label><select id="uRole">${ROLES.map(r=>`<option ${ (u?.role||"Viewer")===r?"selected":""}>${r}</option>`).join("")}</select>
+    <label>Roles</label><div class="roleChecks" id="uRoles">${ROLES.map(r=>`<label class="chk"><input type="checkbox" value="${esc(r)}" ${(u ? (u.roles||[u.role]) : ["Viewer"]).includes(r)?"checked":""}> ${esc(r)}</label>`).join("")}</div>
     ${u ? `<label class="chk span2"><input type="checkbox" id="uActive" ${u.active?"checked":""}> Is active</label>` : ""}
     ${f("uPass", u ? "New password (optional)" : "Password", "", "password", 'autocomplete="new-password" minlength="8"')}
     ${f("uPass2", "Confirm password", "", "password", 'autocomplete="new-password"')}
@@ -1407,13 +1485,16 @@ async function userAction(b){
   const name = b.dataset.k;
   const val = id => document.getElementById(id)?.value ?? "";
   if(b.dataset.user==="add" || b.dataset.user==="edit"){
-    const u = name ? await api(`/users/${enc(name)}`) : null;
+    const [u, rl] = await Promise.all([name ? api(`/users/${enc(name)}`) : null, api("/roles")]);
+    ROLES = rl.roles.map(r=>r.name);
     openActDlg({title: u ? `Edit user <code>${esc(u.username)}</code>` : "Add user", confirm:"Save", body:userForm(u), onConfirm: async dlg => {
       const pw = val("uPass");
       if(!u && !val("uName").trim()) throw new Error("User name is required.");
       if((!u || pw) && pw.length < 8) throw new Error("Password must be at least 8 characters.");
       if(pw !== val("uPass2")) throw new Error("Passwords do not match.");
-      const body = {first_name:val("uFirst"), last_name:val("uLast"), email:val("uEmail"), role:val("uRole")};
+      const roles = [...dlg.querySelectorAll("#uRoles input:checked")].map(x=>x.value);
+      if(!roles.length) throw new Error("Pick at least one role.");
+      const body = {first_name:val("uFirst"), last_name:val("uLast"), email:val("uEmail"), roles};
       if(pw) body.password = pw;
       if(u){ body.active = dlg.querySelector("#uActive").checked; await post(`/users/${enc(u.username)}`, body, "PATCH"); toast(`Saved ${u.username}`); }
       else { body.username = val("uName").trim(); await post("/users", body); toast(`Created ${body.username}`); }
@@ -1486,11 +1567,12 @@ function refreshLoop(){ // live refresh, paused while the user is in a dialog or
 let lastPath = location.hash.split("?")[0];
 window.addEventListener("hashchange", ()=>{ const p = location.hash.split("?")[0]; if(p!==lastPath) scrollTo(0,0); lastPath = p; render(); });
 async function whoami(){ Object.assign(ME, await api("/me"));
-  ["User","Op","Admin"].forEach(r=>document.body.classList.toggle("can-"+r, can(r)));
+  const all = ME.permissions.includes("*");
+  Object.entries(ME.can||{}).forEach(([k,v])=>document.body.classList.toggle("can-"+k.replace(".","-"), all || !!v));
   if(ME.auth_enabled){
     document.getElementById("userMenu").hidden = false;
     document.getElementById("avatar").textContent = ME.username.slice(0,2).toUpperCase();
-    document.getElementById("who").textContent = `Signed in as ${ME.username} (${ME.role})`;
+    document.getElementById("who").textContent = `Signed in as ${ME.username} (${(ME.roles?.length?ME.roles:[ME.role]).join(", ")})`;
   } }
 function tick(){
   const d = new Date(), off = -d.getTimezoneOffset(), p = n=>String(Math.abs(n)).padStart(2,"0");
