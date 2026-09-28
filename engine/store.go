@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -113,11 +114,36 @@ func writeJSONAtomic(path string, v any) error {
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return renameReplace(tmp, path)
+}
+
+// renameReplace atomically replaces path. On Windows the replace fails while
+// another process (e.g. the webserver) has the file open, so it is retried
+// for up to ~2s instead of losing the write.
+func renameReplace(tmp, path string) error {
+	var err error
+	for i := 0; i < 30; i++ {
+		if err = os.Rename(tmp, path); err == nil {
+			return nil
+		}
+		if runtime.GOOS != "windows" {
+			break
+		}
+		time.Sleep(time.Duration(10+i*5) * time.Millisecond)
+	}
+	_ = os.Remove(tmp)
+	return err
 }
 
 func readJSON(path string, v any) error {
-	b, err := os.ReadFile(path)
+	var b []byte
+	var err error
+	for i := 0; i < 10; i++ { // Windows: the file may be mid-replace (sharing violation)
+		if b, err = os.ReadFile(path); err == nil || os.IsNotExist(err) || runtime.GOOS != "windows" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if err != nil {
 		return err
 	}

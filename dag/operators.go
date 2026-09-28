@@ -124,7 +124,8 @@ func (d *DAG) NewBashTask(id, command string, env map[string]string, opts ...Tas
 		if len(env) > 0 {
 			_, _ = ctx.RenderTemplateField("env")
 		}
-		cmd := shellCommand(ctx, cmdStr)
+		// files edited on Windows may have CRLF line endings, which bash rejects
+		cmd := shellCommand(ctx, strings.ReplaceAll(cmdStr, "\r\n", "\n"))
 		cmd.Env = append(os.Environ(),
 			"DAGSFLOW_CTX_DAG_ID="+ctx.DAG.ID, "DAGSFLOW_CTX_TASK_ID="+ctx.Task.ID,
 			"DAGSFLOW_CTX_RUN_ID="+ctx.RunID, "DAGSFLOW_CTX_DS="+ctx.LogicalDate.Format("2006-01-02"),
@@ -142,7 +143,7 @@ func (d *DAG) NewBashTask(id, command string, env map[string]string, opts ...Tas
 			return err
 		}
 		cmd.Stderr = ctx.LogWriter()
-		ctx.Logf("running: %s", cmdStr)
+		ctx.Logf("running (%s): %s", ShellName(), cmdStr)
 		if err := cmd.Start(); err != nil {
 			return err
 		}

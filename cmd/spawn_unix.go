@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"dagsflow-go/engine"
 )
 
 func spawnDetached(logFile *os.File, args ...string) (int, error) {
@@ -20,7 +22,7 @@ func spawnDetached(logFile *os.File, args ...string) (int, error) {
 }
 
 // terminate sends SIGTERM so the scheduler can stop gracefully.
-func terminate(pid int) error {
+func terminate(_ *engine.Store, pid int) error {
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return err

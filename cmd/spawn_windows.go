@@ -6,6 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
+
+	"dagsflow-go/engine"
 )
 
 func spawnDetached(logFile *os.File, args ...string) (int, error) {
@@ -22,8 +25,20 @@ func spawnDetached(logFile *os.File, args ...string) (int, error) {
 	return pid, c.Process.Release()
 }
 
-// terminate: Windows has no SIGTERM; running runs resume on next scheduler start.
-func terminate(pid int) error {
+// terminate: Windows has no SIGTERM, so the scheduler is asked to stop via a
+// stop file it checks every tick (graceful: task processes are stopped and
+// running runs resume on the next start). Killed only if it does not exit.
+func terminate(st *engine.Store, pid int) error {
+	if err := engine.RequestStop(st); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, alive := engine.SchedulerInfo(st); !alive {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return err

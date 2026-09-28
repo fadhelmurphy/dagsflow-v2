@@ -19,6 +19,9 @@ func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd 
 	return cmd
 }
 
+// ShellName reports which shell bash tasks use (logged at task start).
+func ShellName() string { return "bash" }
+
 func shellCommand(ctx context.Context, script string) *exec.Cmd {
 	return CommandContext(ctx, "bash", "-c", script)
 }

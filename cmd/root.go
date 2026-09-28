@@ -202,14 +202,15 @@ var schedulerStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the background scheduler (running runs resume on next start)",
 	Run: func(cmd *cobra.Command, args []string) {
-		pid, alive := engine.SchedulerInfo(newStore())
+		st := newStore()
+		pid, alive := engine.SchedulerInfo(st)
 		if !alive {
 			exitf("no scheduler running")
 		}
-		if err := terminate(pid); err != nil {
+		if err := terminate(st, pid); err != nil {
 			exitf("stop pid %d: %v", pid, err)
 		}
-		fmt.Printf("sent stop signal to scheduler (pid %d)\n", pid)
+		fmt.Printf("scheduler (pid %d) is stopping; running runs resume on the next start\n", pid)
 	},
 }
 

@@ -168,6 +168,24 @@ Default hanya listen di localhost. Kalau diekspos, aktifkan basic auth:
   task yang sudah sukses tidak diulang. Run yatim (crash) juga di-resume.
 - DAG yang di-pause tidak menjalankan run apa pun (termasuk manual trigger).
 
+## Windows
+
+dagsflow jalan native di Windows (tanpa WSL):
+
+```powershell
+go build -o dagsflow-go.exe .
+.\dagsflow-go.exe standalone
+```
+
+- **Bash task**: dijalankan dengan Git Bash kalau terpasang (Git for Windows), jadi perintah bergaya bash tetap jalan seperti di Linux. Kalau tidak ada, pakai `cmd`. Bisa dipaksa lewat `DAGSFLOW_SHELL=bash|pwsh|powershell|cmd|C:\path\to\bash.exe`. Shell yang dipakai tercatat di log task (`running (bash): ...`). `bash.exe` milik WSL (`System32`) sengaja dilewati.
+- **Timeout / mark state** mematikan seluruh process tree (`taskkill /T`), termasuk child seperti python atau bq CLI.
+- **`scheduler stop`** graceful lewat stop file: task yang sedang jalan dihentikan dan run di-resume saat scheduler start lagi.
+- **Penulisan state** di-retry saat file sedang dibuka proses lain (Windows menolak replace file yang sedang dibaca).
+- **Password** di `users create` tidak tampil saat diketik (cmd, PowerShell, Windows Terminal).
+- Line ending CRLF di command bash otomatis dinormalisasi.
+
+Catatan: jangan build project yang ada di dalam WSL (`\\wsl.localhost\...`) dengan Go versi Windows, karena share WSL tidak mendukung file locking (`RLock ... Incorrect function`). Taruh project di drive Windows, atau build dari dalam WSL.
+
 ## Docker Compose
 
 ```bash

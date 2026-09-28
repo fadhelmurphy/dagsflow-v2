@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -214,20 +212,12 @@ func readPassword() string {
 		return pw
 	}
 	fmt.Fprint(os.Stderr, "Password: ")
-	if runtime.GOOS != "windows" { // hide input on a terminal (best effort)
-		off := exec.Command("stty", "-echo")
-		off.Stdin = os.Stdin
-		if off.Run() == nil {
-			defer func() {
-				on := exec.Command("stty", "echo")
-				on.Stdin = os.Stdin
-				_ = on.Run()
-				fmt.Fprintln(os.Stderr)
-			}()
-		}
+	var line string
+	hidden := withEchoOff(func() { line, _ = bufio.NewReader(os.Stdin).ReadString('\n') })
+	if hidden {
+		fmt.Fprintln(os.Stderr)
 	}
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	return strings.TrimSpace(line)
+	return strings.TrimRight(line, "\r\n")
 }
 
 func usersCmd() *cobra.Command {

@@ -44,6 +44,9 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		s.Log.Printf("IMPORT ERROR %s: %v", id, err)
 	}
 
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	_ = os.Remove(stopPath(s.Store))
 	t := time.NewTicker(s.Tick)
 	defer t.Stop()
 	for {
@@ -55,8 +58,21 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			_ = s.writeHeartbeat()
+			if _, err := os.Stat(stopPath(s.Store)); err == nil { // `scheduler stop` (works on every OS)
+				_ = os.Remove(stopPath(s.Store))
+				s.Log.Printf("stop requested")
+				stop()
+			}
 		}
 	}
+}
+
+func stopPath(st *Store) string { return filepath.Join(st.Home, "state", "scheduler.stop") }
+
+// RequestStop asks a running scheduler to shut down gracefully: running task
+// instances are stopped and resume on the next start.
+func RequestStop(st *Store) error {
+	return os.WriteFile(stopPath(st), []byte(time.Now().Format(time.RFC3339)), 0o644)
 }
 
 func (s *Scheduler) loop(ctx context.Context, now time.Time) {
