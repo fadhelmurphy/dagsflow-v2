@@ -4,6 +4,8 @@ A workflow orchestrator in Go with the execution model of **Apache Airflow**:
 one scheduler for all DAGs, every execution is a **DagRun** made of **TaskInstances**
 whose state is persisted, so runs can be rerun, cleared, backfilled and resumed after a restart.
 
+![dagsflow demo: DAG list, grid, mapped task logs, graph, trigger and roles](docs/demo.gif)
+
 ## Concepts (Airflow equivalents)
 
 | Airflow                          | dagsflow-go                                       |
