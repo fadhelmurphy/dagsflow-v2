@@ -23,10 +23,10 @@ func init() {
 
 	// all_success: A -> runs, B -> upstream_failed
 	jobA.Then(d.NewTask("job_a_all_success", logf("upstream sukses")))
-	jobB.Then(d.NewTask("job_b_all_success", logf("tidak akan jalan")))
+	jobB.Then(d.NewTask("job_b_all_success", logf("never runs")))
 
 	// all_failed: A -> skipped, B -> runs
-	jobA.Then(d.NewTask("job_a_all_failed", logf("tidak akan jalan"), dag.WithTriggerRule(dag.AllFailed)))
+	jobA.Then(d.NewTask("job_a_all_failed", logf("never runs"), dag.WithTriggerRule(dag.AllFailed)))
 	jobB.Then(d.NewTask("job_b_all_failed", logf("upstream gagal semua"), dag.WithTriggerRule(dag.AllFailed)))
 
 	// all_done: runs after upstream finishes, whatever the result

@@ -1,16 +1,16 @@
 # dagsflow-go
 
-Workflow orchestrator berbasis Go dengan model eksekusi ala **Apache Airflow**:
-satu scheduler untuk semua DAG, setiap eksekusi adalah **DagRun** dengan **TaskInstance**
-yang state-nya dipersist, sehingga bisa di-rerun/clear/backfill dan resume setelah restart.
+A workflow orchestrator in Go with the execution model of **Apache Airflow**:
+one scheduler for all DAGs, every execution is a **DagRun** made of **TaskInstances**
+whose state is persisted, so runs can be rerun, cleared, backfilled and resumed after a restart.
 
-## Konsep (padanan Airflow)
+## Concepts (Airflow equivalents)
 
 | Airflow                          | dagsflow-go                                       |
 |----------------------------------|---------------------------------------------------|
-| DAG file / DagBag                | DAG folder (`dags/`): file `.go` di-compile otomatis, `.yaml`; atau `builtin_dags/` yang ikut ter-compile di binary |
+| DAG file / DagBag                | DAG folder (`dags/`): `.go` files compiled automatically, `.yaml` files; or `builtin_dags/` compiled into the binary |
 | `airflow scheduler`              | `dagsflow-go scheduler [-D]`                       |
-| Metadata DB                      | `$DAGSFLOW_HOME/state/` (JSON)                     |
+| Metadata DB                      | Postgres (`DAGSFLOW_DATABASE_URL`) or JSON files in `$DAGSFLOW_HOME/state/` |
 | DagRun / TaskInstance            | `engine.DagRun` / `engine.TaskInstance`            |
 | logical_date, data_interval      | `ctx.LogicalDate`, `ctx.DataIntervalStart/End`     |
 | catchup, max_active_runs, start_date | `dag.WithCatchup`, `dag.WithMaxActiveRuns`, `dag.WithStartDate` |
@@ -19,12 +19,13 @@ yang state-nya dipersist, sehingga bisa di-rerun/clear/backfill dan resume setel
 | XCom (per task, per run)         | `ctx.XComPush`, `dag.XComPullAs[T](ctx, task, key)`|
 | PythonOperator / BranchPythonOperator / EmptyOperator | `NewTask` / `NewBranchTask` / `NewEmptyTask` |
 | TriggerDagRunOperator            | `NewTriggerDagRunTask` (wait_for_completion)       |
-| BigQueryInsertJobOperator        | `NewBigQueryTask` (SQL di-template)                |
-| Jinja `{{ ds }}`                 | Go template `{{ .ds }}`, `{{ xcom_pull "t" "k" }}` |
+| BigQueryInsertJobOperator        | `NewBigQueryTask` (templated SQL)                  |
+| Jinja `{{ ds }}`                 | Go template `{{ .ds }}`, `{{ xcom_pull "t" "k" }}` (Jinja style also accepted) |
 | Trigger rules                    | all_success, all_failed, all_done, one_success, one_failed, none_failed, none_failed_min_one_success, none_skipped, always |
-| Task log per attempt             | `logs/dag_id=…/run_id=…/task_id=…/attempt=N.log`   |
+| Task log per attempt             | `logs/dag_id=…/run_id=…/task_id=…/attempt=N.log` (or in Postgres) |
+| CeleryExecutor / KubernetesExecutor | `--executor worker` / `--executor kubernetes`   |
 
-## Contoh DAG
+## Example DAG
 
 ```go
 func init() {
@@ -49,38 +50,38 @@ func init() {
 }
 ```
 
-Task mengembalikan `error` untuk gagal (panic juga ditangkap). `ctx` adalah `context.Context`
-yang dibatalkan saat timeout/scheduler stop — teruskan ke client DB/HTTP.
+A task returns an `error` to fail (panics are recovered too). `ctx` is a `context.Context`
+that is cancelled on timeout or scheduler stop: pass it to your DB/HTTP clients.
 
-> XCom & conf disimpan sebagai JSON, jadi angka kembali sebagai `float64`.
-> Pakai `dag.XComPullAs[int]` / `dag.ParamAs[int]`, bukan type assertion `.(int)`.
+> XComs and conf are stored as JSON, so numbers come back as `float64`.
+> Use `dag.XComPullAs[int]` / `dag.ParamAs[int]` instead of a `.(int)` type assertion.
 
-> Setelah branch, task join perlu `dag.WithTriggerRule(dag.NoneFailedMinOneSuccess)`
-> (sama seperti Airflow), karena path yang tidak dipilih berstatus `skipped`.
+> After a branch, the join task needs `dag.WithTriggerRule(dag.NoneFailedMinOneSuccess)`
+> (same as Airflow), because the paths that were not chosen are `skipped`.
 
-## Menulis DAG di Go (padanan `with DAG` dan `>>`)
+## Writing DAGs in Go (`with DAG` and `>>` equivalents)
 
-Go tidak punya context manager maupun operator overloading. Padanannya: task dibuat lewat method DAG (`d.NewTask`, `d.NewBashTask`, ...), dan dependensi ditulis dengan fungsi.
+Go has neither context managers nor operator overloading. Instead, tasks are created through DAG methods (`d.NewTask`, `d.NewBashTask`, ...) and dependencies are written with functions.
 
 | Airflow | dagsflow |
 |---|---|
-| `with DAG(...) as dag:` | `d := dag.NewDAG(...)` lalu `d.NewBashTask(...)`, `d.NewBigQueryTask(...)` |
-| `a >> b >> c` | `dag.Chain(a, b, c)` atau `a.Then(b).Then(c)` |
+| `with DAG(...) as dag:` | `d := dag.NewDAG(...)` then `d.NewBashTask(...)`, `d.NewBigQueryTask(...)` |
+| `a >> b >> c` | `dag.Chain(a, b, c)` or `a.Then(b).Then(c)` |
 | `a >> [b, c] >> d` | `dag.Chain(a, dag.Parallel(b, c), d)` |
 | `[a, b] >> c` | `c.After(a, b)` |
 | `@task` (TaskFlow) | `dag.Fn`, `dag.Fn1`, `dag.Fn2`, `dag.Consume` |
 | `task.expand(x=...)` | `dag.Map(d, id, output, fn)` / `dag.MapItems(d, id, list, fn)` |
 
-### TaskFlow bertipe
+### Typed TaskFlow
 
-Nilai return sebuah task adalah output-nya. Output yang dioper ke task lain otomatis menjadi dependensi sekaligus dikirim lewat XCom, dan tipenya dicek compiler:
+A task's return value is its output. Passing an output to another task makes it a dependency and sends the value through XCom, with types checked by the compiler:
 
 ```go
 branches := dag.Fn(d, "list_branches", func(ctx *dag.TaskContext) ([]string, error) {
 	return []string{"jakarta", "bandung"}, nil
 })
 rows := dag.Map(d, "load_branch", branches, func(ctx *dag.TaskContext, b string) (int, error) {
-	return loadBranch(ctx, b) // satu instance per branch
+	return loadBranch(ctx, b) // one instance per branch
 })
 dag.Consume(d, "publish", rows, func(ctx *dag.TaskContext, rows []int) error {
 	ctx.Logf("total %d", sum(rows))
@@ -88,31 +89,31 @@ dag.Consume(d, "publish", rows, func(ctx *dag.TaskContext, rows []int) error {
 })
 ```
 
-- `Out[T]` bisa dipakai di `Chain`/`After`/`Parallel` seperti task biasa; `out.Task()` memberi `*Task`-nya.
-- Output task klasik (misalnya baris terakhir stdout bash): `dag.OutputOf[string](bashTask, dag.ReturnKey)`.
-- Nilai dikirim sebagai JSON, jadi `T` harus bisa di-serialisasi (angka, string, slice, map, struct dengan field exported).
-- Output hasil `Map` berupa slice, urut sesuai map index.
+- `Out[T]` works in `Chain`/`After`/`Parallel` like a regular task; `out.Task()` returns its `*Task`.
+- Output of a classic task (e.g. the last stdout line of a bash task): `dag.OutputOf[string](bashTask, dag.ReturnKey)`.
+- Values travel as JSON, so `T` must be serialisable (numbers, strings, slices, maps, structs with exported fields).
+- The output of `Map` is a slice ordered by map index.
 
-API lama (`NewTask`, `XComPush`, `XComPullAs`, `Expand`) tetap jalan.
+The older API (`NewTask`, `XComPush`, `XComPullAs`, `Expand`) keeps working.
 
-### Kesalahan definisi tidak lagi membuat crash
+### Definition errors no longer crash
 
-Task ID duplikat atau kosong, dependensi ke dirinya sendiri, link antar-DAG, dan task `nil` sekarang dicatat sebagai **import error** DAG tersebut. Proses scheduler/webserver tidak ikut crash, termasuk untuk DAG di `builtin_dags/`.
+Duplicate or empty task ids, self-dependencies, links across DAGs and `nil` tasks are recorded as an **import error** of that DAG. The scheduler/webserver process keeps running, including for DAGs in `builtin_dags/`.
 
-### Template: gaya Go dan Jinja
+### Templates: Go and Jinja style
 
-Template memakai `text/template` Go (`{{ .ds }}`, `{{ .params.x }}`). Supaya file SQL/bash dari Airflow/Composer bisa disalin apa adanya, bentuk Jinja yang umum juga diterima dan bisa dicampur dengan gaya Go:
+Templates use Go's `text/template` (`{{ .ds }}`, `{{ .params.x }}`). So that SQL/bash files from Airflow/Composer can be copied as they are, the common Jinja forms are accepted too and can be mixed with Go style:
 
-| Jinja (Airflow) | diterjemahkan jadi |
+| Jinja (Airflow) | becomes |
 |---|---|
-| `{{ ds }}`, `{{ ds_nodash }}`, `{{ ts }}`, `{{ run_id }}` | `{{ .ds }}` dst. |
+| `{{ ds }}`, `{{ ds_nodash }}`, `{{ ts }}`, `{{ run_id }}` | `{{ .ds }}` etc. |
 | `{{ params.project_id }}` | `{{ .params.project_id }}` |
 | `{{ dag_run.conf['x'] }}` / `{{ dag_run.conf.x }}` | `{{ .conf.x }}` |
 | `{{ var.value.region }}` | `{{ var "region" }}` |
 | `{{ macros.ds_add(ds, -1) }}` | `{{ ds_add .ds -1 }}` |
 | `{{ ti.xcom_pull(task_ids='a', key='k') }}` | `{{ xcom_pull "a" "k" }}` |
 
-Seperti Airflow, `params` milik task BigQuery digabung ke `{{ params }}`. Yang belum didukung: statement Jinja (`{% if %}`, `{% include %}`) dan filter (`| upper`).
+As in Airflow, a BigQuery task's `params` are merged into `{{ params }}`. Not supported yet: Jinja statements (`{% if %}`, `{% include %}`) and filters (`| upper`).
 
 ## CLI
 
@@ -125,8 +126,8 @@ go mod tidy && go build -o dagsflow-go .
 
 ./dagsflow-go dags list
 ./dagsflow-go dags pause|unpause <dag>
-./dagsflow-go dags trigger <dag> --conf '{"param2": 42}'   # queued, dijalankan scheduler
-./dagsflow-go dags test <dag> [--conf ...]                 # jalankan 1 run sekarang, tanpa scheduler
+./dagsflow-go dags trigger <dag> --conf '{"param2": 42}'   # queued, executed by the scheduler
+./dagsflow-go dags test <dag> [--conf ...]                 # run once now, without a scheduler
 ./dagsflow-go dags backfill <dag> --start 2026-09-01 --end 2026-09-05 [--rerun-failed]
 ./dagsflow-go dags list-runs <dag>
 ./dagsflow-go dags graph <dag> [--run-id <run>]
@@ -141,140 +142,140 @@ go mod tidy && go build -o dagsflow-go .
 ## Web UI
 
 ```bash
-./dagsflow-go standalone                 # scheduler + web UI dalam satu proses
-# atau terpisah (seperti Airflow):
+./dagsflow-go users create --username admin --role Admin   # prompts for a password
+./dagsflow-go standalone                 # scheduler + web UI in one process
+# or separately (like Airflow):
 ./dagsflow-go scheduler -D
 ./dagsflow-go webserver --addr 127.0.0.1:8080
 ```
 
-Buka http://127.0.0.1:8080. Fitur:
-- Daftar DAG: pause/unpause, trigger (dengan conf JSON), status run terakhir, jadwal interval berikutnya.
-- Grid view: run (kolom) × task (baris), tinggi bar = durasi run.
-- Graph view: dependency graph, diwarnai sesuai state run yang dipilih.
-- Detail task instance: state, attempt, error, log per attempt (auto-refresh saat running),
-  clear task / clear + downstream. Detail run: clear failed tasks / clear seluruh run.
+Open http://127.0.0.1:8080. Features:
+- DAG list: pause/unpause, trigger (with JSON conf), last run status, next data interval.
+- Grid view: runs (columns) × tasks (rows), bar height = run duration.
+- Graph view: dependency graph coloured by the state of the selected run.
+- Task instance details: state, attempts, error, log per attempt (auto-refresh while running),
+  clear task / clear + downstream. Run details: clear failed tasks / clear the whole run.
 
-Webserver hanya membaca/menulis metadata; eksekusi tetap dilakukan scheduler.
-Default hanya listen di localhost. Kalau diekspos, aktifkan basic auth:
-`DAGSFLOW_WEB_USER=admin DAGSFLOW_WEB_PASSWORD=... ./dagsflow-go webserver --addr 0.0.0.0:8080`
-(dan taruh di belakang reverse proxy HTTPS).
+The webserver only reads/writes metadata; execution is done by the scheduler.
+Without users, auth is off and the webserver only listens on localhost. Before exposing it,
+create users (see **Users & RBAC**) and put it behind HTTPS (or use `--tls-cert/--tls-key`).
 
-## Perilaku scheduler
+## Scheduler behaviour
 
-- Run untuk interval `[start, end)` dibuat setelah `end` lewat; `logical_date = start`.
-- `catchup=false` (default): hanya interval terakhir yang dibuat saat telat/restart.
-- Tidak membuat run baru selama jumlah run queued+running ≥ `max_active_runs` (default 1).
-- Stop scheduler (executor `local`) → task yang sedang jalan dibatalkan & run kembali `queued`; saat start lagi,
-  task yang sudah sukses tidak diulang. Run yatim (crash) juga di-resume.
-- Dengan executor `worker`/`kubernetes`, stop/crash scheduler **tidak** membunuh task: scheduler lain
-  (atau scheduler yang sama setelah restart) mengambil alih run-nya dan menyambung ke job yang masih jalan.
-- DAG yang di-pause tidak menjalankan run apa pun (termasuk manual trigger).
+- A run for interval `[start, end)` is created once `end` has passed; `logical_date = start`.
+- `catchup=false` (default): only the latest interval is created after downtime.
+- No new runs are created while queued+running runs ≥ `max_active_runs` (default 1).
+- Stopping the scheduler (executor `local`) cancels running tasks and puts the run back to `queued`;
+  on the next start, tasks that already succeeded are not rerun. Orphaned runs (crash) are resumed too.
+- With the `worker`/`kubernetes` executors, stopping or crashing a scheduler does **not** kill tasks:
+  another scheduler (or the same one after a restart) takes the run over and re-attaches to the jobs still running.
+- Paused DAGs run nothing (manual triggers included).
 
 ## Windows
 
-dagsflow jalan native di Windows (tanpa WSL):
+dagsflow runs natively on Windows (no WSL needed):
 
 ```powershell
 go build -o dagsflow-go.exe .
 .\dagsflow-go.exe standalone
 ```
 
-- **Bash task**: dijalankan dengan Git Bash kalau terpasang (Git for Windows), jadi perintah bergaya bash tetap jalan seperti di Linux. Kalau tidak ada, pakai `cmd`. Bisa dipaksa lewat `DAGSFLOW_SHELL=bash|pwsh|powershell|cmd|C:\path\to\bash.exe`. Shell yang dipakai tercatat di log task (`running (bash): ...`). `bash.exe` milik WSL (`System32`) sengaja dilewati.
-- **Timeout / mark state** mematikan seluruh process tree (`taskkill /T`), termasuk child seperti python atau bq CLI.
-- **`scheduler stop`** graceful lewat stop file: task yang sedang jalan dihentikan dan run di-resume saat scheduler start lagi.
-- **Penulisan state** di-retry saat file sedang dibuka proses lain (Windows menolak replace file yang sedang dibaca).
-- **Password** di `users create` tidak tampil saat diketik (cmd, PowerShell, Windows Terminal).
-- Line ending CRLF di command bash otomatis dinormalisasi.
+- **Bash tasks** run with Git Bash when installed (Git for Windows), so bash-style commands behave as on Linux. Otherwise `cmd` is used. Force a shell with `DAGSFLOW_SHELL=bash|pwsh|powershell|cmd|C:\path\to\bash.exe`. The shell used is written to the task log (`running (bash): ...`). WSL's `bash.exe` (`System32`) is skipped on purpose.
+- **Timeouts / mark state** kill the whole process tree (`taskkill /T`), including children such as python or the bq CLI.
+- **`scheduler stop`** is graceful through a stop file: running tasks are stopped and the run resumes on the next start.
+- **State writes** are retried while another process has the file open (Windows refuses to replace a file that is being read).
+- **Passwords** in `users create` are not echoed (cmd, PowerShell, Windows Terminal).
+- CRLF line endings in bash commands are normalised.
 
-Catatan: jangan build project yang ada di dalam WSL (`\\wsl.localhost\...`) dengan Go versi Windows, karena share WSL tidak mendukung file locking (`RLock ... Incorrect function`). Taruh project di drive Windows, atau build dari dalam WSL.
+Note: don't build a project that lives inside WSL (`\\wsl.localhost\...`) with the Windows Go toolchain; WSL shares don't support file locking (`RLock ... Incorrect function`). Put the project on a Windows drive, or build from inside WSL.
 
 ## Docker Compose
 
 ```bash
-cp .env.example .env            # isi DAGSFLOW_ADMIN_USERNAME / PASSWORD
-docker compose run --rm --no-deps dagsflow-webserver config gen-key   # tempel ke DAGSFLOW_FERNET_KEY
+cp .env.example .env            # set DAGSFLOW_ADMIN_USERNAME / PASSWORD and POSTGRES_PASSWORD
+docker compose run --rm --no-deps dagsflow-webserver config gen-key   # paste into DAGSFLOW_FERNET_KEY
 docker compose up -d --build
 ```
 
-Buka http://localhost:8080 dan login dengan admin dari `.env`.
+Open http://localhost:8080 and sign in with the admin from `.env`.
 
-| Service | Fungsi |
+| Service | Purpose |
 |---|---|
 | `postgres` | metadata database |
-| `dagsflow-init` | migrasi schema, membuat user admin (idempotent), compile DAG Go sekali, lalu selesai |
-| `dagsflow-scheduler` | 2 replika (HA): satu jadi leader (membuat run), semuanya mengeksekusi run |
-| `dagsflow-worker` | 2 replika: menjalankan task dari antrean (`--scale dagsflow-worker=N`) |
-| `dagsflow-webserver` | UI + REST API di port 8080 |
+| `dagsflow-init` | migrates the schema, creates the admin user (idempotent), compiles Go DAGs once, then exits |
+| `dagsflow-scheduler` | 2 replicas (HA): one is leader (creates runs), all execute runs |
+| `dagsflow-worker` | 2 replicas: execute tasks from the queue (`--scale dagsflow-worker=N`) |
+| `dagsflow-webserver` | UI + REST API on port 8080 |
 
-- `./dags` di-mount sebagai DAG folder. Tambah/ubah file `.go` atau `.yaml` di host, dan dalam ±30 detik DAG-nya muncul tanpa rebuild image.
-- Metadata, log task, XCom, dan antrean task ada di Postgres, jadi service bisa di-recreate atau dipindah host tanpa shared volume. Hasil compile bundle dan build cache Go ada di named volume.
-- Image berisi Go toolchain + source dagsflow-go karena dibutuhkan untuk compile DAG Go. Build cache sudah dipanaskan di image, jadi compile DAG pertama cepat.
-- BigQuery: taruh service account di `./keys` lalu set `GOOGLE_APPLICATION_CREDENTIALS=/opt/dagsflow-home/keys/<file>.json` di `.env`.
-- User tambahan: `docker compose exec dagsflow-webserver dagsflow-go users create --username fadhel --role Op`.
-- Di belakang HTTPS reverse proxy, teruskan header `X-Forwarded-Proto: https` supaya cookie login ditandai Secure.
+- `./dags` is mounted as the DAG folder. Add or change `.go`/`.yaml` files on the host and the DAG shows up within ~30 seconds, without rebuilding the image.
+- Metadata, task logs, XComs and the task queue live in Postgres, so services can be recreated or moved to other hosts without a shared volume. Compiled bundles and the Go build cache live in named volumes.
+- The image contains the Go toolchain and the dagsflow-go source, needed to compile Go DAGs. The build cache is warmed in the image, so the first Go DAG compiles quickly.
+- BigQuery: put a service account in `./keys` and set `GOOGLE_APPLICATION_CREDENTIALS=/opt/dagsflow-home/keys/<file>.json` in `.env`.
+- More users: `docker compose exec dagsflow-webserver dagsflow-go users create --username fadhel --role Op`.
+- Behind an HTTPS reverse proxy, forward `X-Forwarded-Proto: https` so the login cookie is marked Secure.
 
 ## Login & UI
 
-Webserver punya halaman login (`/login`) dengan session cookie (HttpOnly, SameSite=Lax, berlaku 12 jam, ditandatangani HMAC dengan `DAGSFLOW_SECRET_KEY` atau key yang di-generate ke `state/`). Mengganti password atau menghapus user langsung membatalkan session-nya. REST API tetap bisa memakai Basic auth atau Bearer token.
+The webserver has a login page (`/login`) with a session cookie (HttpOnly, SameSite=Lax, valid 12 hours, HMAC-signed with `DAGSFLOW_SECRET_KEY` or a key generated once into the metadata store). Changing a user's password or deleting the user ends their sessions. The REST API also accepts Basic auth or Bearer tokens.
 
-Halaman DAG menampilkan filter All/Active/Paused dan Running/Failed, filter tag, pencarian, sorting, pagination, lingkaran status Runs dan Recent Tasks, serta aksi Trigger / Grid / Delete (menghapus riwayat run dan log; definisi DAG tetap ada). Owner diambil dari `DefaultArgs.Owner` (YAML: `default_args.owner`).
+The DAGs page has All/Active/Paused and Running/Failed filters, tag filter, search, sorting, pagination, Runs and Recent Tasks status circles, and Trigger / Grid / Delete actions (Delete removes run history and logs; the DAG definition stays). The owner comes from `DefaultArgs.Owner` (YAML: `default_args.owner`).
 
-### Halaman DAG
+### DAG page
 
-Tata letaknya mengikuti Airflow 2: header (toggle pause, Schedule, Next Run, tombol Trigger / Reparse / Delete), bar filter (runs sampai tanggal tertentu, run type, run state, jumlah run), grid di kiri (chart durasi run + kotak status per task), dan panel detail di kanan dengan breadcrumb DAG / Run / Task.
+The layout follows Airflow 2: a header (pause toggle, Schedule, Next Run, Trigger / Reparse / Delete buttons), a filter bar (runs up to a date, run type, run state, number of runs), the grid on the left (run duration chart + status squares per task) and a details panel on the right with a DAG / Run / Task breadcrumb.
 
-| Pilihan | Tab |
+| Selection | Tabs |
 |---|---|
-| tidak ada | Details, Graph, Code, Event Log |
-| run (klik bar) | Details, Graph, Gantt, Code, Event Log |
-| task (klik nama task) | Details, Graph, Task Duration, Code, Event Log |
-| task instance (klik kotak) | Details, (Mapped Tasks), Graph, Gantt, Code, Event Log, Logs, XCom, Task Duration |
+| none | Details, Graph, Code, Event Log |
+| run (click a bar) | Details, Graph, Gantt, Code, Event Log |
+| task (click a task name) | Details, Graph, Task Duration, Code, Event Log |
+| task instance (click a square) | Details, (Mapped Tasks), Graph, Gantt, Code, Event Log, Logs, XCom, Task Duration |
 
-Pilihan dan filter disimpan di URL, jadi bisa dibagikan dan tidak hilang saat auto-refresh. Keyboard: ←/→ pindah run, ↑/↓ pindah task, Esc hapus pilihan.
+Selection and filters live in the URL, so they can be shared and survive auto-refresh. Keyboard: ←/→ change run, ↑/↓ change task, Esc clears the selection.
 
-- **Code**: isi file DAG dengan nomor baris, highlight Go/YAML, Toggle Wrap, dan waktu *Parsed at*. DAG di `builtin_dags/` ikut ditampilkan (source di-embed ke binary).
-- **Reparse DAG** (role User): memuat ulang file DAG saat itu juga, tanpa menunggu rescan. Webserver langsung reload; scheduler menerima permintaannya dalam ±2 detik (lewat `state/reparse_requests.json`, aman untuk container terpisah). CLI: `dagsflow-go dags reparse <dag_id>`. DAG di `builtin_dags/` tidak bisa di-reparse karena ter-compile di binary.
-- **Mark state as success/failed** (role User), untuk task instance (opsi upstream/downstream) atau seluruh run. Seperti `set_task_instance_state` Airflow, task downstream yang `failed`/`upstream_failed` di-clear dan run di-queue lagi supaya lanjut jalan. Kalau run sedang berjalan, permintaan dikirim ke scheduler: task yang sedang jalan dihentikan (process group di-kill) lalu selesai dengan state yang dipilih.
-- **Rendered Template** (halaman More Details): nilai field template setelah dirender, misalnya `bash_command`, `env`, `sql` (termasuk isi `sql_file` dengan `params`), `project_id`, `url`/`endpoint`, `data`, `headers`, `conf`, `filepath`. Nilai direkam saat task jalan (`rendered_fields` di run). Kalau task belum jalan di run itu, template dirender on the fly dari konteks run (params, conf, XCom, item mapping), sama seperti Airflow. CLI: `dagsflow-go tasks render <dag_id> <task_id> <run_id> [--map-index N]`.
-  Task Go custom bisa ikut tampil:
+- **Code**: the DAG file with line numbers, Go/YAML highlighting, Toggle Wrap and *Parsed at*. DAGs in `builtin_dags/` are shown too (their source is embedded in the binary).
+- **Reparse DAG** (`dag.edit`): reloads the DAG file right away instead of waiting for the next rescan. The webserver reloads immediately; schedulers pick the request up within ~2 seconds (through the metadata store, so it works across containers). CLI: `dagsflow-go dags reparse <dag_id>`. DAGs in `builtin_dags/` can't be reparsed because they are compiled into the binary.
+- **Mark state as success/failed** (`dag.edit`) for a task instance (with upstream/downstream options) or a whole run. Like Airflow's `set_task_instance_state`, downstream tasks that are `failed`/`upstream_failed` are cleared and the run is queued again so it continues. If the run is executing, the request goes to the scheduler: running tasks are stopped (process group killed) and finish with the chosen state.
+- **Rendered Template** (More Details page): template fields after rendering, e.g. `bash_command`, `env`, `sql` (including `sql_file` contents with `params`), `project_id`, `url`/`endpoint`, `data`, `headers`, `conf`, `filepath`. Values are recorded when the task runs (`rendered_fields` on the run). If the task hasn't run in that run yet, the template is rendered on the fly from the run's context (params, conf, XCom, mapped item), like Airflow. CLI: `dagsflow-go tasks render <dag_id> <task_id> <run_id> [--map-index N]`.
+  Custom Go tasks can show up too:
   ```go
   d.NewTask("count_rows", func(ctx *dag.TaskContext) error {
-      q, err := ctx.RenderTemplateField("sql") // render + rekam
+      q, err := ctx.RenderTemplateField("sql") // render + record
       ...
   }, dag.WithTemplateField("sql", "SELECT COUNT(*) FROM `p.d.{{ .params.table }}` WHERE dt='{{ .ds }}'", "sql"))
   ```
-  Untuk template yang dibangun dinamis: `ctx.RenderAndRecord("nama", raw)`.
-- **Tab Details task instance** (seperti Airflow): link **More Details** dan **List All Instances**, **Task Instance Notes** (Add/Edit Note, juga ada DAG Run Notes di detail run), **Extra Links** (BigQuery Job Detail dan BigQuery Table untuk task BigQuery), lalu tabel Status / Task ID / Run ID (dengan tombol copy) / Map Index / Operator / Trigger Rule / waktu / tries / pool.
-- **More Details** membuka halaman Task Instance dengan tab Grid · Task Instance Details (Dependencies Blocking Task From Getting Scheduled, Task Instance Attributes, Task Attributes) · Rendered Template · Log · XCom.
-- **List All Instances** / Browse → Task Instances: semua task instance, bisa difilter per DAG, task, dan state.
-- Operator custom bisa punya nama dan extra link sendiri: `dag.WithOperatorName("GcsExportOperator")`, `dag.WithExtraLink("GCS Object", "gcs_url")`, lalu di task: `ctx.XComPush("gcs_url", url)`.
-- **Clear & try number** mengikuti Airflow: try number tidak kembali ke 1 setelah clear, tapi lanjut (attempt 2, 3, ...), dan retry dihitung ulang (`max_tries = try_number + retries`). Setiap attempt punya file log sendiri. Untuk dynamic task mapping, Clear pada satu instance (misalnya `load_branch [1]`) hanya menjalankan ulang instance itu; instance lain dan hasil XCom-nya tetap. CLI: `tasks clear <dag> <run> -t load_branch --map-index 1`.
-- **Clear task** dengan opsi downstream / upstream / only failed, lengkap dengan pratinjau task yang terdampak.
-- **Filter DAG by task**: tampilkan hanya upstream, downstream, atau keduanya dari task terpilih.
-- **Event Log**: setiap aksi (trigger, pause, clear, mark, reparse, login, perubahan user/pool/variable/connection) dicatat ke `state/audit.log`; tersedia per DAG/run/task dan di Browse → Event Log.
+  For templates built dynamically: `ctx.RenderAndRecord("name", raw)`.
+- **Task instance Details tab** (like Airflow): **More Details** and **List All Instances** links, **Task Instance Notes** (Add/Edit Note; DAG Run Notes on run details), **Extra Links** (BigQuery Job Detail and BigQuery Table for BigQuery tasks), then Status / Task ID / Run ID (with copy buttons) / Map Index / Operator / Trigger Rule / times / tries / pool.
+- **More Details** opens the Task Instance page with Grid · Task Instance Details (Dependencies Blocking Task From Getting Scheduled, Task Instance Attributes, Task Attributes) · Rendered Template · Log · XCom tabs.
+- **List All Instances** / Browse → Task Instances: every task instance, filterable by DAG, task and state.
+- Custom operators can have their own name and extra links: `dag.WithOperatorName("GcsExportOperator")`, `dag.WithExtraLink("GCS Object", "gcs_url")`, and in the task: `ctx.XComPush("gcs_url", url)`.
+- **Clear & try number** follow Airflow: the try number doesn't go back to 1 after a clear but continues (attempt 2, 3, ...), and retries are counted again (`max_tries = try_number + retries`). Every attempt has its own log. For dynamic task mapping, clearing one instance (e.g. `load_branch [1]`) reruns only that instance; the other instances and their XComs stay. CLI: `tasks clear <dag> <run> -t load_branch --map-index 1`.
+- **Clear task** with downstream / upstream / only failed options and a preview of the affected tasks.
+- **Filter DAG by task**: show only the upstream, downstream or both of the selected task.
+- **Event Log**: every action (trigger, pause, clear, mark, reparse, login, changes to users/roles/pools/variables/connections) is recorded; available per DAG/run/task and in Browse → Event Log.
 
 ### Users & RBAC
 
-Security → **List Users** (`users.manage`): tambah, edit (nama, email, **beberapa role sekaligus**, aktif/nonaktif, reset password), buat API token, hapus.
+Security → **List Users** (`users.manage`): add, edit (name, email, **several roles**, active/inactive, password reset), issue API tokens, delete.
 
-Security → **List Roles**: role bawaan (Viewer, User, Op, Admin; tidak bisa diubah, tapi bisa di-*Copy*) dan **role custom** yang bisa ditambah, diedit, dan dihapus (`roles.manage`). Satu role = kumpulan permission. Kalau user punya beberapa role, permission-nya dijumlahkan.
+Security → **List Roles**: built-in roles (Viewer, User, Op, Admin; read-only, but they can be *copied*) and **custom roles** that can be added, edited and deleted (`roles.manage`). A role is a set of permissions. A user with several roles gets the union of their permissions.
 
-| Permission | Artinya |
+| Permission | Meaning |
 |---|---|
-| `dag.read` / `dag.edit` / `dag.trigger` / `dag.delete` | lihat · pause/clear/mark/note/reparse · trigger · hapus run. Berlaku per DAG, lihat di bawah |
-| `pools.read`, `pools.edit`, `variables.read`, `variables.edit`, `connections.read`, `connections.edit` | halaman Admin |
+| `dag.read` / `dag.edit` / `dag.trigger` / `dag.delete` | view · pause/clear/mark/notes/reparse · trigger · delete runs. Scoped per DAG, see below |
+| `pools.read`, `pools.edit`, `variables.read`, `variables.edit`, `connections.read`, `connections.edit` | Admin pages |
 | `events.read`, `datasets.read`, `system.read` | event log, datasets, import errors + components |
-| `users.manage`, `roles.manage` | kelola user/token dan role |
+| `users.manage`, `roles.manage` | manage users/tokens and roles |
 
-Permission DAG diberi *resource*:
-- `*` untuk semua DAG,
-- satu `dag_id`,
-- pola seperti `sales_*`,
-- atau tag seperti `tag:finance`.
+DAG permissions take a *resource*:
+- `*` for every DAG,
+- one `dag_id`,
+- a pattern such as `sales_*`,
+- or a tag such as `tag:finance`.
 
-`edit`, `trigger`, dan `delete` otomatis termasuk `read`. DAG yang tidak boleh dibaca user tidak muncul di list, task instances, maupun event log. Tombol yang tidak diizinkan disembunyikan, dan API-nya menjawab `403`.
+`edit`, `trigger` and `delete` include `read`. DAGs a user can't read don't appear in the DAG list, task instances or event log. Buttons the user isn't allowed to use are hidden, and the API answers `403`.
 
-| Role bawaan | Isi |
+| Built-in role | Permissions |
 |---|---|
 | Viewer | `dag.read:*`, pools/events/datasets/system read |
 | User | Viewer + `dag.edit:*`, `dag.trigger:*` |
@@ -282,25 +283,25 @@ Permission DAG diberi *resource*:
 | Admin | Op + `users.manage`, `roles.manage` |
 
 ```bash
-dagsflow-go roles create --name sales-team --description "Pipeline sales" \
+dagsflow-go roles create --name sales-team --description "Sales pipelines" \
   --perm 'dag.read:sales_*' --perm 'dag.trigger:sales_*' --perm 'dag.edit:tag:sales' --perm pools.read
 dagsflow-go users create --username fadhel --role Viewer,sales-team
 dagsflow-go users update fadhel --role sales-team
 dagsflow-go roles list
-dagsflow-go roles update sales-team --perm 'dag.read:sales_*'   # daftar permission baru (mengganti semua)
-dagsflow-go roles delete sales-team                              # hanya kalau tidak dipakai user mana pun
+dagsflow-go roles update sales-team --perm 'dag.read:sales_*'   # the new full permission list
+dagsflow-go roles delete sales-team                              # only if no user has it
 ```
-API: `GET /roles`, `GET /permissions`, `POST /roles`, `PATCH|DELETE /roles/{role}` dengan body `{"name":"sales-team","description":"...","permissions":["dag.read:sales_*","pools.read"]}`. User: `{"roles":["Viewer","sales-team"]}`.
+API: `GET /roles`, `GET /permissions`, `POST /roles`, `PATCH|DELETE /roles/{role}` with body `{"name":"sales-team","description":"...","permissions":["dag.read:sales_*","pools.read"]}`. Users: `{"roles":["Viewer","sales-team"]}`.
 
-User nonaktif tidak bisa login dan token API-nya ditolak. Reset password mencabut semua token user itu. Admin aktif terakhir tidak bisa diturunkan, dinonaktifkan, atau dihapus, dan user tidak bisa menghapus akunnya sendiri.
+Inactive users can't sign in and their API tokens are rejected. A password reset revokes all of the user's tokens. The last active Admin can't be demoted, deactivated or deleted, and users can't delete their own account.
 
-CLI: `users update <username> --role Op,sales-team --active=false --email x@y --reset-password`, dan `users create` menerima `--first-name --last-name --email`.
+CLI: `users update <username> --role Op,sales-team --active=false --email x@y --reset-password`; `users create` accepts `--first-name --last-name --email`.
 
-API baru: `POST /dags/{dag}/reparse`, `GET /dags/{dag}/source`, `POST /dags/{dag}/dagRuns/{run}/mark` dan `.../taskInstances/{task}/mark` (body `{"new_state":"success","include_downstream":true,"map_index":0}`), `GET /eventLogs?dag_id=&run_id=&task_id=`, `GET /roles`, `GET|PATCH /users/{user}`. `GET /dags/{dag}` menerima `runs`, `base_date`, `run_type`, `state`.
+Other endpoints: `POST /dags/{dag}/reparse`, `GET /dags/{dag}/source`, `POST /dags/{dag}/dagRuns/{run}/mark` and `.../taskInstances/{task}/mark` (body `{"new_state":"success","include_downstream":true,"map_index":0}`), `GET /eventLogs?dag_id=&run_id=&task_id=`, `GET|PATCH /users/{user}`. `GET /dags/{dag}` accepts `runs`, `base_date`, `run_type`, `state`.
 
-## DAG Go tanpa rebuild (compile on the fly)
+## Go DAGs without rebuilding (compiled on the fly)
 
-Taruh file `.go` berisi `package main` di DAG folder. Scheduler dan webserver meng-compile-nya jadi *DAG bundle* (binary terpisah), lalu setiap task dijalankan sebagai subprocess dari bundle itu.
+Put a `.go` file with `package main` in the DAG folder. The scheduler and webserver compile it into a *DAG bundle* (a separate binary), and every task runs as a subprocess of that bundle.
 
 ```go
 // dags/sales.go
@@ -315,32 +316,32 @@ func init() {
 }
 ```
 
-- Tidak perlu `func main()`, karena sudah di-generate.
-- Satu file di root DAG folder = satu bundle. Satu subfolder = satu bundle multi-file, jadi helper bisa di file lain dalam folder yang sama.
-- File diubah → di-rebuild pada scan berikutnya (`--dag-dir-list-interval`). File dihapus → DAG hilang. Error compile muncul di **Import errors**.
-- Build di-cache di `$DAGSFLOW_HOME/build/bin`, per hash isi file + source SDK. Build ulang dengan cache Go yang sudah hangat hanya sekitar 0,5 detik.
-- Task berjalan di proses sendiri. Timeout me-kill seluruh process group, jadi panic atau task macet tidak menjatuhkan scheduler.
-- XCom, variables, connections, `TriggerDagRun`, dan `ExternalTaskState` diakses dari bundle lewat RPC ke scheduler (127.0.0.1 + token per task). Kunci enkripsi cukup ada di scheduler.
-- Semua fitur tersedia: branch, sensor, mapping, callbacks, pools, SLA, datasets.
+- No `func main()` needed; it is generated.
+- One file in the root of the DAG folder = one bundle. One subfolder = one multi-file bundle, so helpers can live in other files of the same folder.
+- A changed file is rebuilt on the next scan (`--dag-dir-list-interval`). A deleted file removes its DAGs. Compile errors show up in **Import errors**.
+- Builds are cached in `$DAGSFLOW_HOME/build/bin` per hash of the files + SDK source. A rebuild with a warm Go cache takes about 0.5 seconds.
+- Tasks run in their own process. Timeouts kill the whole process group, so a panic or a stuck task doesn't bring the scheduler down.
+- XComs, variables, connections, `TriggerDagRun` and `ExternalTaskState` are reached from the bundle through RPC to the host (127.0.0.1 + a per-task token). The encryption key only needs to be on the host.
+- Every feature is available: branches, sensors, mapping, callbacks, pools, SLAs, datasets.
 
-Kebutuhan runtime: Go toolchain dan checkout source dagsflow-go. Lokasinya dideteksi otomatis dari working dir atau lokasi binary, atau bisa di-set lewat `DAGSFLOW_SDK_DIR`; `DAGSFLOW_GO` untuk path `go`. Dependency ikut `go.mod` SDK. Kalau DAG meng-import library lain, build memakai `-mod=mod` sehingga perlu akses ke GOPROXY. Node tanpa Go tetap bisa memakai binary yang sudah ada di build cache bersama.
+Runtime requirements: the Go toolchain and a checkout of the dagsflow-go source. Its location is detected from the working directory or the binary's location, or set with `DAGSFLOW_SDK_DIR`; `DAGSFLOW_GO` sets the path to `go`. Dependencies follow the SDK's `go.mod`. If a DAG imports other libraries, the build uses `-mod=mod` and needs GOPROXY access. Nodes without Go can still use binaries already in a shared build cache.
 
-Kalau DAG folder berada di dalam module Go lain (seperti `dags/` di repo ini), beri `//go:build dagsflow` di baris pertama supaya `go build ./...` repo mengabaikannya. Contohnya `dags/features.go`.
+If the DAG folder sits inside another Go module (like `dags/` in this repo), put `//go:build dagsflow` on the first line so the repo's `go build ./...` ignores it. See `dags/features.go`.
 
-DAG yang ingin ikut ter-compile ke binary (tanpa toolchain di server) tetap bisa: taruh di `builtin_dags/`, yang di-import oleh `main.go`.
+DAGs can still be compiled into the binary (no toolchain on the server): put them in `builtin_dags/`, which `main.go` imports.
 
-## DAG YAML (deploy tanpa rebuild)
+## YAML DAGs (deploy without rebuilding)
 
-Taruh file `*.yaml` di DAG folder (`$DAGSFLOW_DAGS_FOLDER`, default `$DAGSFLOW_HOME/dags`). Scheduler & webserver me-rescan tiap `--dag-dir-list-interval` (default 30s): file baru/berubah di-load, file dihapus di-unregister, file rusak muncul di **Admin → Import errors**.
+Put `*.yaml` files in the DAG folder (`$DAGSFLOW_DAGS_FOLDER`, default `$DAGSFLOW_HOME/dags`). The scheduler and webserver rescan it every `--dag-dir-list-interval` (default 30s): new/changed files are loaded, deleted files are unregistered, broken files show up under **Import errors**.
 
 ```yaml
 dag_id: yaml_example
-schedule: "@daily"          # atau schedule_datasets: [bq://proj.ds.table]
+schedule: "@daily"          # or schedule_datasets: [bq://proj.ds.table]
 default_args: {retries: 2, retry_delay: 10s, on_failure: [gchat_alerts]}
 tasks:
   - id: list_files
     operator: bash
-    command: echo '["a.csv","b.csv"]'      # baris stdout terakhir -> XCom return_value
+    command: echo '["a.csv","b.csv"]'      # last stdout line -> XCom return_value
   - id: process_file
     operator: bash
     command: echo "{{ .item }} {{ .ds }}"
@@ -348,72 +349,73 @@ tasks:
     pool: bigquery
   - id: load
     operator: bigquery
-    sql_file: sql/load.sql                 # relatif ke file YAML
+    sql_file: sql/load.sql                 # relative to the YAML file
     upstream: [process_file]
     outlets: [bq://proj.dw.sales]
 ```
 
-Operator: `empty`, `bash`, `bigquery`, `http`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`. Logika custom tetap pakai DAG Go (butuh rebuild).
+Operators: `empty`, `bash`, `bigquery`, `http`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`. Custom logic needs a Go DAG.
 
-## Fitur Airflow lain
+## More Airflow features
 
-| Fitur | Go | YAML |
+| Feature | Go | YAML |
 |---|---|---|
 | Pools | `dag.WithPool("bigquery")`, `WithPoolSlots(n)`; `dagsflow-go pools set bigquery 4` | `pool:` |
 | Priority weight | `dag.WithPriorityWeight(n)` (weight_rule = downstream) | `priority_weight:` |
 | Sensors | `d.NewSensor(id, pokeFn, dag.SensorConfig{PokeInterval, Timeout, Mode: dag.ModeReschedule, SoftFail})`, `NewFileSensor`, `NewTimeDeltaSensor`, `NewExternalTaskSensor`, `NewHTTPSensor` | `*_sensor`, `mode: reschedule` |
-| Dynamic task mapping | `dag.Expand(dag.FromXCom("t","return_value"))` / `dag.FromItems(...)`; di task: `ctx.Item`, `dag.ItemAs[T](ctx)`; pull dari task mapped → list | `expand:` |
-| Datasets | `dag.WithOutlets(uri)` di task, `dag.WithDatasetSchedule(uri...)` di DAG | `outlets:`, `schedule_datasets:` |
-| SLA | `dag.WithSLA(d)` + `dag.WithSLAMiss(cb)` (deadline = data_interval_end + sla, run terjadwal saja) | `sla:`, `on_sla_miss:` |
-| Callbacks | task: `WithOnFailureCallback/OnSuccess/OnRetry`, DAG: `WithOnFailure/WithOnSuccess`, atau `DefaultArgs.OnFailure` | `on_failure: [conn_id]` |
+| Dynamic task mapping | `dag.Expand(dag.FromXCom("t","return_value"))` / `dag.FromItems(...)`; in the task: `ctx.Item`, `dag.ItemAs[T](ctx)`; pulling from a mapped task → list | `expand:` |
+| Datasets | `dag.WithOutlets(uri)` on a task, `dag.WithDatasetSchedule(uri...)` on a DAG | `outlets:`, `schedule_datasets:` |
+| SLA | `dag.WithSLA(d)` + `dag.WithSLAMiss(cb)` (deadline = data_interval_end + sla, scheduled runs only) | `sla:`, `on_sla_miss:` |
+| Callbacks | task: `WithOnFailureCallback/OnSuccess/OnRetry`, DAG: `WithOnFailure/WithOnSuccess`, or `DefaultArgs.OnFailure` | `on_failure: [conn_id]` |
+| Queues / pod overrides | `dag.WithQueue("heavy")`, `dag.WithPodOverride(map[string]any{...})` | `queue:`, `pod_override:` |
 
-`mode: reschedule` melepas slot executor/pool di antara poke (mirip deferrable).
+`mode: reschedule` frees the executor/pool slot between pokes (similar to deferrable operators).
 
-Metadata dataset (≈ `outlet_events[...].extra` / `triggering_dataset_events` di Airflow 2.9+):
+Dataset event metadata (≈ `outlet_events[...].extra` / `triggering_dataset_events` in Airflow 2.10+):
 
 ```go
-// producer: tempel metadata ke event dataset
+// producer: attach metadata to the dataset event
 return ctx.SetOutletExtra("bq://proj.dw.sales", map[string]any{"rows": total})
-// consumer (DAG yang di-schedule oleh dataset tsb)
-info, ok, err := dag.DatasetExtraAs[salesInfo](ctx, "bq://proj.dw.sales") // extra event terakhir
-events, _ := ctx.TriggeringDatasetEvents()                                 // semua event pemicu
+// consumer (a DAG scheduled on that dataset)
+info, ok, err := dag.DatasetExtraAs[salesInfo](ctx, "bq://proj.dw.sales") // extra of the latest event
+events, _ := ctx.TriggeringDatasetEvents()                                 // every triggering event
 ```
 
-### Alert Google Chat
+### Google Chat alerts
 
 ```bash
 dagsflow-go connections add gchat_alerts --conn-type google_chat \
   --config '{"webhook_url":"https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=..."}'
-export DAGSFLOW_BASE_URL=https://dagsflow.internal   # tombol "Open in dagsflow" di card
+export DAGSFLOW_BASE_URL=https://dagsflow.internal   # "Open in dagsflow" button in the card
 ```
 ```go
 alert := dag.GoogleChatNotifier("gchat_alerts")
 d := dag.NewDAG("x", "@daily", dag.WithOnFailure(alert),
     dag.WithDefaultArgs(dag.DefaultArgs{OnFailure: []dag.Callback{alert}}))
 ```
-Callback custom: `func(ctx context.Context, cc dag.CallbackContext) error`.
+Custom callbacks: `func(ctx context.Context, cc dag.CallbackContext) error`.
 
 ## Variables, connections & secrets
 
 ```bash
-export DAGSFLOW_FERNET_KEY=$(dagsflow-go config gen-key)   # AES-256-GCM; tanpa ini disimpan plain text (ada warning)
+export DAGSFLOW_FERNET_KEY=$(dagsflow-go config gen-key)   # AES-256-GCM; without it values are stored in plain text (with a warning)
 dagsflow-go variables set region APAC
 dagsflow-go variables import vars.json
 dagsflow-go connections add my_api --conn-type http --config '{"host":"https://api.x","token":"..."}'
 ```
-Di task: `dag.GetVariable("region")`, `dag.GetVariableJSON[T]`, template `{{ var "region" }}`, `dag.GetConnection(id)`.
+In tasks: `dag.GetVariable("region")`, `dag.GetVariableJSON[T]`, template `{{ var "region" }}`, `dag.GetConnection(id)`.
 
-Urutan lookup (secrets backend): env (`DAGSFLOW_VAR_REGION`, `DAGSFLOW_CONN_MY_API` berisi JSON) → metastore terenkripsi → `connections/*.json`. Backend lain (mis. GCP Secret Manager) cukup implement `dag.SecretsBackend` lalu `dag.SetSecretsBackends(...)`.
+Lookup order (secrets backends): env (`DAGSFLOW_VAR_REGION`, `DAGSFLOW_CONN_MY_API` holding JSON) → encrypted metastore → `connections/*.json`. Other backends (e.g. GCP Secret Manager) only need to implement `dag.SecretsBackend` and be passed to `dag.SetSecretsBackends(...)`.
 
-## RBAC & REST API
+## REST API
 
 ```bash
-dagsflow-go users create --username fadhel --role Admin   # Viewer | User | Op | Admin | role custom (lihat Users & RBAC)
-dagsflow-go users token fadhel                            # API token (tampil sekali)
+dagsflow-go users create --username fadhel --role Admin   # Viewer | User | Op | Admin | a custom role (see Users & RBAC)
+dagsflow-go users token fadhel                            # API token (shown once)
 ```
-Tanpa user, auth mati dan webserver hanya boleh di localhost. Role dan permission per DAG: lihat **Users & RBAC**.
+Without users, auth is off and the webserver only listens on localhost.
 
-Auth: HTTP Basic atau `Authorization: Bearer <token>`. Request non-GET via Basic wajib header `X-Dagsflow: 1` (CSRF).
+Auth: HTTP Basic or `Authorization: Bearer <token>`. Non-GET requests with Basic auth need the header `X-Dagsflow: 1` (CSRF).
 
 ```bash
 H="Authorization: Bearer $TOKEN"; B=http://localhost:8080/api/v1
@@ -423,70 +425,70 @@ curl -H "$H" $B/dags/custom_dag/dagRuns/<run_id>/taskInstances
 curl -H "$H" "$B/dags/custom_dag/dagRuns/<run_id>/taskInstances/<task>/logs/1?map_index=0"
 curl -H "$H" -X PATCH $B/dags/custom_dag -d '{"is_paused":true}'
 ```
-Endpoint lain: `dagRuns/{run}/clear`, `DELETE dagRuns/{run}`, `pools`, `variables`, `connections` (nilai sensitif di-mask), `datasets`, `importErrors`, `users`, `users/{u}/tokens`, `health`, `me`.
+Other endpoints: `dagRuns/{run}/clear`, `DELETE dagRuns/{run}`, `pools`, `variables`, `connections` (sensitive values masked), `datasets`, `importErrors`, `components`, `users`, `users/{u}/tokens`, `roles`, `health`, `me`.
 
 ## Production
 
-Untuk production pakai **Postgres** sebagai metadata database. Tanpa `DAGSFLOW_DATABASE_URL`, dagsflow tetap memakai file JSON (cocok untuk laptop / satu mesin, satu scheduler).
+Use **Postgres** as the metadata database in production. Without `DAGSFLOW_DATABASE_URL`, dagsflow uses JSON files (fine for a laptop or a single machine with one scheduler).
 
 ```bash
-export DAGSFLOW_DATABASE_URL='postgres://dagsflow:***@db:5432/dagsflow?sslmode=require'   # atau DAGSFLOW_DATABASE_URL_FILE
-dagsflow-go db migrate                      # juga otomatis saat start
-dagsflow-go scheduler --executor worker     # jalankan 2+ di mesin berbeda
-dagsflow-go worker -c 8 -q default          # sebanyak yang dibutuhkan
-dagsflow-go webserver --addr 0.0.0.0:8080   # boleh beberapa replika di belakang load balancer
+export DAGSFLOW_DATABASE_URL='postgres://dagsflow:***@db:5432/dagsflow?sslmode=require'   # or DAGSFLOW_DATABASE_URL_FILE
+dagsflow-go db migrate                      # also done automatically on start
+dagsflow-go scheduler --executor worker     # run 2+ on different machines
+dagsflow-go worker -c 8 -q default          # as many as needed
+dagsflow-go webserver --addr 0.0.0.0:8080   # several replicas behind a load balancer are fine
 ```
 
-**Scheduler HA**
-- Beberapa scheduler boleh jalan bersamaan. Satu jadi *leader* (lease 15 detik): membuat run terjadwal/dataset, mengadopsi run yatim, dan menjalankan retensi. Semua scheduler mengeksekusi run.
-- Run di-*claim* secara atomik (`queued → running`), jadi tidak ada run yang dijalankan dua kali. `max_active_runs` dan pools berlaku global untuk semua scheduler.
-- Run yang sedang jalan dimiliki satu scheduler dengan lease 30 detik yang diperpanjang tiap 5 detik. Kalau scheduler mati, leader memasukkan run-nya kembali ke antrean dan scheduler lain melanjutkan. Scheduler lama yang ternyata masih hidup (misalnya habis ter-pause) langsung berhenti menulis (fencing).
-- Tulis dari webserver/CLI memakai optimistic concurrency: kalau run berubah di tempat lain, API menjawab `409` dan tinggal diulang.
+**HA schedulers**
+- Several schedulers can run at once. One is the *leader* (15-second lease): it creates scheduled/dataset runs, adopts orphaned runs and runs retention. Every scheduler executes runs.
+- Runs are *claimed* atomically (`queued → running`), so no run is executed twice. `max_active_runs` and pools apply across all schedulers.
+- A running run is owned by one scheduler with a 30-second lease renewed every 5 seconds. If that scheduler dies, the leader re-queues its runs and another scheduler continues them. An old owner that turns out to be alive (e.g. after being paused) stops writing immediately (fencing).
+- Writes from webservers/CLI use optimistic concurrency: if the run changed elsewhere, the API answers `409` and the request can simply be retried.
 
-**Executor**
+**Executors**
 
-| `--executor` | Task jalan di | Catatan |
+| `--executor` | Tasks run in | Notes |
 |---|---|---|
-| `local` (default) | proses scheduler | seperti LocalExecutor |
-| `worker` | proses `dagsflow-go worker` | seperti CeleryExecutor, antrean di Postgres. Routing: `dag.WithQueue("heavy")` / `queue:` di YAML, lalu `worker -q heavy` |
-| `kubernetes` | satu pod per task | seperti KubernetesExecutor. Lihat `deploy/kubernetes/dagsflow.yaml`. Per task: `dag.WithPodOverride(...)` / `pod_override:` di YAML |
+| `local` (default) | the scheduler process | like the LocalExecutor |
+| `worker` | `dagsflow-go worker` processes | like the CeleryExecutor, queue in Postgres. Routing: `dag.WithQueue("heavy")` / `queue:` in YAML, then `worker -q heavy` |
+| `kubernetes` | one pod per task | like the KubernetesExecutor. See `deploy/kubernetes/dagsflow.yaml`. Per task: `dag.WithPodOverride(...)` / `pod_override:` in YAML |
 
-- Worker butuh DAG folder dan connections yang sama dengan scheduler. XCom, rendered template, dataset extra, dan log dikirim lewat database, jadi tidak perlu shared volume.
-- Worker yang mati (heartbeat hilang 60 detik) membuat attempt gagal, lalu `retries` berlaku. Pod yang gagal start (ImagePullBackOff, OOMKilled, dll.) juga membuat attempt gagal, tidak menggantung.
-- `worker --grace 10m`: saat shutdown, task yang sedang jalan diberi waktu untuk selesai.
-- Sensor di worker/pod selalu mode `poke`.
+- Workers need the same DAG folder and connections as the schedulers. XComs, rendered templates, dataset extras and logs go through the database, so no shared volume is needed.
+- A dead worker (no heartbeat for 60 seconds) fails the attempt, and `retries` apply. Pods that fail to start (ImagePullBackOff, OOMKilled, ...) fail the attempt too instead of hanging.
+- `worker --grace 10m`: on shutdown, running tasks get this long to finish.
+- Sensors on workers/pods always run in `poke` mode.
 
 **Observability**
-- `GET /metrics` (webserver; scheduler dan worker lewat `--metrics-addr :9102`) dalam format Prometheus. Isinya: durasi dan jumlah run/task per state, task yang running/antre, pool terpakai, komponen yang hidup, kedalaman antrean, import error, dan status leader. Metrics di webserver bisa diberi token (`DAGSFLOW_METRICS_TOKEN`) atau dimatikan (`DAGSFLOW_METRICS=off`).
-- `GET /health` (liveness), `GET /ready` (DB bisa dijangkau), `GET /api/v1/health` (status metadatabase + scheduler).
-- Admin → **Components** (atau `dagsflow-go db check`) menampilkan scheduler, webserver, dan worker beserta heartbeat-nya.
-- `DAGSFLOW_LOG_FORMAT=json`: log komponen jadi satu objek JSON per baris (Cloud Logging, Loki, ELK).
+- `GET /metrics` (webserver; scheduler and worker via `--metrics-addr :9102`) in Prometheus format: run/task durations and counts per state, running/queued tasks, pool usage, live components, queue depth, import errors and leader status. On the webserver it can require a token (`DAGSFLOW_METRICS_TOKEN`) or be turned off (`DAGSFLOW_METRICS=off`).
+- `GET /health` (liveness), `GET /ready` (database reachable), `GET /api/v1/health` (metadatabase + scheduler status).
+- Admin → **Components** (or `dagsflow-go db check`) lists schedulers, webservers and workers with their heartbeats.
+- `DAGSFLOW_LOG_FORMAT=json`: component logs as one JSON object per line (Cloud Logging, Loki, ELK).
 
-**Keamanan**
-- HTTPS langsung: `webserver --tls-cert cert.pem --tls-key key.pem`. Kalau di belakang proxy, teruskan `X-Forwarded-Proto`.
-- Login dan Basic auth dikunci 15 menit setelah 5 kali gagal per username/IP. `X-Forwarded-For` hanya dipercaya kalau `DAGSFLOW_TRUST_PROXY_HEADERS=true`.
-- Header keamanan: CSP, HSTS (untuk HTTPS), X-Frame-Options, nosniff. Request mengubah data butuh header CSRF (`X-Dagsflow`) atau Bearer token. Server punya timeout dan batas ukuran body.
-- Set `DAGSFLOW_FERNET_KEY` (variables/connections terenkripsi) dan `DAGSFLOW_SECRET_KEY` (sama di semua replika webserver). Kalau `SECRET_KEY` kosong, key dibuat sekali dan disimpan di metadata DB.
+**Security**
+- HTTPS directly: `webserver --tls-cert cert.pem --tls-key key.pem`. Behind a proxy, forward `X-Forwarded-Proto`.
+- Login and Basic auth are locked for 15 minutes after 5 failures per username/IP. `X-Forwarded-For` is only trusted with `DAGSFLOW_TRUST_PROXY_HEADERS=true`.
+- Security headers: CSP, HSTS (over HTTPS), X-Frame-Options, nosniff. Requests that change data need the CSRF header (`X-Dagsflow`) or a Bearer token. The server has timeouts and body size limits.
+- Set `DAGSFLOW_FERNET_KEY` (encrypted variables/connections) and `DAGSFLOW_SECRET_KEY` (the same on every webserver replica). If `SECRET_KEY` is empty, a key is generated once and stored in the metadata database.
 
-**Operasional**
-- Retensi: `--retention-days 90` / `DAGSFLOW_RETENTION_DAYS` (dijalankan leader tiap jam), atau manual `dagsflow-go db clean --older-than 90d --yes`.
-- Backup/restore: `dagsflow-go db export -f backup.json` / `db import -f backup.json`. Untuk pindah dari JSON ke Postgres: jalankan `db export` tanpa `DAGSFLOW_DATABASE_URL`, lalu `db import` dengan `DAGSFLOW_DATABASE_URL` di-set. Log task tidak ikut di-export. Untuk backup rutin Postgres tetap pakai `pg_dump` / snapshot managed DB.
-- Upgrade: schema dimigrasi otomatis saat start, dengan lock supaya aman kalau beberapa proses start bersamaan. Binary lama menolak jalan kalau schema DB lebih baru. Rolling restart scheduler aman (lihat HA di atas).
+**Operations**
+- Retention: `--retention-days 90` / `DAGSFLOW_RETENTION_DAYS` (run by the leader every hour), or manually `dagsflow-go db clean --older-than 90d --yes`.
+- Backup/restore: `dagsflow-go db export -f backup.json` / `db import -f backup.json`. To move from JSON files to Postgres, run `db export` without `DAGSFLOW_DATABASE_URL`, then `db import` with it set. Task logs are not exported. For regular Postgres backups use `pg_dump` / managed database snapshots.
+- Upgrades: the schema is migrated automatically on start, under a lock so several processes starting together are safe. An older binary refuses to run against a newer schema. Rolling restarts of schedulers are safe (see HA above).
 
-## Batasan saat ini
+## Current limitations
 
-- Task Go berjalan sebagai goroutine; task yang tidak menghormati `ctx` tetap jalan setelah timeout. Bash task di-kill satu process group. Di worker/pod, cancel dari scheduler juga bergantung pada `ctx`.
-- Dengan store JSON hanya boleh satu scheduler (dijaga lock file). HA, worker, dan pod butuh Postgres.
-- Rate limit login disimpan per proses webserver (tidak dibagi antar replika).
+- Go tasks run as goroutines; a task that ignores `ctx` keeps running after a timeout. Bash tasks are killed as a process group. On workers/pods, cancellation from the scheduler also relies on `ctx`.
+- With the JSON store only one scheduler may run (enforced with a lock file). HA, workers and pods need Postgres.
+- Login rate limiting is kept per webserver process (not shared between replicas).
 
 ## Connections
 
-`connections/*.json` (atau `GOOGLE_APPLICATION_CREDENTIALS` + `GOOGLE_CLOUD_PROJECT` → `google_cloud_default`):
+`connections/*.json` (or `GOOGLE_APPLICATION_CREDENTIALS` + `GOOGLE_CLOUD_PROJECT` → `google_cloud_default`):
 
 ```json
 { "google_cloud_default": { "Type": "google_cloud_platform",
   "Config": { "project_id": "my-project", "credentials_path": "/path/sa.json", "location": "asia-southeast2" } } }
 ```
 
-`NewBigQueryTask` memakai param `gcp_conn_id` (default `google_cloud_default`).
-Semua data (state, logs, connections) relatif ke `$DAGSFLOW_HOME` (default: direktori kerja).
+`NewBigQueryTask` uses the `gcp_conn_id` param (default `google_cloud_default`).
+All data (state, logs, connections) is relative to `$DAGSFLOW_HOME` (default: the working directory).
