@@ -28,6 +28,8 @@ type fakeGoogle struct {
 	tokens  int
 	polled  bool
 	inserts []any
+	objects map[string][]byte
+	octypes map[string]string
 	sheet   [][]any
 	calls   []string
 }
@@ -81,6 +83,14 @@ func (f *fakeGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.inserts = append(f.inserts, x.JSON)
 		}
 		_, _ = w.Write([]byte(`{}`))
+	case strings.HasPrefix(p, "/upload/storage/v1/b/bkt/o"):
+		if f.objects == nil {
+			f.objects, f.octypes = map[string][]byte{}, map[string]string{}
+		}
+		name := r.URL.Query().Get("name")
+		f.objects[name] = body
+		f.octypes[name] = r.Header.Get("Content-Type")
+		_, _ = w.Write([]byte(`{"name":"` + name + `","bucket":"bkt"}`))
 	case strings.Contains(p, "/spreadsheets/SHEET/values/"):
 		switch {
 		case strings.HasSuffix(p, ":clear"):
@@ -127,12 +137,13 @@ func setupGoogle(t *testing.T) *fakeGoogle {
 	path := filepath.Join(t.TempDir(), "sa.json")
 	_ = os.WriteFile(path, js, 0o600)
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", path)
-	ob, os2, om := bqBase, sheetsBase, metadataURL
+	ob, os2, om, og := bqBase, sheetsBase, metadataURL, gcsBase
+	gcsBase = srv.URL
 	bqBase, sheetsBase, metadataURL = srv.URL+"/bigquery/v2", srv.URL+"/v4/spreadsheets", srv.URL+"/nometa"
 	tokMu.Lock()
 	tokens = map[string]cachedToken{}
 	tokMu.Unlock()
-	t.Cleanup(func() { bqBase, sheetsBase, metadataURL = ob, os2, om })
+	t.Cleanup(func() { bqBase, sheetsBase, metadataURL, gcsBase = ob, os2, om, og })
 	return f
 }
 
@@ -202,7 +213,7 @@ tasks:
 	runDAG(t, dags[0], rs)
 	v, _ := rs.XComPull("read", "return_value")
 	rows, _ := v.([]any)
-	if len(rows) != 2 || rows[1].(map[string]any)["name"] != "" {
+	if len(rows) != 2 || rows[1].(map[string]any)["name"] != nil {
 		t.Fatalf("rows: %v", v)
 	}
 	if len(f.sheet) != 3 || f.sheet[0][0] != "id" || f.sheet[1][1] != "ann" {

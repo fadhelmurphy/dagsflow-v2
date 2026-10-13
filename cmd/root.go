@@ -75,6 +75,10 @@ func dagsFolder() string {
 	return filepath.Join(home(), "dags")
 }
 
+func init() {
+	dag.UploadsDirFn = func() string { return filepath.Join(dagsFolder(), "builder", "files") }
+}
+
 var goLoader = &bundle.Loader{Log: func(f string, a ...any) {
 	fmt.Fprintf(os.Stderr, "[dags] "+f+"\n", a...)
 }}

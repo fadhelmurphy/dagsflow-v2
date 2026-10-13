@@ -361,7 +361,7 @@ tasks:
     outlets: [bq://proj.dw.sales]
 ```
 
-Operators: `empty`, `bash`, `bigquery`, `http`, `postgres`, `transform`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`. Custom logic needs a Go DAG.
+Operators: `empty`, `bash`, `bigquery`, `http`, `postgres`, `transform`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`. Custom logic needs a Go DAG.
 
 ETL operators (rows travel between tasks as the XCom `return_value`, a JSON array of objects):
 
@@ -392,7 +392,49 @@ tasks:
     upstream: [load]
 ```
 
-`transform` steps: `extract`, `select`, `drop`, `rename`, `filter` (`== != > >= < <= contains exists not_exists`), `set`, `sort`, `limit`, `dedupe`. A Postgres connection holds either `uri` (`postgres://user:pass@host/db`) or `host`, `port`, `login`, `password`, `database`, `sslmode`. Note that an `http` response is stored up to 64 KB, so use it for API pages, not bulk exports.
+`transform` steps: `extract`, `select`, `drop`, `rename`, `filter` (`== != > >= < <= contains exists not_exists`), `set`, `sort`, `limit`, `dedupe`, `snake_case` (rename every column to lowercase letters and `_`). A Postgres connection holds either `uri` (`postgres://user:pass@host/db`) or `host`, `port`, `login`, `password`, `database`, `sslmode`. Note that an `http` response is stored up to 64 KB, so use it for API pages, not bulk exports.
+
+Files and combining sources:
+
+```yaml
+  - id: sales
+    operator: file_read                # CSV / TSV / Excel (.xlsx)
+    file: sales_jan.xlsx               # an upload from the builder, or a path on the worker ({{ .ds }} works)
+    sheet: Data Jan                    # name or number; default: first sheet
+    range: B3:F                        # A1 notation: header on row 3, columns B to F, to the last row
+  - id: customers
+    operator: file_read
+    file: customers.csv                # delimiter is detected (, ; tab |); override with delimiter:
+  - id: both
+    operator: merge                    # mode: union (append rows, default) | join (exactly two inputs)
+    mode: join
+    join_type: left                    # inner (default) | left
+    on: [customer_id]                  # or [left_col=right_col]
+    upstream: [sales, customers]       # the first input is the left side
+```
+
+Header names: `gsheet_read` and `file_read` turn the header row into column names in **snake_case, lowercase letters a-z and `_` only** (`Total (Rp)` becomes `total_rp`, `orderID` becomes `order_id`; accents are dropped, and digits and punctuation act as word separators, so `Qty 1` becomes `qty`). Names that end up equal get a letter suffix (`name`, `name_b`, `name_c`). Set `keep_headers: true` to keep the original text. For other sources use the `snake_case` transform step. Empty cells become `null`; fully blank lines are skipped. Excel dates come out as `2024-01-31` (or `2024-01-31 14:30:00`), numbers as numbers; CSV values stay text. `.xls` (old format) and password protected files are not supported; uploads are limited to 25 MB.
+
+Dump rows to object storage (a file per run, plain REST, no SDK):
+
+```yaml
+  - id: dump_gcs
+    operator: gcs_write                # Google Cloud Storage
+    bucket: my-bucket
+    object: exports/orders/{{ .ds }}/orders   # templated; .csv (or .json / .ndjson, +.gz) is added when missing
+    format: csv                        # csv (default) | tsv | json | ndjson
+    gzip: true
+    upstream: [read_bq]
+  - id: dump_s3
+    operator: s3_write                 # Amazon S3, MinIO, Cloudflare R2, …
+    bucket: my-bucket
+    key: exports/orders/{{ .ds }}/orders.ndjson
+    region: ap-southeast-3             # optional, default from the connection, else us-east-1
+    format: ndjson
+    upstream: [read_bq]
+```
+
+`gcs_write` uses the same service account as BigQuery and Sheets (it needs write access to the bucket). `s3_write` reads the `aws_default` connection (or `conn_id`) with `access_key_id`, `secret_access_key`, optional `session_token`, `region` and `endpoint_url` (for MinIO or R2; those use path style URLs), else the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_REGION` / `AWS_ENDPOINT_URL_S3` environment variables. IAM roles from the instance metadata service are not supported yet. The task output is `{uri, rows, bytes}`. CSV columns default to all fields, sorted; set `columns: [...]` for an order. The whole file is built in memory and uploaded in one request, so it suits files up to a few hundred MB. Both are tested against fake servers (S3 signing also against the examples published by AWS), not yet against real GCS or S3.
 
 BigQuery and Google Sheets as source or destination (plain REST, no extra dependencies):
 
@@ -406,7 +448,7 @@ BigQuery and Google Sheets as source or destination (plain REST, no extra depend
     range: Sheet1
     upstream: [read_bq]
   - id: from_sheet
-    operator: gsheet_read              # first row = header; no_header: true for col_1, col_2…
+    operator: gsheet_read              # first row of the range = header; no_header: true for col_1, col_2…
     spreadsheet_id: <id>
     range: Sheet1!A1:F
   - id: to_bq
@@ -424,15 +466,16 @@ Credentials come from the `google_cloud_default` connection (or `conn_id`): `cre
 
 **Builder** in the top menu (permission `builder.edit`, Admin by default). Drag nodes from the palette onto the canvas (or click one to add it after the selected node), drag from a node's right port to another node to connect them, and fill in the side panel. Dropping a connection on an empty spot opens a node picker.
 
-- **Nodes**: HTTP request, Postgres query / insert, BigQuery read rows / insert rows / SQL, Google Sheets read / write, Transform rows, Shell command, Trigger another DAG, No-op, and four sensors. Every node also has retries, timeout, trigger rule, pool, dataset outlets, failure alerts and *run once per item* (dynamic mapping).
+- **Nodes**: HTTP request, Postgres query / insert, BigQuery read rows / insert rows / SQL, Google Sheets read / write, CSV / Excel file (upload, sheet, start row and columns, with a preview), Transform rows, Merge / join, Google Cloud Storage dump, Amazon S3 dump, Shell command, Trigger another DAG, No-op, and four sensors. Every node also has retries, timeout, trigger rule, pool, dataset outlets, failure alerts and *run once per item* (dynamic mapping).
 - **Live validation**: missing fields, bad durations, loops and unknown connections are flagged on the node while you edit; saving is refused while there are errors.
 - **Save & Run** saves, triggers a run and colours the nodes by state; select a node to see its output rows, error and log.
 - **Undo/redo**, auto-arrange, fit view, duplicate (`Ctrl+D`), delete, `Ctrl+S`. Unsaved edits survive an accidental reload (kept in the browser) and leaving the page asks first.
 - Workflows are saved as ordinary YAML DAGs in `<dags folder>/builder/<id>.yaml` (node positions in a `layout:` block), so the scheduler, executors, RBAC, Grid and Graph views treat them like any other DAG, and you can edit the YAML by hand. New scheduled workflows start **paused**: switch them on in the builder.
+- **Several sources and loads**: connect as many nodes as you like; one node can feed several destinations. To use two sources together, connect both to a **Merge / join** node (union or a two-way join). Other nodes read one input, chosen under *Read rows from* when several are connected.
 - Hand-written YAML DAGs open read-only (**Open in builder** on the DAG page); **Make an editable copy** saves a builder copy under a new id. The builder edits one DAG per file and cannot open Go DAGs.
 - Saving needs `builder.edit` plus `dag.edit` on that DAG id. Two people editing the same workflow: the second save is refused (`409`) instead of overwriting.
 
-Security note: a workflow can run shell commands and SQL on your workers, so `builder.edit` is as powerful as write access to DAG files. Keep it for people you would trust with that. In a multi-host setup the webserver writes into the DAG folder, so it must be a volume shared with the scheduler and workers (new or changed files are picked up within ~2 s).
+Uploaded files are kept in `<dags folder>/builder/files/` (so that folder must be shared in a multi-host setup, like the workflows). Security note: a workflow can run shell commands and SQL on your workers, read any file the worker can read through the file node, and so `builder.edit` is as powerful as write access to DAG files. Keep it for people you would trust with that. In a multi-host setup the webserver writes into the DAG folder, so it must be a volume shared with the scheduler and workers (new or changed files are picked up within ~2 s).
 
 API (all need `builder.edit`): `GET /builder/nodes`, `GET /builder/workflows`, `GET|PUT|DELETE /builder/workflows/{dag}`, `POST /builder/validate`. A workflow is `{"dag_id", "settings": {schedule, tags, ...}, "nodes": [{id, type, x, y, config}], "edges": [{from, to}]}`.
 

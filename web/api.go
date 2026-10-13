@@ -143,6 +143,10 @@ func (s *Server) Handler() http.Handler {
 		{"GET /api/v1/builder/workflows/{dag}", engine.ActBuilderEdit, s.builderGet},
 		{"PUT /api/v1/builder/workflows/{dag}", engine.ActBuilderEdit, s.builderPut},
 		{"DELETE /api/v1/builder/workflows/{dag}", engine.ActBuilderEdit, s.builderDelete},
+		{"GET /api/v1/builder/files", engine.ActBuilderEdit, s.builderFiles},
+		{"POST /api/v1/builder/files", engine.ActBuilderEdit, s.builderFileUpload},
+		{"DELETE /api/v1/builder/files/{name}", engine.ActBuilderEdit, s.builderFileDelete},
+		{"GET /api/v1/builder/files/{name}/preview", engine.ActBuilderEdit, s.builderFilePreview},
 	}
 	for _, rt := range routes {
 		mux.Handle(rt.pattern, s.require(rt.perm, rt.h))

@@ -9,6 +9,9 @@ const CAT_COLOR = { Sources: "#2F7BD9", Transform: "#8B5CF6", Destinations: "#2E
 const ICONS = {
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>',
   db: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  cloud: '<path d="M7 18a4 4 0 0 1-.5-7.97A5.5 5.5 0 0 1 17 8.5a4.75 4.75 0 0 1 0 9.5z"/><path d="M12 11v6m-2.5-2.5L12 17l2.5-2.5"/>',
+  file: '<path d="M6 2.5h8l4 4V21H6z"/><path d="M14 2.5V7h4M9 12h6M9 16h6"/>',
+  merge: '<path d="M5 5c5 0 5 7 14 7M5 19c5 0 5-7 14-7"/><path d="m16 9 3 3-3 3"/>',
   bq: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><circle cx="12" cy="13" r="2.5"/>',
   table: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18M9 4v16"/>',
   dbin: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M12 10v7m-3-3 3 3 3-3"/>',
@@ -21,10 +24,11 @@ const ICONS = {
 };
 const icon = (n, s = 18) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ICONS.dot}</svg>`;
 const SCHEDULES = [["", "Manual only"], ["@hourly", "Every hour"], ["@daily", "Every day (midnight)"], ["@weekly", "Every week"], ["@monthly", "Every month"], ["0 6 * * *", "Every day at 06:00"], ["*/15 * * * *", "Every 15 minutes"]];
-const STEP_OPS = [["extract", "Extract path"], ["select", "Keep fields"], ["drop", "Remove fields"], ["rename", "Rename fields"], ["filter", "Filter rows"], ["set", "Set / add field"], ["sort", "Sort"], ["limit", "Limit"], ["dedupe", "Remove duplicates"]];
+const STEP_OPS = [["extract", "Extract path"], ["select", "Keep fields"], ["drop", "Remove fields"], ["rename", "Rename fields"], ["filter", "Filter rows"], ["set", "Set / add field"], ["sort", "Sort"], ["limit", "Limit"], ["dedupe", "Remove duplicates"], ["snake_case", "Column names to snake_case"]];
 const CMPS = ["==", "!=", ">", ">=", "<", "<=", "contains", "exists", "not_exists"];
 
 const STYLE = `
+.frow{display:flex;gap:6px;margin:6px 0}.pv{margin-top:4px;min-width:0;max-width:100%;overflow:hidden}.pv pre{white-space:pre-wrap;max-height:200px;overflow:auto}.pvt{overflow:auto;max-height:230px;border:1px solid var(--rule);border-radius:6px}.pvt table{border-collapse:collapse;font-size:11.5px;white-space:nowrap}.pvt th{background:#F1F4F7;color:#64748B;font-weight:600;padding:2px 6px;position:sticky;top:0}.pvt td{padding:2px 6px;border-top:1px solid #EEF1F4;color:#243040}.chips{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0}.chips code{background:#EEF3FB;border-radius:4px;padding:1px 6px;font-size:12px}
 main.bldmain{padding:0;max-width:none}
 .bld{display:flex;flex-direction:column;height:calc(100vh - 58px);min-height:420px;background:#F4F6F8}
 .bld *{box-sizing:border-box}
@@ -200,7 +204,7 @@ async function editorView(id, isNew) {
   teardown();
   B = { origId: isNew ? "" : id, isNew, ro: false, etag: "", file: "", paused: false, loaded: false,
         graph: { dag_id: id, settings: {}, nodes: [], edges: [] }, sel: null, vx: 40, vy: 40, k: 1,
-        undo: [], redo: [], dirty: false, lastTouch: 0, issues: [], vseq: 0, run: null, conns: [], saving: false, needsFit: true };
+        undo: [], redo: [], dirty: false, lastTouch: 0, issues: [], vseq: 0, run: null, conns: [], files: [], saving: false, needsFit: true };
   if (!isNew) {
     const r = await api(`/builder/workflows/${enc(id)}`);
     B.graph = r.graph; B.graph.settings = B.graph.settings || {}; B.graph.nodes = B.graph.nodes || []; B.graph.edges = B.graph.edges || [];
@@ -211,6 +215,7 @@ async function editorView(id, isNew) {
     B.graph.settings = { schedule: "" };
   }
   if (can("connections.read")) { try { B.conns = (await api("/connections")).connections?.map(c => c.conn_id) || []; } catch { /* optional */ } }
+  try { B.files = (await api("/builder/files")).files || []; } catch { /* optional */ }
   window.builderGuard = () => !B || !B.dirty || confirm("You have unsaved changes in the builder. Leave without saving?");
   document.addEventListener("keydown", onKey);
   window.addEventListener("resize", onResize);
@@ -293,7 +298,7 @@ function bindShell() {
   }, { passive: false });
   const side = $("#bside");
   side.addEventListener("input", onSideInput);
-  side.addEventListener("change", onSideChange);
+  side.addEventListener("change", e => { if (e.target.id === "bfilein") return uploadFile(e.target); onSideChange(e); });
   side.addEventListener("click", onSideClick);
   side.addEventListener("keydown", e => {
     if (e.key === "Tab" && e.target.classList.contains("bcode") && !e.shiftKey) {
@@ -458,6 +463,10 @@ function summary(n) {
     case "bigquery_query": return first(c.sql);
     case "bigquery_insert": return "→ " + (c.dataset && c.table ? c.dataset + "." + c.table : "choose a table");
     case "gsheet_read": return c.range ? c.range : "choose a range";
+    case "file_read": return c.file ? c.file + (c.range ? " " + c.range : "") : "choose a file";
+    case "gcs_write": return "→ gs://" + (c.bucket || "bucket") + "/" + (c.object || "");
+    case "s3_write": return "→ s3://" + (c.bucket || "bucket") + "/" + (c.key || "");
+    case "merge": return (c.mode || "union") + (c.mode === "join" && (c.on || []).length ? " on " + c.on.join(", ") : "");
     case "gsheet_write": return "→ " + (c.range || "choose a tab");
     case "postgres_insert": return "→ " + (c.table || "choose a table");
     case "transform": return `${(c.steps || []).length} step${(c.steps || []).length === 1 ? "" : "s"}`;
@@ -665,6 +674,11 @@ function fieldHtml(f, obj, scope, id) {
     case "json": inp = `<textarea ${a} class="bcode" rows="4" spellcheck="false" placeholder="{ }">${v == null ? "" : esc(JSON.stringify(v, null, 2))}</textarea>`; break;
     case "kv": inp = `<div class="kv" ${a}>${Object.entries(v || {}).map(([k, x]) => kvRow(k, x)).join("")}<button class="btn sm" data-sact="kvadd" type="button">+ Add</button></div>`; break;
     case "steps": inp = stepsHtml(v || []); break;
+    case "file":
+      inp = `<input ${a} list="bfiles" value="${esc(v ?? "")}" placeholder="choose, upload or type a path" autocomplete="off" spellcheck="false">
+        <datalist id="bfiles">${B.files.map(x => `<option value="${esc(x.name)}">`).join("")}</datalist>
+        <div class="frow"><button class="btn sm" type="button" data-sact="fileup">Upload CSV / Excel…</button><button class="btn sm" type="button" data-sact="filepreview">Preview</button>
+        <input type="file" id="bfilein" hidden accept=".csv,.tsv,.txt,.xlsx,.xlsm"></div><div id="bfileprev" class="pv">${B.pv && B.pv.id === id ? B.pv.html : ""}</div>`; break;
     case "upstream": {
       const ups = upstreamOf(id);
       inp = `<select ${a}><option value="">${ups.length === 1 ? `(automatic: ${esc(ups[0])})` : "(choose)"}</option>${ups.map(u => `<option value="${esc(u)}" ${v === u ? "selected" : ""}>${esc(u)}</option>`).join("")}</select>`; break;
@@ -736,7 +750,7 @@ function nodePanel(n) {
   const t = typeOf(n.type);
   const ro = B.ro ? "disabled" : "";
   const iss = B.issues.filter(i => i.node === n.id);
-  return `<fieldset ${ro} style="border:0;padding:0;margin:0"><div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><span class="bp-ic" style="background:${colorOf(n.type)};width:32px;height:32px">${icon(t.icon)}</span><div><h3 style="margin:0">${esc(t.label)}</h3><div class="sub" style="font-size:12px">${esc(t.category)}</div></div></div>
+  return `<fieldset ${ro} style="border:0;padding:0;margin:0;min-width:0"><div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><span class="bp-ic" style="background:${colorOf(n.type)};width:32px;height:32px">${icon(t.icon)}</span><div><h3 style="margin:0">${esc(t.label)}</h3><div class="sub" style="font-size:12px">${esc(t.category)}</div></div></div>
     <p class="desc">${esc(t.description)}</p>
     <div id="bnissues">${issHtml(iss)}</div>
     <div class="bf"><label>Node id</label><input data-sact="rename" id="bnid" value="${esc(n.id)}" spellcheck="false"><div class="help">Reference its output with <code>{{ xcom_pull "${esc(n.id)}" "return_value" }}</code></div></div>
@@ -777,7 +791,7 @@ function onSideInput(e) {
   let v;
   const err = $(`[data-err="${CSS.escape(f)}"]`, $("#bside")); if (err) err.textContent = "";
   switch (kind) {
-    case "text": case "conn": case "code": case "select": v = el.value; break;
+    case "text": case "conn": case "code": case "select": case "file": v = el.value; break;
     case "number": v = el.value === "" ? undefined : Number(el.value); break;
     case "bool": v = el.checked || undefined; break;
     case "list": v = el.value.split("\n").map(s => s.trim()).filter(Boolean); break;
@@ -850,6 +864,55 @@ function applyExpand(el) {
   if (f === "items") { try { cfg.expand.items = JSON.parse(el.value); el.style.borderColor = ""; } catch { el.style.borderColor = "var(--s-failed)"; } }
 }
 
+// ---- uploaded files (CSV / Excel) ------------------------------------------------------------------
+async function uploadFile(inp) {
+  const f = inp.files?.[0]; if (!f) return;
+  const box = $("#bfileprev"); if (box) box.innerHTML = `<div class="help">Uploading ${esc(f.name)}…</div>`;
+  const fd = new FormData(); fd.append("file", f);
+  try {
+    const res = await fetch("/api/v1/builder/files", { method: "POST", body: fd, headers: { "X-Dagsflow": "1" } });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(r.error || res.statusText);
+    B.files = (await api("/builder/files")).files || [];
+    const n = node(B.sel.id); snap(); n.config.file = r.name; if (r.sheets?.length > 1 && !n.config.sheet) n.config.sheet = "";
+    markDirty(); renderSide(); refreshNode(n.id); scheduleValidate(); filePreview();
+  } catch (x) { if ($("#bfileprev")) $("#bfileprev").innerHTML = `<div class="banner err">${esc(x.message)}</div>`; }
+  inp.value = "";
+}
+const colName = i => { let s = ""; for (i++; i > 0; i = Math.floor((i - 1) / 26)) s = String.fromCharCode(65 + (i - 1) % 26) + s; return s; };
+async function filePreview() {
+  const n = node(B.sel?.id), box = $("#bfileprev"); if (!n || !box) return;
+  const show = html => { box.innerHTML = html; B.pv = { id: n.id, html }; };
+  const c = n.config, file = (c.file || "").trim();
+  if (!file) return show(`<div class="help">Choose or upload a file first.</div>`);
+  if (/[\\/]/.test(file) || file.includes("{{")) return show(`<div class="help">Preview works for uploaded files only. This one is read from the worker when the workflow runs.</div>`);
+  const q = new URLSearchParams();
+  if (c.sheet) q.set("sheet", c.sheet);
+  if (c.delimiter) q.set("delimiter", c.delimiter);
+  q.set("range", c.range || "");
+  if (c.no_header) q.set("no_header", "1");
+  if (c.keep_headers) q.set("keep_headers", "1");
+  show(`<div class="help">Reading…</div>`);
+  try {
+    const r = await api(`/builder/files/${enc(file)}/preview?${q}`);
+    const sheets = r.sheets?.length ? `<div class="help">Sheets: ${r.sheets.map(x => `<b>${esc(x)}</b>`).join(" · ")}</div>` : "";
+    if (r.error) return show(`<div class="banner err">${esc(r.error)}</div>${sheets}`);
+    const w = Math.min(Math.max(...r.raw.map(x => (x || []).length), 1), 20);
+    const cell = v => v == null ? "" : esc(String(v)).slice(0, 40);
+    const head = `<tr><th></th>${Array.from({ length: w }, (_, i) => `<th>${colName(i)}</th>`).join("")}</tr>`;
+    const body = r.raw.map((row, i) => `<tr><th>${i + 1}</th>${Array.from({ length: w }, (_, j) => `<td>${cell(row?.[j])}</td>`).join("")}</tr>`).join("");
+    const more = r.total_rows > r.raw.length ? ` (first ${r.raw.length} shown)` : "";
+    let result = "";
+    if (r.range_error) result = `<div class="banner err">${esc(r.range_error)}</div>`;
+    else if (r.columns) {
+      result = `<div class="help"><b>Result: ${r.row_count} rows</b>, columns:</div><div class="chips">${r.columns.map(x => `<code>${esc(x)}</code>`).join("")}</div>`;
+      if ((r.sample || []).length) result += `<pre class="bld-out">${esc(JSON.stringify(r.sample, null, 1))}</pre>`;
+    }
+    show(`${sheets}<div class="pvt"><table>${head}${body}</table></div>
+      <div class="help">${r.total_rows} rows in the sheet${more}. Set <b>Start row and columns</b> above to skip title rows or unused columns.</div>${result}`);
+  } catch (x) { show(`<div class="banner err">${esc(x.message)}</div>`); }
+}
+
 async function onSideClick(e) {
   const b = e.target.closest("[data-sact]"); if (!b || B.ro && b.dataset.sact !== "gotoissue" && b.dataset.sact !== "showlog") return;
   const act = b.dataset.sact;
@@ -860,6 +923,8 @@ async function onSideClick(e) {
     case "stepdel": snap(); steps().splice(+b.dataset.si, 1); if (!steps().length) delete node(B.sel.id).config.steps; markDirty(); renderSide(); refreshNode(B.sel.id); scheduleValidate(); break;
     case "stepup": case "stepdown": { const i = +b.dataset.si, j = act === "stepup" ? i - 1 : i + 1, st = steps(); if (j < 0 || j >= st.length) break; snap(); [st[i], st[j]] = [st[j], st[i]]; markDirty(); renderSide(); scheduleValidate(); break; }
     case "renameadd": { const s = steps()[+b.dataset.si]; s.map = { ...(s.map || {}), "": "" }; renderSide(); break; }
+    case "fileup": $("#bfilein")?.click(); break;
+    case "filepreview": filePreview(); break;
     case "dup": duplicateNode(B.sel.id); break;
     case "delnode": removeNode(B.sel.id); break;
     case "deledge": removeEdge(B.sel.id); break;

@@ -111,7 +111,7 @@ type TransformStep struct {
 }
 
 var stepOps = map[string]bool{"extract": true, "select": true, "drop": true, "rename": true, "filter": true,
-	"set": true, "sort": true, "limit": true, "dedupe": true}
+	"set": true, "sort": true, "limit": true, "dedupe": true, "snake_case": true}
 
 var cmpOps = map[string]bool{"==": true, "!=": true, ">": true, ">=": true, "<": true, "<=": true,
 	"contains": true, "exists": true, "not_exists": true}
@@ -119,7 +119,7 @@ var cmpOps = map[string]bool{"==": true, "!=": true, ">": true, ">=": true, "<":
 // Validate checks a step without running it.
 func (s TransformStep) Validate() error {
 	if !stepOps[s.Op] {
-		return fmt.Errorf("unknown step %q (extract, select, drop, rename, filter, set, sort, limit, dedupe)", s.Op)
+		return fmt.Errorf("unknown step %q (extract, select, drop, rename, filter, set, sort, limit, dedupe, snake_case)", s.Op)
 	}
 	need := func(ok bool, what string) error {
 		if !ok {
@@ -266,6 +266,14 @@ func ApplyTransform(input any, steps []TransformStep, render func(raw string, ro
 				}
 				return compare(ma[s.Field], "<", mb[s.Field])
 			})
+		case "snake_case":
+			for _, r := range rows {
+				m, ok := r.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("step %d (snake_case): rows must be objects, got %T", i+1, r)
+				}
+				out = append(out, snakeKeys(m))
+			}
 		case "dedupe":
 			seen := map[string]bool{}
 			for _, r := range rows {

@@ -204,8 +204,10 @@ var googleHTTP = &http.Client{Timeout: 90 * time.Second}
 
 // doJSON runs the request and decodes a JSON answer; Google's error body is
 // turned into the error message.
-func doJSON(req *http.Request, out any) error {
-	resp, err := googleHTTP.Do(req)
+func doJSON(req *http.Request, out any) error { return doJSONWith(googleHTTP, req, out) }
+
+func doJSONWith(c *http.Client, req *http.Request, out any) error {
+	resp, err := c.Do(req)
 	if err != nil {
 		return err
 	}

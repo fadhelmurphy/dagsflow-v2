@@ -45,6 +45,8 @@ type NodeType struct {
 	Fields      []NodeField `json:"fields"`
 	// NeedsInput: the node reads the rows of an upstream node.
 	NeedsInput bool `json:"needs_input,omitempty"`
+	// MinInputs: the node combines several upstream nodes (merge).
+	MinInputs int `json:"min_inputs,omitempty"`
 }
 
 var sensorFields = []NodeField{
@@ -88,16 +90,36 @@ var Nodes = []NodeType{
 		Description: "Read a sheet range. With a header row, each row becomes an object.",
 		Fields: []NodeField{
 			{Name: "spreadsheet_id", Label: "Spreadsheet", Kind: "text", Required: true, Help: "ID or full URL. Share the sheet with the service account."},
-			{Name: "range", Label: "Range", Kind: "text", Required: true, Placeholder: "Sheet1!A1:F"},
+			{Name: "range", Label: "Range", Kind: "text", Required: true, Placeholder: "Sheet1!B3:F", Help: "A1 notation. The first row of the range is the header, so B3:F starts at row 3, columns B to F, down to the last row."},
 			{Name: "no_header", Label: "First row is data (no header)", Kind: "bool"},
+			{Name: "keep_headers", Label: "Keep header names as they are", Kind: "bool", Help: "Default: headers become snake_case column names (lowercase letters and _ only)"},
 			{Name: "limit", Label: "Max rows", Kind: "number", Placeholder: "10000"},
 			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default"},
+		}},
+	{Type: "file_read", Operator: "file_read", Label: "CSV / Excel file", Category: "Sources", Icon: "file",
+		Description: "Read an uploaded CSV, TSV or Excel (.xlsx) file. Pick the sheet, start row and columns; headers become column names.",
+		Fields: []NodeField{
+			{Name: "file", Label: "File", Kind: "file", Required: true, Help: "Upload one, or type a path on the worker (can use {{ .ds }})"},
+			{Name: "sheet", Label: "Sheet (Excel)", Kind: "text", Placeholder: "first sheet", Help: "Sheet name or number"},
+			{Name: "range", Label: "Start row and columns", Kind: "text", Placeholder: "B3:F", Help: "A1 notation. The first row of the range is the header: B3:F = header on row 3, columns B to F, down to the last row. Empty = the whole sheet."},
+			{Name: "no_header", Label: "First row is data (no header)", Kind: "bool"},
+			{Name: "keep_headers", Label: "Keep header names as they are", Kind: "bool", Help: "Default: headers become snake_case column names (lowercase letters and _ only)"},
+			{Name: "delimiter", Label: "CSV delimiter", Kind: "text", Placeholder: "auto", Help: "auto-detected; or , ; tab pipe"},
+			{Name: "limit", Label: "Max rows", Kind: "number", Placeholder: "10000"},
 		}},
 	{Type: "transform", Operator: "transform", Label: "Transform rows", Category: "Transform", Icon: "shuffle", NeedsInput: true,
 		Description: "No-code reshaping of the rows from the node before it: pick fields, rename, filter, add columns, sort…",
 		Fields: []NodeField{
 			{Name: "input", Label: "Read rows from", Kind: "upstream", Help: "Default: the only connected node before this one"},
 			{Name: "steps", Label: "Steps (run top to bottom)", Kind: "steps"},
+		}},
+	{Type: "merge", Operator: "merge", Label: "Merge / join", Category: "Transform", Icon: "merge", MinInputs: 2,
+		Description: "Combine several sources: append their rows (union) or match two of them on key columns (join).",
+		Fields: []NodeField{
+			{Name: "mode", Label: "How", Kind: "select", Options: []string{"union", "join"}, Help: "union appends the rows; join matches two inputs"},
+			{Name: "on", Label: "Join keys", Kind: "list", Help: "One per line. Use left_col=right_col when the names differ. Join only."},
+			{Name: "join_type", Label: "Join type", Kind: "select", Options: []string{"", "inner", "left"}, Help: "inner (default) keeps matches only; left keeps every row of the first input"},
+			{Name: "inputs", Label: "Order of inputs", Kind: "list", Help: "Optional node ids, one per line. Default: connection order. The first is the left side of a join."},
 		}},
 	{Type: "bigquery", Operator: "bigquery", Label: "BigQuery SQL (run)", Category: "Transform", Icon: "bolt",
 		Description: "Run a BigQuery job (query, MERGE, CREATE TABLE AS…).",
@@ -140,6 +162,31 @@ var Nodes = []NodeType{
 			{Name: "user_entered", Label: "Parse values like typing (dates, formulas)", Kind: "bool"},
 			{Name: "rows_from", Label: "Read rows from", Kind: "upstream"},
 			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default"},
+		}},
+	{Type: "gcs_write", Operator: "gcs_write", Label: "Google Cloud Storage dump", Category: "Destinations", Icon: "cloud", NeedsInput: true,
+		Description: "Write the rows from the node before it to a file in a GCS bucket (csv, json or ndjson).",
+		Fields: []NodeField{
+			{Name: "bucket", Label: "Bucket", Kind: "text", Required: true},
+			{Name: "object", Label: "Object name", Kind: "text", Required: true, Placeholder: "exports/{{ .ds }}/orders.csv", Help: "Templates work. The extension is added when the name has none."},
+			{Name: "format", Label: "Format", Kind: "select", Options: []string{"", "csv", "tsv", "json", "ndjson"}, Help: "csv (default, with a header row), tsv, json (one array) or ndjson (one object per line)"},
+			{Name: "columns", Label: "Columns", Kind: "list", Help: "Optional order for csv; default: all fields, sorted"},
+			{Name: "delimiter", Label: "CSV delimiter", Kind: "text", Placeholder: ","},
+			{Name: "gzip", Label: "Compress (gzip)", Kind: "bool", Help: ".gz is added to the name"},
+			{Name: "rows_from", Label: "Read rows from", Kind: "upstream", Help: "Default: the only connected node before this one"},
+			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default (service account, needs write access to the bucket)"},
+		}},
+	{Type: "s3_write", Operator: "s3_write", Label: "Amazon S3 dump", Category: "Destinations", Icon: "cloud", NeedsInput: true,
+		Description: "Write the rows from the node before it to a file in an S3 bucket (or MinIO, R2 and other S3 compatible stores).",
+		Fields: []NodeField{
+			{Name: "bucket", Label: "Bucket", Kind: "text", Required: true},
+			{Name: "key", Label: "Object key", Kind: "text", Required: true, Placeholder: "exports/{{ .ds }}/orders.csv", Help: "Templates work. The extension is added when the key has none."},
+			{Name: "region", Label: "Region", Kind: "text", Placeholder: "from the connection, else us-east-1"},
+			{Name: "format", Label: "Format", Kind: "select", Options: []string{"", "csv", "tsv", "json", "ndjson"}, Help: "csv (default, with a header row), tsv, json (one array) or ndjson (one object per line)"},
+			{Name: "columns", Label: "Columns", Kind: "list", Help: "Optional order for csv; default: all fields, sorted"},
+			{Name: "delimiter", Label: "CSV delimiter", Kind: "text", Placeholder: ","},
+			{Name: "gzip", Label: "Compress (gzip)", Kind: "bool", Help: ".gz is added to the name"},
+			{Name: "rows_from", Label: "Read rows from", Kind: "upstream", Help: "Default: the only connected node before this one"},
+			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: aws_default. Config: access_key_id, secret_access_key, session_token, region, endpoint_url (MinIO, R2…)"},
 		}},
 	{Type: "trigger_dagrun", Operator: "trigger_dagrun", Label: "Trigger another DAG", Category: "Control", Icon: "play",
 		Description: "Start a run of another DAG, optionally waiting for it.",
@@ -570,6 +617,9 @@ func (g *Graph) Validate() ([]byte, []GraphIssue) {
 		}
 		if nt.NeedsInput && incoming[n.ID] > 1 && !hasValue(n.Config, "input") && !hasValue(n.Config, "rows_from") {
 			add(n.ID, "several nodes are connected here: choose which one provides the rows")
+		}
+		if nt.MinInputs > 0 && incoming[n.ID] < nt.MinInputs && !hasValue(n.Config, "inputs") {
+			add(n.ID, fmt.Sprintf("connect at least %d nodes to combine", nt.MinInputs))
 		}
 		if err := yt.checkBuild(); err != nil {
 			add(n.ID, err.Error())

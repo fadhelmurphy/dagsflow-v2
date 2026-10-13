@@ -84,6 +84,19 @@ type yamlTask struct {
 	Columns       []string `yaml:"columns"`
 	WriteMode     string   `yaml:"write_mode"`
 	UserEntered   bool     `yaml:"user_entered"`
+	KeepHeaders   bool     `yaml:"keep_headers"` // gsheet_read / file_read
+	File          string   `yaml:"file"`         // file_read
+	Format        string   `yaml:"format"`
+	Sheet         string   `yaml:"sheet"`
+	Delimiter     string   `yaml:"delimiter"`
+	Inputs        []string `yaml:"inputs"` // merge
+	On            []string `yaml:"on"`
+	JoinType      string   `yaml:"join_type"`
+	Bucket        string   `yaml:"bucket"` // gcs_write / s3_write
+	Object        string   `yaml:"object"`
+	Key           string   `yaml:"key"`
+	Region        string   `yaml:"region"`
+	Gzip          bool     `yaml:"gzip"`
 
 	TriggerDagID string         `yaml:"trigger_dag_id"` // trigger_dagrun
 	Conf         map[string]any `yaml:"conf"`
@@ -321,11 +334,22 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			Dataset: yt.Dataset, Table: yt.Table, RowsFrom: yt.RowsFrom}, opts...)
 	case "gsheet_read":
 		d.NewGSheetReadTask(yt.ID, GSheetReadConfig{ConnID: yt.ConnID, SpreadsheetID: yt.SpreadsheetID,
-			Range: yt.Range, NoHeader: yt.NoHeader, Limit: yt.Limit}, opts...)
+			Range: yt.Range, NoHeader: yt.NoHeader, KeepHeaders: yt.KeepHeaders, Limit: yt.Limit}, opts...)
 	case "gsheet_write":
 		d.NewGSheetWriteTask(yt.ID, GSheetWriteConfig{ConnID: yt.ConnID, SpreadsheetID: yt.SpreadsheetID,
 			Range: yt.Range, RowsFrom: yt.RowsFrom, Mode: yt.WriteMode, Columns: yt.Columns,
 			UserEntered: yt.UserEntered}, opts...)
+	case "file_read":
+		d.NewFileReadTask(yt.ID, FileReadConfig{File: yt.File, Format: yt.Format, Sheet: yt.Sheet, Range: yt.Range,
+			Delimiter: yt.Delimiter, NoHeader: yt.NoHeader, KeepHeaders: yt.KeepHeaders, Limit: yt.Limit}, opts...)
+	case "gcs_write":
+		d.NewGCSWriteTask(yt.ID, StoreWriteConfig{ConnID: yt.ConnID, Bucket: yt.Bucket, Object: yt.Object, Format: yt.Format,
+			Columns: yt.Columns, Delim: yt.Delimiter, Gzip: yt.Gzip, RowsFrom: yt.RowsFrom}, opts...)
+	case "s3_write":
+		d.NewS3WriteTask(yt.ID, StoreWriteConfig{ConnID: yt.ConnID, Bucket: yt.Bucket, Object: firstNonEmpty(yt.Key, yt.Object),
+			Region: yt.Region, Format: yt.Format, Columns: yt.Columns, Delim: yt.Delimiter, Gzip: yt.Gzip, RowsFrom: yt.RowsFrom}, opts...)
+	case "merge":
+		d.NewMergeTask(yt.ID, MergeConfig{Mode: yt.Mode, Inputs: yt.Inputs, On: yt.On, JoinType: yt.JoinType}, opts...)
 	case "transform":
 		d.NewTransformTask(yt.ID, TransformConfig{Input: yt.Input, Steps: yt.Steps}, opts...)
 	case "trigger_dagrun":
@@ -353,7 +377,7 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			d.NewHTTPSensor(yt.ID, yt.httpReq(), cfg, opts...)
 		}
 	default:
-		return fmt.Errorf("unknown operator %q (empty, bash, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor)", yt.Operator)
+		return fmt.Errorf("unknown operator %q (empty, bash, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, gcs_write, s3_write, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor)", yt.Operator)
 	}
 	return nil
 }

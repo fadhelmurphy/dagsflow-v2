@@ -319,7 +319,7 @@ func sheetURL(id, rng, suffix string) string {
 // GSheetReadConfig: read a range into rows.
 type GSheetReadConfig struct {
 	ConnID, SpreadsheetID, Range string
-	NoHeader                     bool
+	NoHeader, KeepHeaders        bool
 	Limit                        int
 }
 
@@ -351,7 +351,7 @@ func (d *DAG) NewGSheetReadTask(id string, cfg GSheetReadConfig, opts ...TaskOpt
 		if err := googleCall(ctx, conn, scopeSheetsRead, "GET", u, nil, &res); err != nil {
 			return err
 		}
-		rows := sheetRows(res.Values, !cfg.NoHeader)
+		rows := sheetRows(res.Values, !cfg.NoHeader, !cfg.KeepHeaders)
 		if len(rows) > cfg.Limit {
 			ctx.Logf("WARNING: sheet cut at %d rows (set a higher limit)", cfg.Limit)
 			rows = rows[:cfg.Limit]
@@ -361,53 +361,8 @@ func (d *DAG) NewGSheetReadTask(id string, cfg GSheetReadConfig, opts ...TaskOpt
 	}, opts...)
 }
 
-func sheetRows(values [][]any, header bool) []any {
-	out := []any{}
-	if len(values) == 0 {
-		return out
-	}
-	width := 0
-	for _, r := range values {
-		width = max(width, len(r))
-	}
-	var cols []string
-	body := values
-	if header {
-		seen := map[string]int{}
-		for i := 0; i < width; i++ {
-			name := ""
-			if i < len(values[0]) {
-				name = strings.TrimSpace(fmt.Sprint(values[0][i]))
-			}
-			if name == "" || name == "<nil>" {
-				name = "col_" + strconv.Itoa(i+1)
-			}
-			if n := seen[name]; n > 0 {
-				seen[name]++
-				name = fmt.Sprintf("%s_%d", name, n+1)
-			} else {
-				seen[name] = 1
-			}
-			cols = append(cols, name)
-		}
-		body = values[1:]
-	} else {
-		for i := 0; i < width; i++ {
-			cols = append(cols, "col_"+strconv.Itoa(i+1))
-		}
-	}
-	for _, r := range body {
-		obj := map[string]any{}
-		for i, c := range cols {
-			if i < len(r) {
-				obj[c] = r[i]
-			} else {
-				obj[c] = ""
-			}
-		}
-		out = append(out, obj)
-	}
-	return out
+func sheetRows(values [][]any, header, normalize bool) []any {
+	return tableRows(values, header, normalize)
 }
 
 // GSheetWriteConfig: append the upstream rows to a sheet, or replace its content.
