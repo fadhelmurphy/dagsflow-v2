@@ -6,6 +6,10 @@ whose state is persisted, so runs can be rerun, cleared, backfilled and resumed 
 
 ![dagsflow demo: DAG list, grid, mapped task logs, graph, trigger and roles](docs/demo.gif)
 
+**Visual builder**: build an ETL by drag and drop (Postgres, BigQuery, Google Sheets, HTTP, no-code transforms); it saves a normal YAML DAG.
+
+![dagsflow builder: drag and drop nodes, connect, run, BigQuery to Google Sheets](docs/builder-demo.gif)
+
 ## Concepts (Airflow equivalents)
 
 | Airflow                          | dagsflow-go                                       |
