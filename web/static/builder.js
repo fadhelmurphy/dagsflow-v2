@@ -729,6 +729,8 @@ function runSummaryHtml() {
     ${tis.map(([id, ti]) => `<div style="font-size:12.5px;margin-bottom:3px"><span class="bld-pill" style="background:var(--s-${ti.state || "none"});${ti.state === "none" || !ti.state ? "color:#333;border:1px solid #ccc" : ""}">${esc(ti.state || "none")}</span> ${esc(id)}</div>`).join("")}</details>`;
 }
 
+const issHtml = iss => iss.map(i => `<div class="iss ${i.warning ? "w" : "e"}" style="cursor:default">${esc(i.message)}</div>`).join("");
+
 function nodePanel(n) {
   if (!n) return "";
   const t = typeOf(n.type);
@@ -736,7 +738,7 @@ function nodePanel(n) {
   const iss = B.issues.filter(i => i.node === n.id);
   return `<fieldset ${ro} style="border:0;padding:0;margin:0"><div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><span class="bp-ic" style="background:${colorOf(n.type)};width:32px;height:32px">${icon(t.icon)}</span><div><h3 style="margin:0">${esc(t.label)}</h3><div class="sub" style="font-size:12px">${esc(t.category)}</div></div></div>
     <p class="desc">${esc(t.description)}</p>
-    ${iss.map(i => `<div class="iss ${i.warning ? "w" : "e"}" style="cursor:default">${esc(i.message)}</div>`).join("")}
+    <div id="bnissues">${issHtml(iss)}</div>
     <div class="bf"><label>Node id</label><input data-sact="rename" id="bnid" value="${esc(n.id)}" spellcheck="false"><div class="help">Reference its output with <code>{{ xcom_pull "${esc(n.id)}" "return_value" }}</code></div></div>
     ${(t.fields || []).map(f => fieldHtml(f, n.config, "cfg", n.id)).join("")}
     <details><summary>Settings: retries, timeout, alerts…</summary>${CAT.common.map(f => fieldHtml(f, n.config, "cfg", n.id)).join("")}</details>
@@ -883,7 +885,12 @@ async function validate() {
   } catch (x) { /* offline: ignore */ }
 }
 function refreshSideSoft() { // re-render the side panel unless the user is typing in it
-  const side = $("#bside"); if (!side || (side.contains(document.activeElement) && document.activeElement.matches("input,textarea,select"))) return;
+  const side = $("#bside"); if (!side) return;
+  if (side.contains(document.activeElement) && document.activeElement.matches("input,textarea,select")) {
+    const box = $("#bnissues", side); // typing: only refresh the problem list, not the form
+    if (box && B.sel && B.sel.k === "node") box.innerHTML = issHtml(B.issues.filter(i => i.node === B.sel.id));
+    return;
+  }
   renderSide();
 }
 

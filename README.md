@@ -416,11 +416,11 @@ Credentials come from the `google_cloud_default` connection (or `conn_id`): `cre
 
 ## Visual workflow builder (drag and drop)
 
-![Visual workflow builder: drag nodes, connect, configure, run](docs/builder-demo.gif)
+![Visual workflow builder: drag nodes, connect, configure, run; BigQuery to Google Sheets](docs/builder-demo.gif)
 
 **Builder** in the top menu (permission `builder.edit`, Admin by default). Drag nodes from the palette onto the canvas (or click one to add it after the selected node), drag from a node's right port to another node to connect them, and fill in the side panel. Dropping a connection on an empty spot opens a node picker.
 
-- **Nodes**: HTTP request, Postgres query / insert, Transform rows, BigQuery SQL, Shell command, Trigger another DAG, No-op, and four sensors. Every node also has retries, timeout, trigger rule, pool, dataset outlets, failure alerts and *run once per item* (dynamic mapping).
+- **Nodes**: HTTP request, Postgres query / insert, BigQuery read rows / insert rows / SQL, Google Sheets read / write, Transform rows, Shell command, Trigger another DAG, No-op, and four sensors. Every node also has retries, timeout, trigger rule, pool, dataset outlets, failure alerts and *run once per item* (dynamic mapping).
 - **Live validation**: missing fields, bad durations, loops and unknown connections are flagged on the node while you edit; saving is refused while there are errors.
 - **Save & Run** saves, triggers a run and colours the nodes by state; select a node to see its output rows, error and log.
 - **Undo/redo**, auto-arrange, fit view, duplicate (`Ctrl+D`), delete, `Ctrl+S`. Unsaved edits survive an accidental reload (kept in the browser) and leaving the page asks first.
