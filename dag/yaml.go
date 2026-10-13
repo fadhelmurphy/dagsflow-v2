@@ -68,6 +68,23 @@ type yamlTask struct {
 	Body         string            `yaml:"body"`
 	ExpectStatus []int             `yaml:"expect_status"`
 
+	Table      string          `yaml:"table"` // postgres (+ sql, conn_id)
+	RowsFrom   string          `yaml:"rows_from"`
+	Limit      int             `yaml:"limit"`
+	OnConflict string          `yaml:"on_conflict"`
+	Input      string          `yaml:"input"` // transform
+	Steps      []TransformStep `yaml:"steps"`
+
+	ProjectID     string   `yaml:"project_id"` // bigquery_* / gsheet_*
+	Location      string   `yaml:"location"`
+	Dataset       string   `yaml:"dataset"`
+	SpreadsheetID string   `yaml:"spreadsheet_id"`
+	Range         string   `yaml:"range"`
+	NoHeader      bool     `yaml:"no_header"`
+	Columns       []string `yaml:"columns"`
+	WriteMode     string   `yaml:"write_mode"`
+	UserEntered   bool     `yaml:"user_entered"`
+
 	TriggerDagID string         `yaml:"trigger_dag_id"` // trigger_dagrun
 	Conf         map[string]any `yaml:"conf"`
 	Wait         bool           `yaml:"wait_for_completion"`
@@ -97,6 +114,9 @@ type yamlDAG struct {
 	OnFailure     []string       `yaml:"on_failure"`
 	OnSLAMiss     []string       `yaml:"on_sla_miss"`
 	Tasks         []yamlTask     `yaml:"tasks"`
+
+	// Layout is written by the visual builder (node positions); ignored here.
+	Layout map[string]any `yaml:"layout"`
 }
 
 func dur(s string) (time.Duration, error) {
@@ -290,6 +310,24 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 		d.NewBigQueryTask(yt.ID, file, params, opts...)
 	case "http":
 		d.NewHTTPTask(yt.ID, yt.httpReq(), opts...)
+	case "postgres":
+		d.NewPostgresTask(yt.ID, PostgresConfig{ConnID: yt.ConnID, SQL: yt.SQL, Table: yt.Table,
+			RowsFrom: yt.RowsFrom, Limit: yt.Limit, OnConflict: yt.OnConflict}, opts...)
+	case "bigquery_query":
+		d.NewBigQueryQueryTask(yt.ID, BigQueryQueryConfig{ConnID: yt.ConnID, ProjectID: yt.ProjectID,
+			Location: yt.Location, SQL: yt.SQL, Limit: yt.Limit}, opts...)
+	case "bigquery_insert":
+		d.NewBigQueryInsertTask(yt.ID, BigQueryInsertConfig{ConnID: yt.ConnID, ProjectID: yt.ProjectID,
+			Dataset: yt.Dataset, Table: yt.Table, RowsFrom: yt.RowsFrom}, opts...)
+	case "gsheet_read":
+		d.NewGSheetReadTask(yt.ID, GSheetReadConfig{ConnID: yt.ConnID, SpreadsheetID: yt.SpreadsheetID,
+			Range: yt.Range, NoHeader: yt.NoHeader, Limit: yt.Limit}, opts...)
+	case "gsheet_write":
+		d.NewGSheetWriteTask(yt.ID, GSheetWriteConfig{ConnID: yt.ConnID, SpreadsheetID: yt.SpreadsheetID,
+			Range: yt.Range, RowsFrom: yt.RowsFrom, Mode: yt.WriteMode, Columns: yt.Columns,
+			UserEntered: yt.UserEntered}, opts...)
+	case "transform":
+		d.NewTransformTask(yt.ID, TransformConfig{Input: yt.Input, Steps: yt.Steps}, opts...)
 	case "trigger_dagrun":
 		if yt.TriggerDagID == "" {
 			return errors.New("trigger_dagrun needs trigger_dag_id")
@@ -315,7 +353,7 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			d.NewHTTPSensor(yt.ID, yt.httpReq(), cfg, opts...)
 		}
 	default:
-		return fmt.Errorf("unknown operator %q (empty, bash, bigquery, http, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor)", yt.Operator)
+		return fmt.Errorf("unknown operator %q (empty, bash, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor)", yt.Operator)
 	}
 	return nil
 }

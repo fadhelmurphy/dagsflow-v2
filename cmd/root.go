@@ -344,7 +344,19 @@ func newWebServer(st *engine.Store) *web.Server {
 		fmt.Println("[webserver] no users defined: auth disabled (localhost only). Create one with `users create` to enable RBAC.")
 	}
 	st.Register("webserver", map[string]any{"addr": webAddr})
-	return &web.Server{Store: st, Reparse: reparseDag, TLSCert: tlsCert, TLSKey: tlsKey}
+	return &web.Server{Store: st, Reparse: reparseDag, TLSCert: tlsCert, TLSKey: tlsKey,
+		BuilderDir: filepath.Join(dagsFolder(), "builder"), Reload: reloadSource}
+}
+
+// reloadSource re-reads one DAG file in this process right away and asks the
+// other processes to do the same (used by the visual builder after a save).
+func reloadSource(path string) error {
+	dag.InvalidateYAML(path)
+	if err := newStore().RequestReparse(path); err != nil {
+		return err
+	}
+	loadDags()
+	return nil
 }
 
 func isLoopback(addr string) bool {

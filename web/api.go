@@ -42,6 +42,13 @@ type Server struct {
 	// processes (scheduler) to do the same. Set by the CLI.
 	Reparse func(d *dag.DAG) error
 
+	// Visual builder: where workflows are stored and how to reload the DAG
+	// folder (and tell the other processes). Set by the CLI.
+	BuilderDir string
+	Reload     func(path string) error
+
+	builderMu sync.Mutex
+
 	// TLSCert/TLSKey: serve HTTPS.
 	TLSCert, TLSKey string
 
@@ -130,6 +137,12 @@ func (s *Server) Handler() http.Handler {
 		{"PATCH /api/v1/users/{user}", engine.ActUsersManage, s.patchUser},
 		{"DELETE /api/v1/users/{user}", engine.ActUsersManage, s.deleteUser},
 		{"POST /api/v1/users/{user}/tokens", engine.ActUsersManage, s.issueToken},
+		{"GET /api/v1/builder/nodes", engine.ActBuilderEdit, s.builderNodes},
+		{"GET /api/v1/builder/workflows", engine.ActBuilderEdit, s.builderList},
+		{"POST /api/v1/builder/validate", engine.ActBuilderEdit, s.builderValidate},
+		{"GET /api/v1/builder/workflows/{dag}", engine.ActBuilderEdit, s.builderGet},
+		{"PUT /api/v1/builder/workflows/{dag}", engine.ActBuilderEdit, s.builderPut},
+		{"DELETE /api/v1/builder/workflows/{dag}", engine.ActBuilderEdit, s.builderDelete},
 	}
 	for _, rt := range routes {
 		mux.Handle(rt.pattern, s.require(rt.perm, rt.h))

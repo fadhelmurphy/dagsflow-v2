@@ -290,7 +290,7 @@ dialog .row{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:8px 16px;border-radius:6px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
 #toast.show{opacity:1}
 .empty{padding:40px;text-align:center;color:var(--muted)}
-body:not(.can-users-manage) .needs-users-manage, body:not(.can-roles-manage) .needs-roles-manage, body:not(.can-pools-read) .needs-pools-read, body:not(.can-pools-edit) .needs-pools-edit, body:not(.can-variables-read) .needs-variables-read, body:not(.can-variables-edit) .needs-variables-edit, body:not(.can-connections-read) .needs-connections-read, body:not(.can-connections-edit) .needs-connections-edit, body:not(.can-events-read) .needs-events-read, body:not(.can-datasets-read) .needs-datasets-read, body:not(.can-system-read) .needs-system-read{display:none!important}
+body:not(.can-users-manage) .needs-users-manage, body:not(.can-roles-manage) .needs-roles-manage, body:not(.can-pools-read) .needs-pools-read, body:not(.can-pools-edit) .needs-pools-edit, body:not(.can-variables-read) .needs-variables-read, body:not(.can-variables-edit) .needs-variables-edit, body:not(.can-connections-read) .needs-connections-read, body:not(.can-connections-edit) .needs-connections-edit, body:not(.can-events-read) .needs-events-read, body:not(.can-datasets-read) .needs-datasets-read, body:not(.can-system-read) .needs-system-read, body:not(.can-builder-edit) .needs-builder-edit{display:none!important}
 .forbid{display:none!important}
 .adminForm{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;padding:14px;border-top:1px solid #E7EBEF}
 .adminForm label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:3px}
@@ -369,6 +369,7 @@ td .toggle{margin-left:4px}
   <a class="brand" href="#/"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><path d="M7 8 L13 18 M19 8 L13 18 M7 8 L19 8" stroke="#8FA3B8" stroke-width="2" fill="none"/><circle cx="7" cy="8" r="4" fill="#0F6FDE"/><circle cx="19" cy="8" r="4" fill="#2E9B57"/><circle cx="13" cy="19" r="4.5" fill="#F0A020"/></svg>dagsflow</a>
   <nav class="menu" aria-label="Main">
     <a href="#/" data-nav="dags">DAGs</a>
+    <a class="needs-builder-edit" href="#/builder" data-nav="builder">Builder</a>
     <a class="needs-datasets-read" href="#/admin?tab=datasets" data-nav="datasets">Datasets</a>
     <div class="dd" data-nav="security"><button type="button" aria-haspopup="true">Security</button><div class="ddm"><a class="needs-users-manage" href="#/admin?tab=users">List Users</a><a href="#/admin?tab=roles">List Roles</a></div></div>
     <div class="dd" data-nav="browse"><button type="button" aria-haspopup="true">Browse</button><div class="ddm"><a href="#/admin?tab=tis">Task Instances</a><a class="needs-events-read" href="#/admin?tab=events">Event Log</a><a class="needs-system-read" href="#/admin?tab=errors">DAG Import Errors</a></div></div>
@@ -644,6 +645,7 @@ function dagTopHtml(d){
       <span class="grow"></span>
       <span class="hbadge" id="hSched"></span><span class="hbadge" id="hNext"></span>
       <div class="acts">
+        ${/\.ya?ml$/i.test(d.file||"") ? `<a class="btn sm needs-builder-edit" href="#/builder/${enc(d.dag_id)}" title="Open this YAML DAG in the visual builder" style="padding:3px 9px;font-size:12.5px">Open in builder</a>` : ""}
         <button class="${dp(d,"trigger")}" data-trigger="${esc(d.dag_id)}" title="Trigger DAG" aria-label="Trigger DAG">${ICON.play}</button>
         <button class="${dp(d,"edit")}" id="reparseBtn" title="Reparse DAG" aria-label="Reparse DAG">${PI.reparse}</button>
         <span class="off${dp(d,"edit")}" id="reparseOff" title="Compiled into the binary (builtin_dags/): rebuild to change it" hidden>${PI.reparse}</span>
@@ -1547,13 +1549,18 @@ document.addEventListener("keydown", e=>{
   if((e.key==="Enter"||e.key===" ") && e.target.matches("g.node")){ e.preventDefault(); e.target.dispatchEvent(new MouseEvent("click",{bubbles:true})); }
 });
 
+function loadScript(src){ return new Promise((ok,bad)=>{ if(window.Builder) return ok(); const el=document.createElement("script"); el.src=src; el.onload=ok; el.onerror=()=>bad(new Error("Could not load the workflow builder")); document.head.appendChild(el); }); }
+async function viewBuilder(arg, q){ await loadScript("/builder.js"); await window.Builder.view(arg, q); }
+
 async function render(){
   const {parts, q} = route();
   try{
     const tab = q.get("tab")||"pools";
-    const navKey = parts[0]!=="admin" ? "dags" : tab==="datasets" ? "datasets" : ["users","roles"].includes(tab) ? "security" : ["errors","events","tis"].includes(tab) ? "browse" : "admin";
+    const navKey = parts[0]==="builder" ? "builder" : parts[0]!=="admin" ? "dags" : tab==="datasets" ? "datasets" : ["users","roles"].includes(tab) ? "security" : ["errors","events","tis"].includes(tab) ? "browse" : "admin";
     document.querySelectorAll("[data-nav]").forEach(n=>n.classList.toggle("on", n.dataset.nav===navKey));
-    if(parts[0]==="dags" && parts[1] && parts[2]==="ti") await viewTI(parts[1], q);
+    if(parts[0]!=="builder") window.Builder?.leave?.();
+    if(parts[0]==="builder"){ current=null; await viewBuilder(parts[1], q); }
+    else if(parts[0]==="dags" && parts[1] && parts[2]==="ti") await viewTI(parts[1], q);
     else if(parts[0]==="dags" && parts[1]) await viewDag(parts[1], q);
     else if(parts[0]==="admin"){ current=null; await viewAdmin(q.get("tab")||"pools"); }
     else { current=null; await viewList(); }
@@ -1561,11 +1568,12 @@ async function render(){
 }
 function refreshLoop(){ // live refresh, paused while the user is in a dialog or has text selected
   clearInterval(refreshTimer);
-  refreshTimer = setInterval(()=>{ if(!autoRefresh() || document.querySelector(".noteEdit") || document.querySelector(".dd.open") || document.hidden || document.querySelector("dialog[open]") || String(getSelection()) || document.activeElement?.closest?.(".adminForm")) return;
+  refreshTimer = setInterval(()=>{ if(!autoRefresh() || route().parts[0]==="builder" || document.querySelector(".noteEdit") || document.querySelector(".dd.open") || document.hidden || document.querySelector("dialog[open]") || String(getSelection()) || document.activeElement?.closest?.(".adminForm")) return;
     const y = scrollY; render().then(()=>scrollTo(0,y)); health(); }, 4000);
 }
 let lastPath = location.hash.split("?")[0];
-window.addEventListener("hashchange", ()=>{ const p = location.hash.split("?")[0]; if(p!==lastPath) scrollTo(0,0); lastPath = p; render(); });
+window.addEventListener("hashchange", ev=>{ if(window.builderGuard && !window.builderGuard()){ history.replaceState(null,"",ev.oldURL); return; }
+  const p = location.hash.split("?")[0]; if(p!==lastPath) scrollTo(0,0); lastPath = p; render(); });
 async function whoami(){ Object.assign(ME, await api("/me"));
   const all = ME.permissions.includes("*");
   Object.entries(ME.can||{}).forEach(([k,v])=>document.body.classList.toggle("can-"+k.replace(".","-"), all || !!v));

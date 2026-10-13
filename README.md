@@ -268,6 +268,7 @@ Security → **List Roles**: built-in roles (Viewer, User, Op, Admin; read-only,
 | `pools.read`, `pools.edit`, `variables.read`, `variables.edit`, `connections.read`, `connections.edit` | Admin pages |
 | `events.read`, `datasets.read`, `system.read` | event log, datasets, import errors + components |
 | `users.manage`, `roles.manage` | manage users/tokens and roles |
+| `builder.edit` | use the visual builder (writes workflow files; treat like write access to DAG code) |
 
 DAG permissions take a *resource*:
 - `*` for every DAG,
@@ -282,7 +283,7 @@ DAG permissions take a *resource*:
 | Viewer | `dag.read:*`, pools/events/datasets/system read |
 | User | Viewer + `dag.edit:*`, `dag.trigger:*` |
 | Op | User + `dag.delete:*`, pools/variables/connections edit |
-| Admin | Op + `users.manage`, `roles.manage` |
+| Admin | Op + `users.manage`, `roles.manage`, `builder.edit` |
 
 ```bash
 dagsflow-go roles create --name sales-team --description "Sales pipelines" \
@@ -356,7 +357,80 @@ tasks:
     outlets: [bq://proj.dw.sales]
 ```
 
-Operators: `empty`, `bash`, `bigquery`, `http`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`. Custom logic needs a Go DAG.
+Operators: `empty`, `bash`, `bigquery`, `http`, `postgres`, `transform`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`. Custom logic needs a Go DAG.
+
+ETL operators (rows travel between tasks as the XCom `return_value`, a JSON array of objects):
+
+```yaml
+tasks:
+  - id: fetch
+    operator: http
+    url: "https://api.example.com/orders?date={{ .ds }}"
+  - id: shape
+    operator: transform                # no-code steps, run top to bottom
+    upstream: [fetch]                  # reads the only upstream task (or set `input: fetch`)
+    steps:
+      - {op: extract, path: data}      # dot path into the JSON response
+      - {op: filter, field: status, cmp: "==", value: paid}
+      - {op: set, field: loaded_at, value: "{{ .ds }}"}   # {{ .row.name }} works too
+      - {op: select, fields: [id, total, loaded_at]}
+  - id: load
+    operator: postgres                 # table = insert the upstream rows (one transaction)
+    conn_id: warehouse
+    table: public.orders
+    on_conflict: do_nothing            # optional
+    upstream: [shape]
+  - id: check
+    operator: postgres                 # sql = run a statement, returned rows are the output
+    conn_id: warehouse
+    sql: "SELECT count(*) AS n FROM public.orders"
+    limit: 10000                       # max rows kept (default 10000)
+    upstream: [load]
+```
+
+`transform` steps: `extract`, `select`, `drop`, `rename`, `filter` (`== != > >= < <= contains exists not_exists`), `set`, `sort`, `limit`, `dedupe`. A Postgres connection holds either `uri` (`postgres://user:pass@host/db`) or `host`, `port`, `login`, `password`, `database`, `sslmode`. Note that an `http` response is stored up to 64 KB, so use it for API pages, not bulk exports.
+
+BigQuery and Google Sheets as source or destination (plain REST, no extra dependencies):
+
+```yaml
+  - id: read_bq
+    operator: bigquery_query           # rows -> JSON array (limit default 10000)
+    sql: SELECT id, name FROM `proj.ds.users` WHERE d = '{{ .ds }}'
+  - id: to_sheet
+    operator: gsheet_write             # write_mode: append (default) | overwrite
+    spreadsheet_id: https://docs.google.com/spreadsheets/d/<id>/edit
+    range: Sheet1
+    upstream: [read_bq]
+  - id: from_sheet
+    operator: gsheet_read              # first row = header; no_header: true for col_1, col_2…
+    spreadsheet_id: <id>
+    range: Sheet1!A1:F
+  - id: to_bq
+    operator: bigquery_insert          # streaming insert into an existing table
+    dataset: ds
+    table: users
+    upstream: [from_sheet]
+```
+
+Credentials come from the `google_cloud_default` connection (or `conn_id`): `credentials_path` or `credentials_json` of a service account, else `GOOGLE_APPLICATION_CREDENTIALS`, else the GCE/GKE metadata server. Share the sheet with the service account's email. These four operators are covered by tests against a fake Google API, not yet against a real GCP project.
+
+## Visual workflow builder (drag and drop)
+
+![Visual workflow builder: drag nodes, connect, configure, run](docs/builder-demo.gif)
+
+**Builder** in the top menu (permission `builder.edit`, Admin by default). Drag nodes from the palette onto the canvas (or click one to add it after the selected node), drag from a node's right port to another node to connect them, and fill in the side panel. Dropping a connection on an empty spot opens a node picker.
+
+- **Nodes**: HTTP request, Postgres query / insert, Transform rows, BigQuery SQL, Shell command, Trigger another DAG, No-op, and four sensors. Every node also has retries, timeout, trigger rule, pool, dataset outlets, failure alerts and *run once per item* (dynamic mapping).
+- **Live validation**: missing fields, bad durations, loops and unknown connections are flagged on the node while you edit; saving is refused while there are errors.
+- **Save & Run** saves, triggers a run and colours the nodes by state; select a node to see its output rows, error and log.
+- **Undo/redo**, auto-arrange, fit view, duplicate (`Ctrl+D`), delete, `Ctrl+S`. Unsaved edits survive an accidental reload (kept in the browser) and leaving the page asks first.
+- Workflows are saved as ordinary YAML DAGs in `<dags folder>/builder/<id>.yaml` (node positions in a `layout:` block), so the scheduler, executors, RBAC, Grid and Graph views treat them like any other DAG, and you can edit the YAML by hand. New scheduled workflows start **paused**: switch them on in the builder.
+- Hand-written YAML DAGs open read-only (**Open in builder** on the DAG page); **Make an editable copy** saves a builder copy under a new id. The builder edits one DAG per file and cannot open Go DAGs.
+- Saving needs `builder.edit` plus `dag.edit` on that DAG id. Two people editing the same workflow: the second save is refused (`409`) instead of overwriting.
+
+Security note: a workflow can run shell commands and SQL on your workers, so `builder.edit` is as powerful as write access to DAG files. Keep it for people you would trust with that. In a multi-host setup the webserver writes into the DAG folder, so it must be a volume shared with the scheduler and workers (new or changed files are picked up within ~2 s).
+
+API (all need `builder.edit`): `GET /builder/nodes`, `GET /builder/workflows`, `GET|PUT|DELETE /builder/workflows/{dag}`, `POST /builder/validate`. A workflow is `{"dag_id", "settings": {schedule, tags, ...}, "nodes": [{id, type, x, y, config}], "edges": [{from, to}]}`.
 
 ## More Airflow features
 
@@ -482,6 +556,7 @@ dagsflow-go webserver --addr 0.0.0.0:8080   # several replicas behind a load bal
 - Go tasks run as goroutines; a task that ignores `ctx` keeps running after a timeout. Bash tasks are killed as a process group. On workers/pods, cancellation from the scheduler also relies on `ctx`.
 - With the JSON store only one scheduler may run (enforced with a lock file). HA, workers and pods need Postgres.
 - Login rate limiting is kept per webserver process (not shared between replicas).
+- The visual builder has no "run this node only" or data preview before a run yet, and no branching/IF node (use a Go DAG for branches). `http` outputs are cut at 64 KB.
 
 ## Connections
 

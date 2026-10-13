@@ -33,6 +33,7 @@ const (
 	ActSystemRead  = "system.read"   // import errors, components
 	ActUsersManage = "users.manage"
 	ActRolesManage = "roles.manage"
+	ActBuilderEdit = "builder.edit" // visual builder: create/change/delete YAML workflows
 )
 
 // ActionInfo describes an action (for the role editor).
@@ -58,6 +59,7 @@ var Actions = []ActionInfo{
 	{ActSystemRead, "View import errors and components", false},
 	{ActUsersManage, "Manage users and API tokens", false},
 	{ActRolesManage, "Manage roles and permissions", false},
+	{ActBuilderEdit, "Use the visual builder (writes workflow files, can run shell commands and SQL: treat like write access to DAG code)", false},
 }
 
 func actionInfo(name string) (ActionInfo, bool) {
@@ -171,7 +173,7 @@ func builtinRoles() map[string]*RoleDef {
 	viewer := []string{ActDagRead, ActPoolsRead, ActEventsRead, ActDatasets, ActSystemRead}
 	user := append(append([]string{}, viewer...), ActDagEdit, ActDagTrigger)
 	op := append(append([]string{}, user...), ActDagDelete, ActPoolsEdit, ActVarsEdit, ActConnsEdit)
-	admin := append(append([]string{}, op...), ActUsersManage, ActRolesManage)
+	admin := append(append([]string{}, op...), ActUsersManage, ActRolesManage, ActBuilderEdit)
 	return map[string]*RoleDef{
 		string(RoleViewer): {Name: string(RoleViewer), Description: "Read-only access to every DAG", Permissions: all(viewer...), Builtin: true},
 		string(RoleUser):   {Name: string(RoleUser), Description: "Viewer + trigger, pause, clear and mark every DAG", Permissions: all(user...), Builtin: true},
