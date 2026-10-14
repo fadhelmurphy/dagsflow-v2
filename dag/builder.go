@@ -47,6 +47,10 @@ type NodeType struct {
 	NeedsInput bool `json:"needs_input,omitempty"`
 	// MinInputs: the node combines several upstream nodes (merge).
 	MinInputs int `json:"min_inputs,omitempty"`
+	// Custom marks nodes from builder/nodes/*.yaml or RegisterNodeType;
+	// Source is "yaml" or "go".
+	Custom bool   `json:"custom,omitempty"`
+	Source string `json:"source,omitempty"`
 }
 
 var sensorFields = []NodeField{
@@ -230,6 +234,9 @@ func nodeByType(t string) (NodeType, bool) {
 		if n.Type == t {
 			return n, true
 		}
+	}
+	if e, ok := lookupCustom(t); ok {
+		return e.nt, true
 	}
 	return NodeType{}, false
 }
@@ -416,6 +423,19 @@ func (g *Graph) taskMap(n GNode, nt NodeType) *ordered {
 	t.set("id", n.ID)
 	t.set("operator", nt.Operator)
 	cfg, _ := clean(n.Config).(map[string]any)
+	if nt.Custom {
+		t.set("node", nt.Type)
+		with := &ordered{}
+		for _, f := range nt.Fields {
+			if v, ok := cfg[f.Name]; ok {
+				with.set(f.Name, v)
+				delete(cfg, f.Name)
+			}
+		}
+		if len(with.keys) > 0 {
+			t.set("with", with)
+		}
+	}
 	for _, k := range sortedKeys(cfg) {
 		if k == "id" || k == "operator" || k == "upstream" {
 			continue
@@ -548,7 +568,7 @@ func (g *Graph) Validate() ([]byte, []GraphIssue) {
 		}
 		ids[n.ID] = true
 		if _, ok := nodeByType(n.Type); !ok {
-			add(n.ID, fmt.Sprintf("unknown node type %q", n.Type))
+			add(n.ID, fmt.Sprintf("node type %q is not defined (no builder/nodes/%s.yaml and not registered in Go): delete this node or define the type again", n.Type, n.Type))
 		}
 	}
 	seen := map[GEdge]bool{}
@@ -738,7 +758,17 @@ func ParseGraph(data []byte) (*Graph, error) {
 			op = "empty"
 		}
 		typ := ""
+		if op == "custom" {
+			// an undefined type still opens (shown as missing) so it can be removed
+			typ = str(t["node"])
+			if typ == "" {
+				return nil, fmt.Errorf("task %q: operator custom needs node: <type>", id)
+			}
+		}
 		for _, nt := range Nodes {
+			if op == "custom" {
+				break
+			}
 			if nt.Operator == op {
 				typ = nt.Type
 				if op == "postgres" && nt.Type == "postgres_query" && str(t["table"]) != "" {
@@ -754,6 +784,18 @@ func ParseGraph(data []byte) (*Graph, error) {
 		for k, v := range t {
 			switch k {
 			case "id", "operator", "upstream":
+			case "node":
+				if op != "custom" {
+					cfg[k] = v
+				}
+			case "with":
+				if w, ok := v.(map[string]any); ok && op == "custom" {
+					for wk, wv := range w {
+						cfg[wk] = wv
+					}
+				} else {
+					cfg[k] = v
+				}
 			default:
 				cfg[k] = v
 			}

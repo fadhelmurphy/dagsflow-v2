@@ -473,11 +473,51 @@ Credentials come from the `google_cloud_default` connection (or `conn_id`): `cre
 - Workflows are saved as ordinary YAML DAGs in `<dags folder>/builder/<id>.yaml` (node positions in a `layout:` block), so the scheduler, executors, RBAC, Grid and Graph views treat them like any other DAG, and you can edit the YAML by hand. New scheduled workflows start **paused**: switch them on in the builder.
 - **Several sources and loads**: connect as many nodes as you like; one node can feed several destinations. To use two sources together, connect both to a **Merge / join** node (union or a two-way join). Other nodes read one input, chosen under *Read rows from* when several are connected.
 - Hand-written YAML DAGs open read-only (**Open in builder** on the DAG page); **Make an editable copy** saves a builder copy under a new id. The builder edits one DAG per file and cannot open Go DAGs.
+- **Run actions per node**: after a run, select a node for **Re-run** (clears the task so the scheduler runs it again), **Mark success** / **Mark failed** and **Show log**, with *downstream / upstream / only failed* options. The run summary (no node selected) has **Re-run failed** and **Mark run success / failed**. They use the normal clear/mark APIs, so they need `dag.edit` on the DAG and are hidden in read-only workflows.
+- **Custom nodes**: see below.
 - Saving needs `builder.edit` plus `dag.edit` on that DAG id. Two people editing the same workflow: the second save is refused (`409`) instead of overwriting.
 
 Uploaded files are kept in `<dags folder>/builder/files/` (so that folder must be shared in a multi-host setup, like the workflows). Security note: a workflow can run shell commands and SQL on your workers, read any file the worker can read through the file node, and so `builder.edit` is as powerful as write access to DAG files. Keep it for people you would trust with that. In a multi-host setup the webserver writes into the DAG folder, so it must be a volume shared with the scheduler and workers (new or changed files are picked up within ~2 s).
 
-API (all need `builder.edit`): `GET /builder/nodes`, `GET /builder/workflows`, `GET|PUT|DELETE /builder/workflows/{dag}`, `POST /builder/validate`. A workflow is `{"dag_id", "settings": {schedule, tags, ...}, "nodes": [{id, type, x, y, config}], "edges": [{from, to}]}`.
+### Custom nodes (YAML, UI or Go)
+
+A custom node is your own palette entry. All three ways feed the same registry and appear under **Custom**.
+
+**1. YAML**: drop a file in `<dags folder>/builder/nodes/<type>.yaml` (picked up within ~2 s, no restart):
+
+```yaml
+type: slack_message
+label: Slack message
+description: Post a message to a Slack webhook
+operator: http            # the built-in operator it runs as
+fields:                   # the form the user fills in
+  - {name: text, label: Message, kind: text, required: true}
+  - {name: channel, label: Channel, kind: text}
+template:                 # operator settings; ${field} is replaced by the node's value
+  method: POST
+  url: https://hooks.slack.com/services/XXX
+  body: '{"text": "${text}", "channel": "${channel}"}'
+```
+
+A value that is exactly `${field}` keeps its type (number, list) and an empty one drops the key; unknown names such as a shell `${HOME}` are left alone. Field kinds: `text`, `code`, `number`, `bool`, `select`, `list`, `kv`, `json`, `conn`.
+
+**2. UI**: **+ Create node** under the palette (or *edit definition* on a custom node) writes that same file. Deleting a node opens a dialog listing every workflow that uses it; if you confirm, those nodes (and their connections) are removed from all of them, and a workflow left with no other node is deleted. Over the API, `DELETE` answers `409` with the list unless you pass `?force=1`; `GET /builder/custom-nodes/{type}/usage` returns the list.
+
+**3. Go**: register a type with real code before the scheduler / webserver start (for example in `main.go`):
+
+```go
+dag.RegisterNodeType(dag.NodeType{
+    Type: "go_ping", Label: "Ping host",
+    Fields: []dag.NodeField{{Name: "host", Label: "Host", Kind: "text", Required: true}},
+}, func(d *dag.DAG, id string, with map[string]any, opts ...dag.TaskOption) error {
+    d.NewTask(id, func(ctx *dag.TaskContext) error { /* ping with["host"] */ return nil }, opts...)
+    return nil
+})
+```
+
+In a workflow file the node is stored as `operator: custom`, `node: <type>`, `with: {...}`, plus the usual common settings (retries, timeout...). If a workflow uses a type that is not defined any more (YAML file removed, or no longer registered in Go), the DAG shows an import error naming it, and the builder still opens the workflow with that node marked red as missing: delete it and save. YAML and UI nodes are as powerful as the operator they wrap (a `bash` template runs shell commands), so treat `builder.edit` accordingly.
+
+API (all need `builder.edit`): `GET|PUT|DELETE /builder/custom-nodes/{type}`, `GET /builder/nodes`, `GET /builder/workflows`, `GET|PUT|DELETE /builder/workflows/{dag}`, `POST /builder/validate`. A workflow is `{"dag_id", "settings": {schedule, tags, ...}, "nodes": [{id, type, x, y, config}], "edges": [{from, to}]}`.
 
 ## More Airflow features
 

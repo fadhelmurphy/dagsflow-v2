@@ -44,12 +44,14 @@ type yamlExpand struct {
 
 type yamlTask struct {
 	yamlCommon  `yaml:",inline"`
-	ID          string      `yaml:"id"`
-	Operator    string      `yaml:"operator"`
-	Upstream    []string    `yaml:"upstream"`
-	TriggerRule string      `yaml:"trigger_rule"`
-	Outlets     []string    `yaml:"outlets"`
-	Expand      *yamlExpand `yaml:"expand"`
+	ID          string         `yaml:"id"`
+	Operator    string         `yaml:"operator"`
+	Node        string         `yaml:"node"` // operator: custom
+	With        map[string]any `yaml:"with"`
+	Upstream    []string       `yaml:"upstream"`
+	TriggerRule string         `yaml:"trigger_rule"`
+	Outlets     []string       `yaml:"outlets"`
+	Expand      *yamlExpand    `yaml:"expand"`
 
 	PodOverride map[string]any `yaml:"pod_override"` // kubernetes executor
 
@@ -300,6 +302,8 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 	switch yt.Operator {
 	case "", "empty":
 		d.NewEmptyTask(yt.ID, opts...)
+	case "custom":
+		return yt.addCustom(d, baseDir, opts)
 	case "bash":
 		if yt.Command == "" {
 			return errors.New("bash needs command")
@@ -377,7 +381,7 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			d.NewHTTPSensor(yt.ID, yt.httpReq(), cfg, opts...)
 		}
 	default:
-		return fmt.Errorf("unknown operator %q (empty, bash, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, gcs_write, s3_write, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor)", yt.Operator)
+		return fmt.Errorf("unknown operator %q (empty, bash, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, gcs_write, s3_write, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
 	}
 	return nil
 }
@@ -401,9 +405,18 @@ func InvalidateYAML(path string) {
 func LoadDagFolder(dir string) {
 	folderMu.Lock()
 	defer folderMu.Unlock()
+	if LoadCustomNodes(filepath.Join(dir, "builder", "nodes")) {
+		folderStamp = map[string]string{} // DAGs may use the node types that changed
+	}
 	seen := map[string]bool{}
 	_ = filepath.WalkDir(dir, func(p string, e fs.DirEntry, err error) error {
-		if err != nil || e.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if e.IsDir() {
+			if e.Name() == "nodes" && filepath.Base(filepath.Dir(p)) == "builder" {
+				return fs.SkipDir // node definitions, not DAGs
+			}
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(p))

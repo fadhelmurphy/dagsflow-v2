@@ -5,7 +5,7 @@
 "use strict";
 
 const W = 230, H = 64, GRID = 10;
-const CAT_COLOR = { Sources: "#2F7BD9", Transform: "#8B5CF6", Destinations: "#2E9B57", Control: "#64748B", Sensors: "#D9971A" };
+const CAT_COLOR = { Sources: "#2F7BD9", Transform: "#8B5CF6", Destinations: "#2E9B57", Control: "#64748B", Sensors: "#D9971A", Custom: "#0E9AA7", Missing: "#D23B3B" };
 const ICONS = {
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>',
   db: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
@@ -46,6 +46,15 @@ main.bldmain{padding:0;max-width:none}
 .bld-pal h4{margin:12px 0 6px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .bp-item{display:flex;align-items:center;gap:9px;padding:7px 9px;margin-bottom:5px;border:1px solid var(--rule);border-radius:6px;background:#fff;cursor:grab;font-size:13px;user-select:none}
 .bp-item:hover{border-color:#9FAAB5;box-shadow:0 1px 4px rgba(22,32,42,.1)}
+.bp-item{position:relative}.bp-x{border:0;background:none;color:var(--muted);cursor:pointer;font-size:14px;padding:0 3px;display:none}.bp-item:hover .bp-x{display:inline}.bp-x:hover{color:var(--s-failed)}
+.bld-acts{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px}
+.bld-opts{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--muted);margin-bottom:8px}
+.bld-opts label{display:flex;align-items:center;gap:4px}
+.bld-modal{position:fixed;inset:0;background:rgba(22,32,42,.45);z-index:50;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:30px 12px}
+.bld-dlg{background:#fff;border-radius:10px;padding:20px;width:min(640px,100%);box-shadow:0 10px 40px rgba(0,0,0,.25)}
+.bld-dlg .bf{margin-bottom:10px}.bld-dlg input:not([type=checkbox]),.bld-dlg select,.bld-dlg textarea{width:100%}
+.bld-use{margin:6px 0 0;padding-left:18px;font-size:13px}.bld-use li{margin-bottom:4px}
+.nfr{display:grid;grid-template-columns:1fr 1.2fr 90px auto auto;gap:6px;align-items:center;margin-bottom:6px}
 .bp-ic{width:26px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#fff;flex:none}
 .bld-cv{position:relative;flex:1;overflow:hidden;background-color:#F4F6F8;background-image:radial-gradient(#C9D1D9 1px,transparent 1px);background-size:20px 20px;touch-action:none;cursor:grab}
 .bld-cv.panning{cursor:grabbing}
@@ -143,7 +152,7 @@ function setPath(o, p, v) {
 let CAT = null;          // node catalog from the server
 let B = null;            // editor state
 let styleEl = null;
-const typeOf = t => CAT.nodes.find(n => n.type === t) || { type: t, label: t, category: "Control", icon: "dot", fields: [], description: "" };
+const typeOf = t => CAT.nodes.find(n => n.type === t) || { type: t, label: t, category: "Missing", icon: "dot", fields: [], missing: true, description: `The node type "${t}" is not defined any more (its YAML file was removed or it is no longer registered in Go). Delete this node, or define the type again.` };
 const colorOf = t => CAT_COLOR[typeOf(t).category] || "#64748B";
 
 async function ensureCatalog() { if (!CAT) CAT = await api("/builder/nodes"); }
@@ -253,7 +262,8 @@ function drawShell() {
     <div id="bbanner"></div><div id="bdraft"></div>
     <div class="bld-main">
       <aside class="bld-pal" aria-label="Nodes"><input id="bpsearch" placeholder="Search nodes…" aria-label="Search nodes">
-        <div id="bpal">${cats.map(c => `<h4>${esc(c)}</h4>` + CAT.nodes.filter(n => n.category === c).map(n => palItem(n)).join("")).join("")}</div>
+        <div id="bpal">${palHtml()}</div>
+        <button class="btn sm" data-act="newnode" type="button" style="width:100%;margin-top:6px" title="Define your own node type">+ Create node</button>
         <p class="sub" style="margin-top:14px;font-size:11.5px">Drag a node onto the canvas, or click it to add it after the selected node.</p></aside>
       <div class="bld-cv" id="bc" tabindex="0" aria-label="Workflow canvas">
         <div class="bld-world" id="bw"><svg class="bld-edges" id="be"><defs><marker id="barrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8A96A3"/></marker><marker id="barrowsel" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#1F5FD1"/></marker></defs><g id="bel"></g><path class="tmp" id="btmp" hidden></path></svg></div>
@@ -267,7 +277,8 @@ function drawShell() {
   bindShell();
 }
 
-const palItem = n => `<div class="bp-item" draggable="true" data-type="${n.type}" title="${esc(n.description)}"><span class="bp-ic" style="background:${CAT_COLOR[n.category] || "#64748B"}">${icon(n.icon, 15)}</span>${esc(n.label)}</div>`;
+function palHtml() { const cats = [...new Set(CAT.nodes.map(n => n.category))]; return cats.map(c => `<h4>${esc(c)}</h4>` + CAT.nodes.filter(n => n.category === c).map(n => palItem(n, true)).join("")).join(""); }
+const palItem = (n, tools) => `<div class="bp-item" draggable="true" data-type="${n.type}" title="${esc(n.description)}"><span class="bp-ic" style="background:${CAT_COLOR[n.category] || "#64748B"}">${icon(n.icon, 15)}</span><span style="flex:1">${esc(n.label)}</span>${tools && n.custom && n.source === "yaml" ? `<button class="bp-x" type="button" data-pal="edit" data-type="${n.type}" title="Edit node definition" aria-label="Edit">✎</button><button class="bp-x" type="button" data-pal="del" data-type="${n.type}" title="Delete node definition" aria-label="Delete">×</button>` : ""}</div>`;
 
 function bindShell() {
   const root = $(".bld");
@@ -586,7 +597,7 @@ function showPick(cx, cy, onPick) {
   closePick();
   const el = document.createElement("div"); el.className = "bld-pick"; el.id = "bpick";
   const cats = [...new Set(CAT.nodes.map(n => n.category))];
-  el.innerHTML = cats.map(c => `<h5>${esc(c)}</h5>` + CAT.nodes.filter(n => n.category === c).map(palItem).join("")).join("");
+  el.innerHTML = cats.map(c => `<h5>${esc(c)}</h5>` + CAT.nodes.filter(n => n.category === c).map(n => palItem(n)).join("")).join("");
   el.style.left = Math.min(cx, innerWidth - 250) + "px"; el.style.top = Math.min(cy, innerHeight - 350) + "px";
   $$(".bp-item", el).forEach(i => { i.draggable = false; });
   el.addEventListener("click", e => { const it = e.target.closest(".bp-item"); if (!it) return; closePick(); onPick(it.dataset.type); });
@@ -612,6 +623,8 @@ function onKey(e) {
 }
 
 function onClick(e) {
+  const px = e.target.closest("#bpal [data-pal]");
+  if (px) { if (!B.ro) openNodeEditor(px.dataset.type, px.dataset.pal === "del"); return; }
   const pi = e.target.closest("#bpal .bp-item");
   if (pi) { if (!B.ro) addFromPalette(pi.dataset.type); return; }
   const a = e.target.closest("[data-act]"); if (!a) return;
@@ -621,7 +634,7 @@ function onClick(e) {
   ({ settings: () => select(null), undo, redo, layout: () => { if (B.ro) return; snap(); layoutNodes(); markDirty(); renderAll(); fitView(); },
      fit: fitView, zin: () => { const r = $("#bc").getBoundingClientRect(); zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1.2); },
      zout: () => { const r = $("#bc").getBoundingClientRect(); zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1 / 1.2); },
-     save: () => save(), run: () => saveAndRun(), yaml: showYaml, active: toggleActive, copy: makeCopy }[act] || (() => {}))();
+     save: () => save(), run: () => saveAndRun(), newnode: () => openNodeEditor(""), yaml: showYaml, active: toggleActive, copy: makeCopy }[act] || (() => {}))();
 }
 
 function makeCopy() {
@@ -740,6 +753,7 @@ function dagPanel() {
 function runSummaryHtml() {
   const r = B.run, tis = Object.entries(r.tis || {});
   return `<details open><summary>Last run</summary><p class="desc">${esc(r.state || "queued")} · <a href="#/dags/${enc(B.graph.dag_id)}?tab=grid&run=${enc(r.id)}">open in Grid</a></p>
+    ${B.ro ? "" : `<div class="bld-acts"><button class="btn sm" type="button" data-sact="rerunfailed">Re-run failed</button><button class="btn sm" type="button" data-sact="markrun" data-state="success">Mark run success</button><button class="btn sm" type="button" data-sact="markrun" data-state="failed">Mark run failed</button></div>`}
     ${tis.map(([id, ti]) => `<div style="font-size:12.5px;margin-bottom:3px"><span class="bld-pill" style="background:var(--s-${ti.state || "none"});${ti.state === "none" || !ti.state ? "color:#333;border:1px solid #ccc" : ""}">${esc(ti.state || "none")}</span> ${esc(id)}</div>`).join("")}</details>`;
 }
 
@@ -752,6 +766,7 @@ function nodePanel(n) {
   const iss = B.issues.filter(i => i.node === n.id);
   return `<fieldset ${ro} style="border:0;padding:0;margin:0;min-width:0"><div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><span class="bp-ic" style="background:${colorOf(n.type)};width:32px;height:32px">${icon(t.icon)}</span><div><h3 style="margin:0">${esc(t.label)}</h3><div class="sub" style="font-size:12px">${esc(t.category)}</div></div></div>
     <p class="desc">${esc(t.description)}</p>
+    ${t.custom ? `<p class="sub" style="font-size:12px;margin:-4px 0 8px">Custom node · ${t.source === "go" ? "defined in Go code" : `<button class="lnk" type="button" data-sact="editnodetype" data-type="${esc(t.type)}">edit definition</button>`}</p>` : ""}
     <div id="bnissues">${issHtml(iss)}</div>
     <div class="bf"><label>Node id</label><input data-sact="rename" id="bnid" value="${esc(n.id)}" spellcheck="false"><div class="help">Reference its output with <code>{{ xcom_pull "${esc(n.id)}" "return_value" }}</code></div></div>
     ${(t.fields || []).map(f => fieldHtml(f, n.config, "cfg", n.id)).join("")}
@@ -772,8 +787,105 @@ function nodeRunHtml(n) {
     <div class="sub" style="font-size:12.5px">${ti.start_date ? fmt(ti.start_date) : ""}${ti.end_date ? ` · ${dur(ti.start_date, ti.end_date)}` : ""}${mapped ? ` · ${mapped.length} instances` : ""}</div>
     ${ti.error ? `<div class="iss e" style="cursor:default;margin-top:6px">${esc(ti.error)}</div>` : ""}
     ${out ? `<div class="sub" style="margin-top:8px;font-size:12px">Output${rows != null ? ` · ${rows} row${rows === 1 ? "" : "s"}` : ""}</div><pre class="bld-out">${esc(out)}</pre>` : ""}
+    ${B.ro ? "" : actionsHtml()}
     ${ti.try_number ? `<button class="btn sm" type="button" data-sact="showlog" data-try="${ti.try_number}">Show log</button><pre class="bld-out" id="blog" hidden></pre>` : ""}</details>`;
 }
+
+// ---- per-node run actions (clear / mark) -----------------------------------------------------------------------------------
+function actionsHtml() {
+  const o = B.opts || {}, ck = k => `<label><input type="checkbox" data-sact="actopt" data-opt="${k}"${o[k] ? " checked" : ""}> ${({ down: "downstream", up: "upstream", failed: "only failed" })[k]}</label>`;
+  return `<div class="bld-acts"><button class="btn sm" type="button" data-sact="rerun" title="Clear this task so the scheduler runs it again">Re-run</button><button class="btn sm" type="button" data-sact="markok">Mark success</button><button class="btn sm" type="button" data-sact="markfail">Mark failed</button></div>
+    <div class="bld-opts">${ck("down")}${ck("up")}${ck("failed")}</div>`;
+}
+
+async function runAction(kind, state) {
+  if (!B?.run || B.ro) return;
+  const base = `/dags/${enc(B.graph.dag_id)}/dagRuns/${enc(B.run.id)}`, o = B.opts || {}, id = B.sel?.k === "node" ? B.sel.id : "";
+  try {
+    if (kind === "clear" || kind === "clearfailed") {
+      const body = kind === "clear" ? { task_ids: [id], include_upstream: !!o.up, include_downstream: !!o.down, only_failed: !!o.failed } : { only_failed: true };
+      const r = await api(`${base}/clear`, { method: "POST", body: JSON.stringify(body) });
+      toast(r.cleared?.length ? `Cleared ${r.cleared.join(", ")}: they will run again` : "Nothing to clear");
+    } else if (kind === "mark") {
+      if (state === "failed" && !confirm(`Mark ${id} as failed?`)) return;
+      const r = await api(`${base}/taskInstances/${enc(id)}/mark`, { method: "POST", body: JSON.stringify({ new_state: state, include_upstream: !!o.up, include_downstream: !!o.down }) });
+      toast(r?.queued ? `Marking ${id} ${state} (queued, the scheduler applies it)` : `${id} marked ${state}`);
+    } else if (kind === "markrun") {
+      if (!confirm(`Mark the whole run ${state}?`)) return;
+      await api(`${base}/mark`, { method: "POST", body: JSON.stringify({ new_state: state }) });
+      toast(`Run marked ${state}`);
+    }
+  } catch (x) { return toast(x.message); }
+  B.run.state = kind === "markrun" ? state : "running";
+  pollRun(); setTimeout(() => B && pollRun(), 1200);
+}
+
+// ---- custom node editor ----------------------------------------------------------------------------------------------------
+const NODE_OPS = ["bash", "http", "postgres", "bigquery_query", "bigquery_insert", "bigquery", "gsheet_read", "gsheet_write", "file_read", "gcs_write", "s3_write", "transform", "merge", "trigger_dagrun", "empty"];
+const FIELD_KINDS = ["text", "code", "number", "bool", "select", "list", "kv", "json", "conn"];
+
+function nfRow(f = {}) {
+  return `<div class="nfr"><input data-nf="name" placeholder="name" value="${esc(f.name || "")}" spellcheck="false"><input data-nf="label" placeholder="Label" value="${esc(f.label || "")}"><select data-nf="kind">${FIELD_KINDS.map(k => `<option${k === (f.kind || "text") ? " selected" : ""}>${k}</option>`).join("")}</select><label title="Required"><input type="checkbox" data-nf="required"${f.required ? " checked" : ""}> req</label><button class="btn sm" type="button" data-ne="delfield" title="Remove field">×</button></div>`;
+}
+
+async function openNodeEditor(type, startDelete) {
+  let def = { type: "", label: "", category: "Custom", description: "", operator: "bash", fields: [{ name: "message", label: "Message", kind: "text", required: true }], template: { command: "echo ${message}" } };
+  if (type) { try { def = (await api(`/builder/custom-nodes/${enc(type)}`)).node; def.fields = def.fields || []; def.template = def.template || {}; } catch (x) { return toast(x.message); } }
+  closeNodeEditor();
+  const ov = document.createElement("div"); ov.className = "bld-modal"; ov.id = "bnmodal";
+  ov.innerHTML = `<div class="bld-dlg" role="dialog" aria-label="Custom node"><h3 style="margin-top:0">${type ? "Edit" : "Create"} custom node</h3>
+    <p class="desc">A custom node is a reusable form on top of a built-in operator. It is saved as <code>builder/nodes/&lt;type&gt;.yaml</code>, so you can also write it by hand or in Go.</p>
+    <div class="bf"><label>Type (id) <i>*</i></label><input id="ne-type" value="${esc(def.type)}" ${type ? "disabled" : ""} placeholder="slack_message" spellcheck="false"></div>
+    <div class="bf"><label>Label <i>*</i></label><input id="ne-label" value="${esc(def.label)}" placeholder="Slack message"></div>
+    <div class="bf"><label>Group in palette</label><input id="ne-cat" value="${esc(def.category || "Custom")}"></div>
+    <div class="bf"><label>Description</label><input id="ne-desc" value="${esc(def.description || "")}"></div>
+    <div class="bf"><label>Runs as (built-in operator)</label><select id="ne-op">${NODE_OPS.map(o => `<option${o === def.operator ? " selected" : ""}>${o}</option>`).join("")}</select></div>
+    <div class="bf"><label>Fields the user fills in</label><div id="ne-fields">${(def.fields || []).map(nfRow).join("")}</div><button class="btn sm" type="button" data-ne="addfield">+ Add field</button></div>
+    <div class="bf"><label>Operator settings (JSON)</label><textarea id="ne-tpl" rows="7" spellcheck="false" style="font-family:var(--code);font-size:12px">${esc(JSON.stringify(def.template || {}, null, 2))}</textarea><div class="help">Use <code>\${field_name}</code> to insert a field's value. Shell variables like <code>\${HOME}</code> are left alone.</div></div>
+    <div class="iss e" id="ne-err" style="display:none;cursor:default"></div>
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary" type="button" data-ne="save">Save node</button><button class="btn" type="button" data-ne="cancel">Cancel</button>${type ? `<span class="sp" style="flex:1"></span><button class="btn danger" type="button" data-ne="delete">Delete</button>` : ""}</div></div>`;
+  document.body.appendChild(ov);
+  ov.addEventListener("click", async e => {
+    if (e.target === ov) return closeNodeEditor();
+    const b = e.target.closest("[data-ne]"); if (!b) return;
+    const err = m => { const x = $("#ne-err", ov); x.textContent = m; x.style.display = m ? "" : "none"; };
+    switch (b.dataset.ne) {
+      case "cancel": closeNodeEditor(); break;
+      case "addfield": $("#ne-fields", ov).insertAdjacentHTML("beforeend", nfRow()); break;
+      case "delfield": b.closest(".nfr").remove(); break;
+      case "save": {
+        let tpl; try { tpl = JSON.parse($("#ne-tpl", ov).value || "{}"); } catch (x) { return err("Operator settings is not valid JSON: " + x.message); }
+        const fields = $$(".nfr", ov).map(r => { const g = k => $(`[data-nf="${k}"]`, r); return { name: g("name").value.trim(), label: g("label").value.trim() || g("name").value.trim(), kind: g("kind").value, required: g("required").checked || undefined }; }).filter(f => f.name);
+        const t = type || $("#ne-type", ov).value.trim();
+        const body = { type: t, label: $("#ne-label", ov).value.trim(), category: $("#ne-cat", ov).value.trim() || "Custom", description: $("#ne-desc", ov).value.trim(), operator: $("#ne-op", ov).value, fields, template: tpl };
+        try { await api(`/builder/custom-nodes/${enc(t)}`, { method: "PUT", body: JSON.stringify(body) }); } catch (x) { return err(x.message); }
+        await refreshPalette(); closeNodeEditor(); toast(`Node "${body.label}" saved`); break;
+      }
+      case "delete": {
+        let used;
+        try { used = (await api(`/builder/custom-nodes/${enc(type)}/usage`)).used_by || []; } catch (x) { return err(x.message); }
+        const dlg = $(".bld-dlg", ov);
+        dlg.innerHTML = `<h3 style="margin-top:0">Delete node "${esc(type)}"?</h3>
+          ${used.length ? `<p class="desc">This node is used in ${used.length} workflow${used.length > 1 ? "s" : ""}. If you continue, <b>all of these nodes are deleted</b> from those workflows (their connections too):</p>
+          <ul class="bld-use">${used.map(u => `<li><b>${esc(u.dag_id)}</b>: ${u.nodes.map(esc).join(", ")}${u.will_delete ? ` <span class="bld-pill" style="background:var(--s-failed);color:#fff">no other node: the workflow is deleted</span>` : ""}</li>`).join("")}</ul>` : `<p class="desc">No workflow uses it.</p>`}
+          <div class="iss e" id="ne-err" style="display:none;cursor:default"></div>
+          <div style="display:flex;gap:8px;margin-top:12px"><button class="btn danger" type="button" data-ne="confirmdel">${used.length ? "Delete node and its usages" : "Delete node"}</button><button class="btn" type="button" data-ne="cancel">Cancel</button></div>`;
+        break;
+      }
+      case "confirmdel": {
+        let r;
+        try { r = await api(`/builder/custom-nodes/${enc(type)}?force=1`, { method: "DELETE" }); } catch (x) { return err(x.message); }
+        const hit = (r.workflows_changed || []).includes(B?.graph?.dag_id);
+        await refreshPalette(); closeNodeEditor(); toast("Node deleted");
+        if (hit) { B.dirty = false; location.reload(); }
+        break;
+      }
+    }
+  });
+  if (startDelete) $("[data-ne=delete]", ov)?.click(); else $("#ne-type", ov).focus();
+}
+function closeNodeEditor() { $("#bnmodal")?.remove(); }
+async function refreshPalette() { CAT = await api("/builder/nodes"); const p = $("#bpal"); if (p) p.innerHTML = palHtml(); renderSide(); scheduleValidate(0); }
 
 // ---- side panel events -----------------------------------------------------------------------------------------------------------------
 function target(scope) { return scope === "set" ? B.graph.settings : node(B.sel.id)?.config; }
@@ -929,6 +1041,13 @@ async function onSideClick(e) {
     case "delnode": removeNode(B.sel.id); break;
     case "deledge": removeEdge(B.sel.id); break;
     case "gotoissue": if (b.dataset.node && node(b.dataset.node)) { select({ k: "node", id: b.dataset.node }); const n = node(b.dataset.node); const r = $("#bc").getBoundingClientRect(); B.vx = r.width / 2 - (n.x + W / 2) * B.k; B.vy = r.height / 2 - (n.y + H / 2) * B.k; applyView(); } break;
+    case "rerun": runAction("clear"); break;
+    case "markok": runAction("mark", "success"); break;
+    case "markfail": runAction("mark", "failed"); break;
+    case "rerunfailed": runAction("clearfailed"); break;
+    case "markrun": runAction("markrun", b.dataset.state); break;
+    case "actopt": B.opts = { ...(B.opts || {}), [b.dataset.opt]: b.checked }; break;
+    case "editnodetype": openNodeEditor(b.dataset.type); break;
     case "showlog": {
       const pre = $("#blog"); if (!pre) break; pre.hidden = false; pre.textContent = "Loading…";
       try { pre.textContent = await api(`/dags/${enc(B.graph.dag_id)}/dagRuns/${enc(B.run.id)}/taskInstances/${enc(B.sel.id)}/logs/${b.dataset.try}`); } catch (x) { pre.textContent = x.message; }

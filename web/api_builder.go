@@ -18,7 +18,8 @@ import (
 func (s *Server) builderPath(id string) string { return filepath.Join(s.BuilderDir, id+".yaml") }
 
 func (s *Server) builderNodes(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"nodes": dag.Nodes, "common": dag.CommonFields})
+	s.reloadNodes()
+	writeJSON(w, 200, map[string]any{"nodes": dag.AllNodes(), "common": dag.CommonFields, "node_errors": dag.CustomNodeErrors()})
 }
 
 type wfRow struct {
@@ -98,6 +99,7 @@ func issueMsg(iss []dag.GraphIssue) string {
 }
 
 func (s *Server) builderValidate(w http.ResponseWriter, r *http.Request) {
+	s.reloadNodes()
 	var g dag.Graph
 	if err := readBody(r, &g); err != nil {
 		fail(w, 400, "invalid body: %v", err)
@@ -159,6 +161,7 @@ func (s *Server) builderGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) builderPut(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("dag")
+	s.reloadNodes()
 	var b graphBody
 	if err := readBody(r, &b); err != nil {
 		fail(w, 400, "invalid body: %v", err)
