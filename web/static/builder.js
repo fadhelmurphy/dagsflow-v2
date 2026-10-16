@@ -839,6 +839,7 @@ const NODE_OPS = [
   ["trigger_dagrun", "Trigger another DAG", "Starts a run of another DAG.", { trigger_dag_id: "${dag}" }],
   ["empty", "No-op", "Does nothing (a join point).", {}],
 ];
+const CODE_KEYS = { bash: ["command", "Shell command"], go: ["code", "Go code"], postgres: ["sql", "SQL"], bigquery_query: ["sql", "SQL"], bigquery: ["sql", "SQL"] };
 const FIELD_KINDS = ["text", "code", "number", "bool", "select", "list", "kv", "json", "conn"];
 
 function nfRow(f = {}) {
@@ -857,8 +858,9 @@ async function openNodeEditor(type, startDelete) {
     <div class="bf"><label>Group in palette</label><input id="ne-cat" value="${esc(def.category || "Custom")}"></div>
     <div class="bf"><label>Description</label><input id="ne-desc" value="${esc(def.description || "")}"></div>
     <div class="bf"><label>Runs as</label><select id="ne-op">${NODE_OPS.map(o => `<option value="${o[0]}"${o[0] === def.operator ? " selected" : ""}>${esc(o[1])}</option>`).join("")}</select><div class="help" id="ne-ophelp"></div></div>
+    <div class="bf" id="ne-codewrap"><label id="ne-codelabel"></label><textarea id="ne-code" rows="11" spellcheck="false" wrap="off" style="font-family:var(--code);font-size:12px;white-space:pre;tab-size:4"></textarea><div class="help">Use <code>\${field_name}</code> to insert a field's value. Shell variables like <code>\${HOME}</code> are left alone.</div></div>
     <div class="bf"><label>Fields the user fills in</label><div id="ne-fields">${(def.fields || []).map(nfRow).join("")}</div><button class="btn sm" type="button" data-ne="addfield">+ Add field</button></div>
-    <div class="bf"><label>Operator settings (JSON)</label><textarea id="ne-tpl" rows="7" spellcheck="false" style="font-family:var(--code);font-size:12px">${esc(JSON.stringify(def.template || {}, null, 2))}</textarea><div class="help">Use <code>\${field_name}</code> to insert a field's value. Shell variables like <code>\${HOME}</code> are left alone.</div></div>
+    <div class="bf"><label id="ne-tpllabel">Operator settings (JSON)</label><textarea id="ne-tpl" rows="5" spellcheck="false" style="font-family:var(--code);font-size:12px"></textarea></div>
     <div class="iss e" id="ne-err" style="display:none;cursor:default"></div>
     <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary" type="button" data-ne="save">Save node</button><button class="btn" type="button" data-ne="cancel">Cancel</button>${type ? `<span class="sp" style="flex:1"></span><button class="btn danger" type="button" data-ne="delete">Delete</button>` : ""}</div></div>`;
   document.body.appendChild(ov);
@@ -871,7 +873,8 @@ async function openNodeEditor(type, startDelete) {
       case "addfield": $("#ne-fields", ov).insertAdjacentHTML("beforeend", nfRow()); break;
       case "delfield": b.closest(".nfr").remove(); break;
       case "save": {
-        let tpl; try { tpl = JSON.parse($("#ne-tpl", ov).value || "{}"); } catch (x) { return err("Operator settings is not valid JSON: " + x.message); }
+        let tpl; try { tpl = JSON.parse($("#ne-tpl", ov).value || "{}"); } catch (x) { return err("The JSON settings are not valid: " + x.message); }
+        const ck = CODE_KEYS[$("#ne-op", ov).value]; if (ck && $("#ne-code", ov).value.trim()) tpl[ck[0]] = $("#ne-code", ov).value.replace(/\r\n/g, "\n");
         const fields = $$(".nfr", ov).map(r => { const g = k => $(`[data-nf="${k}"]`, r); return { name: g("name").value.trim(), label: g("label").value.trim() || g("name").value.trim(), kind: g("kind").value, required: g("required").checked || undefined }; }).filter(f => f.name);
         const t = type || $("#ne-type", ov).value.trim();
         const body = { type: t, label: $("#ne-label", ov).value.trim(), category: $("#ne-cat", ov).value.trim() || "Custom", description: $("#ne-desc", ov).value.trim(), operator: $("#ne-op", ov).value, fields, template: tpl };
@@ -899,16 +902,21 @@ async function openNodeEditor(type, startDelete) {
       }
     }
   });
-  const opSel = $("#ne-op", ov), tplBox = $("#ne-tpl", ov);
-  let lastStarter = JSON.stringify(NODE_OPS.find(o => o[0] === opSel.value)?.[3] ?? {}, null, 2);
+  const opSel = $("#ne-op", ov), tplBox = $("#ne-tpl", ov), codeBox = $("#ne-code", ov);
+  const show = op => { const c = CODE_KEYS[op]; $("#ne-codewrap", ov).style.display = c ? "" : "none"; if (c) $("#ne-codelabel", ov).textContent = c[1]; $("#ne-tpllabel", ov).textContent = c ? "Other settings (JSON)" : "Operator settings (JSON)"; };
+  const fill = (op, tpl) => { // the main code goes in its own editor, the remaining settings stay JSON
+    const k = CODE_KEYS[op]?.[0], rest = { ...tpl }; let code = "";
+    if (k && typeof rest[k] === "string") { code = rest[k]; delete rest[k]; }
+    codeBox.value = code; tplBox.value = Object.keys(rest).length ? JSON.stringify(rest, null, 2) : "{}"; show(op);
+  };
   const opHelp = () => { $("#ne-ophelp", ov).textContent = NODE_OPS.find(o => o[0] === opSel.value)?.[2] || ""; };
-  opHelp();
-  opSel.addEventListener("change", () => { // swap in that operator's starter unless the user already edited the settings
+  let touched = false;
+  fill(def.operator, def.template || {}); opHelp();
+  [codeBox, tplBox].forEach(el => el.addEventListener("input", () => { touched = true; }));
+  codeBox.addEventListener("keydown", e => { if (e.key === "Tab") { e.preventDefault(); const i = codeBox.selectionStart; codeBox.setRangeText("\t", i, codeBox.selectionEnd, "end"); touched = true; } });
+  opSel.addEventListener("change", () => { // swap in that operator's starter unless the user already typed something
     opHelp();
-    const cur = tplBox.value.trim();
-    if (!cur || cur === "{}" || cur === lastStarter.trim() || !type && cur === JSON.stringify(def.template, null, 2).trim()) {
-      lastStarter = JSON.stringify(NODE_OPS.find(o => o[0] === opSel.value)?.[3] ?? {}, null, 2); tplBox.value = lastStarter;
-    }
+    if (!touched) fill(opSel.value, NODE_OPS.find(o => o[0] === opSel.value)?.[3] ?? {}); else show(opSel.value);
   });
   if (startDelete) $("[data-ne=delete]", ov)?.click(); else $("#ne-type", ov).focus();
 }

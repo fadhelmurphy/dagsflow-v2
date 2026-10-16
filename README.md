@@ -481,7 +481,7 @@ Uploaded files are kept in `<dags folder>/builder/files/` (so that folder must b
 
 ### Running Go code from the builder
 
-The **Go code** node (`operator: go`) runs a standalone Go program (`package main` with `func main`, standard library only) with `go run`, no rebuild of dagsflow needed. The worker needs the Go toolchain (`DAGSFLOW_GO` sets the path to `go`). Like the shell node, the last stdout line is the node's output, `DAGSFLOW_CTX_DAG_ID / TASK_ID / RUN_ID / DS` are set, and `env` values are templated, so `{{ xcom_pull "extract" "return_value" }}` hands data in via `os.Getenv`. Compile errors and panics show in the task log. It is as powerful as the shell node.
+The **Go code** node (`operator: go`) runs a standalone Go program (`package main` with `func main`, standard library only) with `go run`, no rebuild of dagsflow needed. The worker needs the Go toolchain (`DAGSFLOW_GO` sets the path to `go`). Like the shell node, the last stdout line is the node's output, `DAGSFLOW_CTX_DAG_ID / TASK_ID / RUN_ID / DS` are set, and `env` values are templated, so `{{ xcom_pull "extract" "return_value" }}` hands data in via `os.Getenv`. Compile errors and panics show in the task log. It is as powerful as the shell node. In **Create node** the Go program (or shell command, or SQL) has its own code editor; only the other settings stay as small JSON.
 
 In **Create node**, the *Runs as* list shows plain names (Shell command, Go code, SQL: Postgres, SQL: BigQuery...), and picking one fills in a starter for its settings. So a custom node can wrap Go code or SQL with `${field}` placeholders.
 
