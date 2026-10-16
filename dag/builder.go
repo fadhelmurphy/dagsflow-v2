@@ -139,6 +139,12 @@ var Nodes = []NodeType{
 			{Name: "command", Label: "Command", Kind: "code", Lang: "bash", Required: true},
 			{Name: "env", Label: "Environment", Kind: "kv"},
 		}},
+	{Type: "go_code", Operator: "go", Label: "Go code", Category: "Transform", Icon: "terminal",
+		Description: "Run a Go program (package main, standard library only) with go run. The last stdout line is the node's output. Needs the Go toolchain on the worker.",
+		Fields: []NodeField{
+			{Name: "code", Label: "Go code", Kind: "code", Lang: "go", Required: true, Placeholder: "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}"},
+			{Name: "env", Label: "Environment", Kind: "kv", Help: "Read with os.Getenv. Values can use {{ xcom_pull ... }} to pass data in"},
+		}},
 	{Type: "postgres_insert", Operator: "postgres", Label: "Postgres insert", Category: "Destinations", Icon: "dbin", NeedsInput: true,
 		Description: "Insert the rows from the node before it into a table (one transaction).",
 		Fields: []NodeField{

@@ -79,3 +79,21 @@ func TestMissingCustomNodeStillOpens(t *testing.T) {
 		t.Fatalf("after removing the node it must save: %v", iss)
 	}
 }
+
+func TestGoCodeNodeValidatesAndWraps(t *testing.T) {
+	g := &Graph{DagID: "gc", Nodes: []GNode{{ID: "g", Type: "go_code", Config: map[string]any{"code": "package main\nfunc main(){}\n"}}}}
+	y, iss := g.Validate()
+	if y == nil || !strings.Contains(string(y), "operator: go") {
+		t.Fatalf("%v %s", iss, y)
+	}
+	d := &CustomNodeDef{Type: "run_go", Label: "Run Go", Operator: "go",
+		Fields:   []NodeField{{Name: "msg", Label: "Msg", Kind: "text", Required: true}},
+		Template: map[string]any{"code": "package main\nfunc main(){}\n", "env": map[string]any{"MSG": "${msg}"}}}
+	if err := d.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	yt, err := d.expand(map[string]any{"msg": "hi"}, false)
+	if err != nil || yt.Env["MSG"] != "hi" || yt.Code == "" {
+		t.Fatalf("%+v %v", yt, err)
+	}
+}

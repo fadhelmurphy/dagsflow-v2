@@ -466,7 +466,7 @@ Credentials come from the `google_cloud_default` connection (or `conn_id`): `cre
 
 **Builder** in the top menu (permission `builder.edit`, Admin by default). Drag nodes from the palette onto the canvas (or click one to add it after the selected node), drag from a node's right port to another node to connect them, and fill in the side panel. Dropping a connection on an empty spot opens a node picker.
 
-- **Nodes**: HTTP request, Postgres query / insert, BigQuery read rows / insert rows / SQL, Google Sheets read / write, CSV / Excel file (upload, sheet, start row and columns, with a preview), Transform rows, Merge / join, Google Cloud Storage dump, Amazon S3 dump, Shell command, Trigger another DAG, No-op, and four sensors. Every node also has retries, timeout, trigger rule, pool, dataset outlets, failure alerts and *run once per item* (dynamic mapping).
+- **Nodes**: HTTP request, Postgres query / insert, BigQuery read rows / insert rows / SQL, Google Sheets read / write, CSV / Excel file (upload, sheet, start row and columns, with a preview), Transform rows, Merge / join, Google Cloud Storage dump, Amazon S3 dump, Shell command, Go code, Trigger another DAG, No-op, and four sensors. Every node also has retries, timeout, trigger rule, pool, dataset outlets, failure alerts and *run once per item* (dynamic mapping).
 - **Live validation**: missing fields, bad durations, loops and unknown connections are flagged on the node while you edit; saving is refused while there are errors.
 - **Save & Run** saves, triggers a run and colours the nodes by state; select a node to see its output rows, error and log.
 - **Undo/redo**, auto-arrange, fit view, duplicate (`Ctrl+D`), delete, `Ctrl+S`. Unsaved edits survive an accidental reload (kept in the browser) and leaving the page asks first.
@@ -478,6 +478,12 @@ Credentials come from the `google_cloud_default` connection (or `conn_id`): `cre
 - Saving needs `builder.edit` plus `dag.edit` on that DAG id. Two people editing the same workflow: the second save is refused (`409`) instead of overwriting.
 
 Uploaded files are kept in `<dags folder>/builder/files/` (so that folder must be shared in a multi-host setup, like the workflows). Security note: a workflow can run shell commands and SQL on your workers, read any file the worker can read through the file node, and so `builder.edit` is as powerful as write access to DAG files. Keep it for people you would trust with that. In a multi-host setup the webserver writes into the DAG folder, so it must be a volume shared with the scheduler and workers (new or changed files are picked up within ~2 s).
+
+### Running Go code from the builder
+
+The **Go code** node (`operator: go`) runs a standalone Go program (`package main` with `func main`, standard library only) with `go run`, no rebuild of dagsflow needed. The worker needs the Go toolchain (`DAGSFLOW_GO` sets the path to `go`). Like the shell node, the last stdout line is the node's output, `DAGSFLOW_CTX_DAG_ID / TASK_ID / RUN_ID / DS` are set, and `env` values are templated, so `{{ xcom_pull "extract" "return_value" }}` hands data in via `os.Getenv`. Compile errors and panics show in the task log. It is as powerful as the shell node.
+
+In **Create node**, the *Runs as* list shows plain names (Shell command, Go code, SQL: Postgres, SQL: BigQuery...), and picking one fills in a starter for its settings. So a custom node can wrap Go code or SQL with `${field}` placeholders.
 
 ### Custom nodes (YAML, UI or Go)
 

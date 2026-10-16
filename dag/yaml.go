@@ -55,6 +55,7 @@ type yamlTask struct {
 
 	PodOverride map[string]any `yaml:"pod_override"` // kubernetes executor
 
+	Code    string            `yaml:"code"`    // go
 	Command string            `yaml:"command"` // bash
 	Env     map[string]string `yaml:"env"`
 
@@ -309,6 +310,11 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			return errors.New("bash needs command")
 		}
 		d.NewBashTask(yt.ID, yt.Command, yt.Env, opts...)
+	case "go":
+		if strings.TrimSpace(yt.Code) == "" {
+			return errors.New("go needs code")
+		}
+		d.NewGoTask(yt.ID, yt.Code, yt.Env, opts...)
 	case "bigquery":
 		file := yt.SQLFile
 		if file != "" && !filepath.IsAbs(file) {
@@ -381,7 +387,7 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			d.NewHTTPSensor(yt.ID, yt.httpReq(), cfg, opts...)
 		}
 	default:
-		return fmt.Errorf("unknown operator %q (empty, bash, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, gcs_write, s3_write, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
+		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, gcs_write, s3_write, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
 	}
 	return nil
 }

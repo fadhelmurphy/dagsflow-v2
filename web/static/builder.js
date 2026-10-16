@@ -821,7 +821,24 @@ async function runAction(kind, state) {
 }
 
 // ---- custom node editor ----------------------------------------------------------------------------------------------------
-const NODE_OPS = ["bash", "http", "postgres", "bigquery_query", "bigquery_insert", "bigquery", "gsheet_read", "gsheet_write", "file_read", "gcs_write", "s3_write", "transform", "merge", "trigger_dagrun", "empty"];
+const NODE_OPS = [
+  ["bash", "Shell command", "Runs bash commands. The last output line is the node's result.", { command: "echo ${message}" }],
+  ["go", "Go code", "Runs a Go program (package main, standard library) with go run. Needs the Go toolchain on the worker.", { code: 'package main\n\nimport (\n\t"fmt"\n\t"os"\n)\n\nfunc main() {\n\tfmt.Println("hello", os.Getenv("MESSAGE"))\n}\n', env: { MESSAGE: "${message}" } }],
+  ["postgres", "SQL: Postgres", "Runs a SQL query on a Postgres connection (settings: conn_id, sql).", { conn_id: "main", sql: "select * from ${table}" }],
+  ["bigquery_query", "SQL: BigQuery query", "Runs a SELECT on BigQuery and returns the rows (settings: conn_id, project_id, sql, limit).", { sql: "select * from ${table} limit 100" }],
+  ["bigquery", "SQL: BigQuery statement", "Runs a SQL statement or a .sql file on BigQuery (settings: sql, sql_file, params).", { sql: "select 1" }],
+  ["bigquery_insert", "BigQuery insert rows", "Inserts the rows of an upstream node into a table.", { dataset: "${dataset}", table: "${table}" }],
+  ["http", "HTTP request", "Calls a URL (settings: method, url, headers, body).", { method: "GET", url: "https://example.com/${path}" }],
+  ["gsheet_read", "Google Sheets read", "Reads a sheet range as rows.", { spreadsheet_id: "${sheet_id}", range: "Sheet1" }],
+  ["gsheet_write", "Google Sheets write", "Writes the rows of an upstream node to a sheet.", { spreadsheet_id: "${sheet_id}", range: "Sheet1" }],
+  ["file_read", "File read (CSV / Excel)", "Reads an uploaded CSV or Excel file as rows.", { file: "${file}" }],
+  ["gcs_write", "Cloud Storage dump", "Writes rows to a Google Cloud Storage object.", { bucket: "${bucket}", object: "${object}", format: "csv" }],
+  ["s3_write", "S3 dump", "Writes rows to an Amazon S3 object.", { bucket: "${bucket}", key: "${key}", format: "csv" }],
+  ["transform", "Transform rows", "Filters, renames and reshapes the rows of an upstream node.", { steps: [] }],
+  ["merge", "Merge / join", "Combines several upstream nodes.", { mode: "union" }],
+  ["trigger_dagrun", "Trigger another DAG", "Starts a run of another DAG.", { trigger_dag_id: "${dag}" }],
+  ["empty", "No-op", "Does nothing (a join point).", {}],
+];
 const FIELD_KINDS = ["text", "code", "number", "bool", "select", "list", "kv", "json", "conn"];
 
 function nfRow(f = {}) {
@@ -839,7 +856,7 @@ async function openNodeEditor(type, startDelete) {
     <div class="bf"><label>Label <i>*</i></label><input id="ne-label" value="${esc(def.label)}" placeholder="Slack message"></div>
     <div class="bf"><label>Group in palette</label><input id="ne-cat" value="${esc(def.category || "Custom")}"></div>
     <div class="bf"><label>Description</label><input id="ne-desc" value="${esc(def.description || "")}"></div>
-    <div class="bf"><label>Runs as (built-in operator)</label><select id="ne-op">${NODE_OPS.map(o => `<option${o === def.operator ? " selected" : ""}>${o}</option>`).join("")}</select></div>
+    <div class="bf"><label>Runs as</label><select id="ne-op">${NODE_OPS.map(o => `<option value="${o[0]}"${o[0] === def.operator ? " selected" : ""}>${esc(o[1])}</option>`).join("")}</select><div class="help" id="ne-ophelp"></div></div>
     <div class="bf"><label>Fields the user fills in</label><div id="ne-fields">${(def.fields || []).map(nfRow).join("")}</div><button class="btn sm" type="button" data-ne="addfield">+ Add field</button></div>
     <div class="bf"><label>Operator settings (JSON)</label><textarea id="ne-tpl" rows="7" spellcheck="false" style="font-family:var(--code);font-size:12px">${esc(JSON.stringify(def.template || {}, null, 2))}</textarea><div class="help">Use <code>\${field_name}</code> to insert a field's value. Shell variables like <code>\${HOME}</code> are left alone.</div></div>
     <div class="iss e" id="ne-err" style="display:none;cursor:default"></div>
@@ -880,6 +897,17 @@ async function openNodeEditor(type, startDelete) {
         if (hit) { B.dirty = false; location.reload(); }
         break;
       }
+    }
+  });
+  const opSel = $("#ne-op", ov), tplBox = $("#ne-tpl", ov);
+  let lastStarter = JSON.stringify(NODE_OPS.find(o => o[0] === opSel.value)?.[3] ?? {}, null, 2);
+  const opHelp = () => { $("#ne-ophelp", ov).textContent = NODE_OPS.find(o => o[0] === opSel.value)?.[2] || ""; };
+  opHelp();
+  opSel.addEventListener("change", () => { // swap in that operator's starter unless the user already edited the settings
+    opHelp();
+    const cur = tplBox.value.trim();
+    if (!cur || cur === "{}" || cur === lastStarter.trim() || !type && cur === JSON.stringify(def.template, null, 2).trim()) {
+      lastStarter = JSON.stringify(NODE_OPS.find(o => o[0] === opSel.value)?.[3] ?? {}, null, 2); tplBox.value = lastStarter;
     }
   });
   if (startDelete) $("[data-ne=delete]", ov)?.click(); else $("#ne-type", ov).focus();
