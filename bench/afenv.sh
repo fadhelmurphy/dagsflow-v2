@@ -1,0 +1,11 @@
+export AIRFLOW_HOME=${BENCH_DIR:-$(pwd)}/afhome
+export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://bench:bench@127.0.0.1/airflow
+export AIRFLOW__CORE__EXECUTOR=LocalExecutor
+export AIRFLOW__CORE__PARALLELISM=16
+export AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG=16
+export AIRFLOW__CORE__LOAD_EXAMPLES=False
+export AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=False
+export AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL=5
+export AIRFLOW__WEBSERVER__WORKERS=2
+export AIRFLOW__CORE__DAGS_FOLDER=${DAGS:-${BENCH_DIR:-$(pwd)}/wl/small/af_dags}
+export PATH=${BENCH_DIR:-$(pwd)}/af/bin:$PATH

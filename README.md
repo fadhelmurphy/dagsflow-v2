@@ -644,6 +644,32 @@ dagsflow-go webserver --addr 0.0.0.0:8080   # several replicas behind a load bal
 - Backup/restore: `dagsflow-go db export -f backup.json` / `db import -f backup.json`. To move from JSON files to Postgres, run `db export` without `DAGSFLOW_DATABASE_URL`, then `db import` with it set. Task logs are not exported. For regular Postgres backups use `pg_dump` / managed database snapshots.
 - Upgrades: the schema is migrated automatically on start, under a lock so several processes starting together are safe. An older binary refuses to run against a newer schema. Rolling restarts of schedulers are safe (see HA above).
 
+## Benchmark vs Airflow
+
+A small benchmark of **orchestration overhead** against Apache Airflow 2.10.5 (October 2026). Scripts and how to reproduce: [`bench/`](bench/README.md).
+
+**Setup.** One machine with 2 vCPU and 8 GB RAM. Both systems use Postgres 16 as the metadata database, parallelism 16 and no example DAGs. Airflow runs `scheduler` + `webserver` with the LocalExecutor and default settings. dagsflow runs `standalone` (scheduler + web UI in one process). Every task does nothing (`true` for bash, `return nil` for Go), so the numbers show what the orchestrator itself costs. Each run was repeated 3 times and the median is reported. RAM is the PSS of all processes of the service.
+
+| Metric | Airflow 2.10.5 | dagsflow, YAML DAGs | dagsflow, Go DAGs |
+|---|---|---|---|
+| `chain50`: 50 sequential tasks | 55.9 s | 1.06 s | 1.05 s |
+| `fan200`: 200 independent tasks | 81.5 s | 3.0 s | 1.9 s |
+| Startup until `/health` is OK | 4.4 s | 0.1 s | 1.3 s (2 bundles compiled) |
+| RAM, idle | 519 MB | 18 MB | 18 MB |
+| RAM, peak during `fan200` | 1,671 MB | 58 MB | 64 MB |
+| 1,002 DAG files: first start until all are listed | 159 s | 0.3 s | 543 s |
+| 1,002 DAG files: restart with the bundle cache | n/a | n/a | 11.8 s |
+| 1,002 DAG files: `chain50` | 67.0 s | 1.1 s | 1.05 s |
+| 1,002 DAG files: RAM, idle | 720 MB | 27 MB | 36 MB |
+
+What this does and does not show:
+
+- **It measures overhead, not work.** Airflow spends about 1.1 s per task (every task starts a new Python process), dagsflow about 20 ms. For tasks that run for minutes, such as a BigQuery query, the difference hardly matters.
+- **Go DAG files are compiled one by one.** Every `.go` file in the root of the DAG folder becomes its own bundle (about 0.5 s and 6.7 MB each), so 1,000 separate files take about 9 minutes on the first start and 6.7 GB of disk. A restart reuses the cache. For many Go DAGs, put them in one subfolder (one bundle) instead; that layout was not measured here.
+- **YAML vs Python parsing is not the same work.** dagsflow reads YAML, while Airflow executes every Python file.
+- **Airflow was not tuned**, and Airflow 3, the CeleryExecutor and bigger machines were not tested. The numbers only hold for this machine.
+- The dagsflow binary was built without `builtin_dags` (the same as `load_examples=False` in Airflow); everything else is the normal code.
+
 ## Current limitations
 
 - Go tasks run as goroutines; a task that ignores `ctx` keeps running after a timeout. Bash tasks are killed as a process group. On workers/pods, cancellation from the scheduler also relies on `ctx`.
