@@ -144,6 +144,7 @@ func (s *Server) Handler() http.Handler {
 		{"DELETE /api/v1/builder/custom-nodes/{type}", engine.ActBuilderEdit, s.customNodeDelete},
 		{"GET /api/v1/builder/workflows", engine.ActBuilderEdit, s.builderList},
 		{"POST /api/v1/builder/validate", engine.ActBuilderEdit, s.builderValidate},
+		{"POST /api/v1/builder/run-node", engine.ActBuilderEdit, s.builderRunNode},
 		{"GET /api/v1/builder/workflows/{dag}", engine.ActBuilderEdit, s.builderGet},
 		{"PUT /api/v1/builder/workflows/{dag}", engine.ActBuilderEdit, s.builderPut},
 		{"DELETE /api/v1/builder/workflows/{dag}", engine.ActBuilderEdit, s.builderDelete},
@@ -301,12 +302,12 @@ func (s *Server) authenticate(r *http.Request) (*engine.User, bool, bool) {
 	}
 	keys := []string{"u:" + strings.ToLower(name), "ip:" + clientIP(r)}
 	u, ok := s.cached("b:"+name+"\x00"+pw, func() (*engine.User, bool) {
-		if s.limiter.blocked(keys...) > 0 { // same lockout as the login form
+		if s.loginBlocked(keys...) > 0 { // same lockout as the login form
 			return nil, false
 		}
 		u, ok := s.Store.Authenticate(name, pw, "")
 		if !ok {
-			s.limiter.fail(keys...)
+			s.loginFailed(keys...)
 		}
 		return u, ok
 	})

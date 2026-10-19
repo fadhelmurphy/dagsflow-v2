@@ -149,7 +149,25 @@ func setup(cmd *cobra.Command) {
 			return
 		}
 	}
+	isolateGoTasks()
 	loadDags()
+}
+
+// isolateGoTasks runs the tasks of compiled-in Go DAGs in child processes, so
+// timeouts and cancels can stop code that ignores ctx.
+// DAGSFLOW_GO_TASKS=inprocess keeps the old behaviour (goroutines).
+func isolateGoTasks() {
+	switch strings.ToLower(os.Getenv("DAGSFLOW_GO_TASKS")) {
+	case "inprocess", "in-process", "goroutine":
+		dag.SetIsolatedRunner(nil)
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARN: cannot find own executable (%v); Go tasks run in-process\n", err)
+		return
+	}
+	bundle.IsolateCompiledIn(exe)
 }
 
 func signalContext() (context.Context, context.CancelFunc) {
@@ -206,8 +224,8 @@ var schedulerCmd = &cobra.Command{
 	Short: "Run the scheduler for all DAGs (foreground; -D to daemonize)",
 	Run: func(cmd *cobra.Command, args []string) {
 		st := newStore()
-		if _, alive := engine.SchedulerInfo(st); alive && !st.Distributed() {
-			exitf("a scheduler is already running (see `scheduler status`); several schedulers need the Postgres metadata database")
+		if pid, alive := engine.SchedulerInfo(st); alive && !st.Distributed() {
+			fmt.Fprintf(os.Stderr, "a scheduler is already running (pid %d): this one starts as a standby and takes over when it stops\n", pid)
 		}
 		if daemon, _ := cmd.Flags().GetBool("daemon"); daemon {
 			_ = os.MkdirAll(st.LogsDir(), 0o755)
@@ -390,8 +408,8 @@ var standaloneCmd = &cobra.Command{
 	Short: "Run scheduler + web UI in one process (like `airflow standalone`)",
 	Run: func(cmd *cobra.Command, args []string) {
 		st := newStore()
-		if _, alive := engine.SchedulerInfo(st); alive && !st.Distributed() {
-			exitf("a scheduler is already running; use `webserver` instead")
+		if pid, alive := engine.SchedulerInfo(st); alive && !st.Distributed() {
+			fmt.Fprintf(os.Stderr, "a scheduler is already running (pid %d): the scheduler part of this process waits as a standby\n", pid)
 		}
 		loadConnections()
 		ctx, cancel := signalContext()
@@ -409,6 +427,9 @@ var standaloneCmd = &cobra.Command{
 }
 
 func Execute() {
+	if len(os.Args) > 1 && os.Args[1] == bundle.TaskCommand {
+		bundle.TaskMain(os.Args[2:]) // child process of an isolated Go task
+	}
 	webserverCmd.Flags().StringVar(&webAddr, "addr", "127.0.0.1:8080", "listen address")
 	standaloneCmd.Flags().StringVar(&webAddr, "addr", "127.0.0.1:8080", "listen address")
 	for _, c := range []*cobra.Command{webserverCmd, standaloneCmd} {

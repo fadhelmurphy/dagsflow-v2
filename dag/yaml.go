@@ -105,7 +105,16 @@ type yamlTask struct {
 	Conf         map[string]any `yaml:"conf"`
 	Wait         bool           `yaml:"wait_for_completion"`
 
-	Path           string `yaml:"path"` // sensors
+	Left  string   `yaml:"left"` // branch (If node), + input, path, value
+	Op    string   `yaml:"op"`
+	Value any      `yaml:"value"`
+	Then  []string `yaml:"then"`
+	Else  []string `yaml:"else"`
+
+	MaxBytes int64  `yaml:"max_bytes"` // http
+	SaveTo   string `yaml:"save_to"`
+
+	Path           string `yaml:"path"` // sensors, branch
 	Delta          string `yaml:"delta"`
 	ExternalDagID  string `yaml:"external_dag_id"`
 	ExternalTaskID string `yaml:"external_task_id"`
@@ -296,7 +305,7 @@ func (yt yamlTask) sensorConfig() (SensorConfig, error) {
 
 func (yt yamlTask) httpReq() HTTPRequest {
 	return HTTPRequest{Method: yt.Method, URL: yt.URL, Endpoint: yt.Endpoint, ConnID: yt.ConnID,
-		Headers: yt.Headers, Body: yt.Body, ExpectStatus: yt.ExpectStatus}
+		Headers: yt.Headers, Body: yt.Body, ExpectStatus: yt.ExpectStatus, MaxBytes: yt.MaxBytes, SaveTo: yt.SaveTo}
 }
 
 func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
@@ -362,6 +371,12 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 		d.NewMergeTask(yt.ID, MergeConfig{Mode: yt.Mode, Inputs: yt.Inputs, On: yt.On, JoinType: yt.JoinType}, opts...)
 	case "transform":
 		d.NewTransformTask(yt.ID, TransformConfig{Input: yt.Input, Steps: yt.Steps}, opts...)
+	case "branch":
+		cfg := IfConfig{Input: yt.Input, Path: yt.Path, Left: yt.Left, Op: yt.Op, Value: yt.Value, Then: yt.Then, Else: yt.Else}
+		if err := cfg.validate(); err != nil {
+			return err
+		}
+		d.NewIfTask(yt.ID, cfg, opts...)
 	case "trigger_dagrun":
 		if yt.TriggerDagID == "" {
 			return errors.New("trigger_dagrun needs trigger_dag_id")
@@ -387,7 +402,7 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			d.NewHTTPSensor(yt.ID, yt.httpReq(), cfg, opts...)
 		}
 	default:
-		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, gcs_write, s3_write, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
+		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, branch, gcs_write, s3_write, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
 	}
 	return nil
 }

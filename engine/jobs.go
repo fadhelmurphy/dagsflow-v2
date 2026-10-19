@@ -46,6 +46,8 @@ type JobPayload struct {
 	Item              any                       `json:"item,omitempty"`
 	XCom              map[string]map[string]any `json:"xcom,omitempty"`
 	MappedLen         map[string]int            `json:"mapped_len,omitempty"`
+	// Preview: a builder "Run node" request instead of a task instance.
+	Preview *PreviewRequest `json:"preview,omitempty"`
 }
 
 // JobResult is reported by the executor when the attempt ends.
@@ -56,4 +58,5 @@ type JobResult struct {
 	XCom          map[string]any            `json:"xcom,omitempty"`
 	Rendered      map[string]string         `json:"rendered,omitempty"`
 	OutletExtra   map[string]map[string]any `json:"outlet_extra,omitempty"`
+	Preview       *PreviewResult            `json:"preview,omitempty"`
 }

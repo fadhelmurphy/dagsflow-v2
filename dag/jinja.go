@@ -17,7 +17,8 @@ import (
 //	{{ ti.xcom_pull(task_ids='a', key='k') }}             -> {{ xcom_pull "a" "k" }}
 //
 // Go-style templates are left untouched ({{ .ds }} keeps working), so both
-// styles can be mixed. Jinja statements ({% ... %}) and filters are not supported.
+// styles can be mixed. Statements ({% if %}, {% for %}, {% set %}, {% include %},
+// {% raw %}), comments, operators and filters are translated in jinja_stmt.go.
 
 var (
 	actionRe  = regexp.MustCompile(`\{\{-?(.*?)-?\}\}`)
@@ -28,9 +29,29 @@ var (
 	identRe   = regexp.MustCompile(`[A-Za-z_]\w*`)
 )
 
-// jinjaCompat rewrites Jinja-style variable references in every {{ }} action.
-// known is the set of top-level template variables.
+// jinjaCompat translates a template (Jinja statements, filters and
+// expressions; Go-style actions are kept) and falls back to the per-action
+// rewrite if the template can't be translated. known is the set of top-level
+// template variables.
 func jinjaCompat(raw string, known map[string]bool) string {
+	s, err := jinjaTranslate(raw, known)
+	if err != nil {
+		return legacyCompat(raw, known)
+	}
+	return s
+}
+
+// jinjaTranslate is jinjaCompat with errors (unclosed blocks, unsupported
+// statements or filters), used when rendering.
+func jinjaTranslate(raw string, known map[string]bool) (string, error) {
+	if !strings.Contains(raw, "{{") && !strings.Contains(raw, "{%") && !strings.Contains(raw, "{#") {
+		return raw, nil
+	}
+	return translateJinja(raw, known, func(action string) string { return legacyCompat(action, known) })
+}
+
+// legacyCompat rewrites Jinja-style variable references in every {{ }} action.
+func legacyCompat(raw string, known map[string]bool) string {
 	if !strings.Contains(raw, "{{") {
 		return raw
 	}

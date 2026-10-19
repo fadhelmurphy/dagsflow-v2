@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/csv"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -47,7 +49,8 @@ const (
 	maxGridCols    = 16384
 )
 
-var uploadExts = map[string]bool{".csv": true, ".tsv": true, ".txt": true, ".xlsx": true, ".xlsm": true}
+var uploadExts = map[string]bool{".csv": true, ".tsv": true, ".txt": true, ".xlsx": true, ".xlsm": true,
+	".json": true, ".ndjson": true, ".jsonl": true}
 
 // SafeUploadName reduces a client supplied name to a safe base name.
 func SafeUploadName(name string) (string, error) {
@@ -64,7 +67,7 @@ func SafeUploadName(name string) (string, error) {
 	out := strings.Trim(b.String(), ".")
 	ext := strings.ToLower(filepath.Ext(out))
 	if out == "" || !uploadExts[ext] {
-		return "", errors.New("file must be .csv, .tsv, .txt or .xlsx")
+		return "", errors.New("file must be .csv, .tsv, .txt, .xlsx, .json or .ndjson")
 	}
 	return out, nil
 }
@@ -339,11 +342,13 @@ func fileFormat(path, format string) (string, error) {
 			return "xlsx", nil
 		case ".csv", ".tsv", ".txt":
 			return "csv", nil
+		case ".json", ".ndjson", ".jsonl":
+			return "json", nil
 		}
-		return "", fmt.Errorf("cannot tell the format of %s: use .csv, .tsv or .xlsx", filepath.Base(path))
+		return "", fmt.Errorf("cannot tell the format of %s: use .csv, .tsv, .xlsx, .json or .ndjson", filepath.Base(path))
 	}
-	if f != "csv" && f != "xlsx" {
-		return "", fmt.Errorf("unknown format %q (csv or xlsx)", format)
+	if f != "csv" && f != "xlsx" && f != "json" {
+		return "", fmt.Errorf("unknown format %q (csv, xlsx or json)", format)
 	}
 	return f, nil
 }
@@ -369,8 +374,85 @@ func ReadGrid(path, format, sheet, delim string) ([][]any, FileInfo, error) {
 	if err != nil {
 		return nil, FileInfo{}, err
 	}
+	if fm == "json" {
+		g, err := readJSONGrid(b)
+		return g, FileInfo{Format: fm}, err
+	}
 	g, err := readCSV(b, delim, strings.ToLower(filepath.Ext(path)) == ".tsv")
 	return g, FileInfo{Format: fm}, err
+}
+
+// readJSONGrid turns a JSON array of objects, a single object, or NDJSON (one
+// object per line) into a grid whose first row holds the keys (in the order
+// they first appear), so ranges, headers and previews work like for CSV.
+func readJSONGrid(b []byte) ([][]any, error) {
+	var objs []map[string]any
+	t := bytes.TrimSpace(b)
+	switch {
+	case len(t) == 0:
+		return nil, nil
+	case t[0] == '[':
+		var arr []any
+		if err := json.Unmarshal(t, &arr); err != nil {
+			return nil, fmt.Errorf("invalid JSON: %v", err)
+		}
+		for _, v := range arr {
+			m, ok := v.(map[string]any)
+			if !ok { // array of scalars: one "value" column
+				m = map[string]any{"value": v}
+			}
+			objs = append(objs, m)
+		}
+	default:
+		dec := json.NewDecoder(bytes.NewReader(t))
+		for dec.More() {
+			var v any
+			if err := dec.Decode(&v); err != nil {
+				return nil, fmt.Errorf("invalid JSON / NDJSON at object %d: %v", len(objs)+1, err)
+			}
+			m, ok := v.(map[string]any)
+			if !ok {
+				m = map[string]any{"value": v}
+			}
+			objs = append(objs, m)
+		}
+	}
+	if len(objs) > maxGridRows {
+		return nil, fmt.Errorf("more than %d rows", maxGridRows)
+	}
+	var keys []string
+	seen := map[string]bool{}
+	for _, o := range objs {
+		for _, k := range orderedKeys(o) {
+			if !seen[k] {
+				seen[k] = true
+				keys = append(keys, k)
+			}
+		}
+	}
+	head := make([]any, len(keys))
+	for i, k := range keys {
+		head[i] = k
+	}
+	grid := [][]any{head}
+	for _, o := range objs {
+		row := make([]any, len(keys))
+		for i, k := range keys {
+			row[i] = o[k]
+		}
+		grid = append(grid, row)
+	}
+	return grid, nil
+}
+
+// orderedKeys: map order is random in Go, so keys are sorted for a stable layout.
+func orderedKeys(m map[string]any) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
 }
 
 func sniffDelim(b []byte) rune {

@@ -78,7 +78,8 @@ func (d *DAG) NewFileReadTask(id string, cfg FileReadConfig, opts ...TaskOption)
 			return err
 		}
 		grid = a1.apply(grid)
-		rows := tableRows(grid, !cfg.NoHeader, !cfg.KeepHeaders)
+		// JSON keys are kept as they are; CSV/Excel headers become snake_case
+		rows := tableRows(grid, !cfg.NoHeader, !cfg.KeepHeaders && info.Format != "json")
 		if len(rows) > cfg.Limit {
 			ctx.Logf("WARNING: file cut at %d rows (set a higher limit)", cfg.Limit)
 			rows = rows[:cfg.Limit]

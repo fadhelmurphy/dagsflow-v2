@@ -139,6 +139,28 @@ func (w *Worker) execute(ctx context.Context, j *TaskJob) {
 
 func (w *Worker) run(ctx context.Context, j *TaskJob) (res JobResult) {
 	p := j.Payload
+	if p.Preview != nil { // builder "Run node": nothing is logged or stored
+		pctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			tk := time.NewTicker(2 * time.Second)
+			defer tk.Stop()
+			for {
+				select {
+				case <-pctx.Done():
+					return
+				case <-tk.C:
+					if stop, err := w.Store.be().jobHeartbeat(j.ID, w.Store.ID); err == nil && stop {
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+		pr := RunPreview(pctx, *p.Preview)
+		res.Preview = &pr
+		return res
+	}
 	out, _, err := w.Store.OpenTaskLog(LogKey{p.DagID, p.RunID, p.TaskID, p.MapIndex, p.Try})
 	if err != nil {
 		out = nopCloser{io.Discard}
@@ -232,7 +254,7 @@ func (nopCloser) Close() error { return nil }
 func pokeLoop(ctx *dag.TaskContext, sn *dag.SensorSpec, out io.Writer) error {
 	deadline := time.Now().Add(sn.Timeout)
 	for {
-		ok, err := safePoke(ctx, sn)
+		ok, err := safePoke(ctx, ctx.Task)
 		if err != nil {
 			return err
 		}

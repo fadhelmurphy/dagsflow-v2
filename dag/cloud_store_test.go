@@ -175,6 +175,7 @@ func TestS3Write(t *testing.T) {
 	if err := runTask("dump"); err == nil || !strings.Contains(err.Error(), "bad signature") {
 		t.Fatalf("expected the signature error, got %v", err)
 	}
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 	t.Setenv("AWS_ACCESS_KEY_ID", "")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	if err := runTask("dump"); err == nil || !strings.Contains(err.Error(), "no AWS credentials") {

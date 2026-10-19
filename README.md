@@ -59,6 +59,16 @@ func init() {
 A task returns an `error` to fail (panics are recovered too). `ctx` is a `context.Context`
 that is cancelled on timeout or scheduler stop: pass it to your DB/HTTP clients.
 
+Each task of a compiled-in Go DAG runs in a child process of the dagsflow binary
+(`dagsflow-go __task run`), like Airflow runs every task in its own process. A timeout,
+**Mark failed**, a scheduler shutdown or a cancel on a worker kills that process group,
+so code that ignores `ctx` (a `time.Sleep`, a library without context support) is
+stopped too. XComs, variables, connections and the other `TaskContext` calls go back to
+the scheduler or worker over a local RPC connection. Package-level variables are not
+shared between tasks (each task is a new process); keep state in XComs. Set
+`DAGSFLOW_GO_TASKS=inprocess` to run them as goroutines in the scheduler/worker process
+instead, as before (then a task that ignores `ctx` keeps running after a timeout).
+
 > XComs and conf are stored as JSON, so numbers come back as `float64`.
 > Use `dag.XComPullAs[int]` / `dag.ParamAs[int]` instead of a `.(int)` type assertion.
 
@@ -119,7 +129,31 @@ Templates use Go's `text/template` (`{{ .ds }}`, `{{ .params.x }}`). So that SQL
 | `{{ macros.ds_add(ds, -1) }}` | `{{ ds_add .ds -1 }}` |
 | `{{ ti.xcom_pull(task_ids='a', key='k') }}` | `{{ xcom_pull "a" "k" }}` |
 
-As in Airflow, a BigQuery task's `params` are merged into `{{ params }}`. Not supported yet: Jinja statements (`{% if %}`, `{% include %}`) and filters (`| upper`).
+As in Airflow, a BigQuery task's `params` are merged into `{{ params }}`.
+
+Jinja statements, operators and filters work too, so most Airflow SQL files run unchanged:
+
+```sql
+{# comments are dropped #}
+{% set target = params.project_id ~ '.dw.' ~ params.table %}
+INSERT INTO `{{ target }}`
+SELECT {% for c in params.columns %}{{ c | lower }}{% if not loop.last %}, {% endif %}{% endfor %}
+FROM `{{ params.project_id }}.raw.orders`
+WHERE d BETWEEN '{{ macros.ds_add(ds, -7) }}' AND '{{ ds }}'
+{% if params.env == 'prod' and dag_run.conf.get('full', false) is not true %}
+  AND status = 'paid'
+{% elif params.limit | default(0) | int > 0 %}
+LIMIT {{ params.limit | int }}
+{% endif %}
+{% include 'common/where_active.sql' %}
+```
+
+- Statements: `if` / `elif` / `else`, `for` (with `else`, `loop.index`, `loop.index0`, `loop.first`, `loop.last`, `loop.length`, `for k, v in d.items()`), `set`, `include` (relative to the DAG file, `ignore missing` works), `raw`, `{# comments #}` and whitespace control (`{%-`, `-%}`).
+- Expressions: `== != < <= > >=`, `and or not`, `in` / `not in`, `+ - * / // %`, `~` (concatenation), `x if c else y`, lists, `range()`, `dict()`, `.get()`, `.items()`, `.keys()`, `.values()`, `.upper()`, `.lower()`, `.strip()`, `.replace()`, `.split()`, `.startswith()`, `.endswith()`, tests `is defined / none / string / number / even / odd / divisibleby(n) / empty`.
+- Filters: `upper lower trim title capitalize default (d) replace int float string length (count) join first last tojson round abs list sort unique reverse sum min max map(attribute=) select reject batch truncate indent format center wordcount striptags escape (e) quote sqlquote safe`.
+- Macros: `macros.ds_add`, `macros.ds_format`, `ti.xcom_pull(task_ids=..., key=...)`, `var.value.x`, `var.json.x`.
+- Inside conditions and with `default` / `is defined`, a missing key is *undefined* (falsy), like Jinja. A plain `{{ params.missing }}` still fails the task, so typos are caught.
+- Not supported: `macro`, `call`, `block` / `extends`, `filter` blocks and block `set`; the task fails with a message naming the statement.
 
 ## CLI
 
@@ -361,7 +395,7 @@ tasks:
     outlets: [bq://proj.dw.sales]
 ```
 
-Operators: `empty`, `bash`, `bigquery`, `http`, `postgres`, `transform`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`. Custom logic needs a Go DAG.
+Operators: `empty`, `bash`, `go`, `bigquery`, `http`, `postgres`, `transform`, `branch`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`, `custom`. Custom logic needs a Go DAG (or a `go` / `bash` task).
 
 ETL operators (rows travel between tasks as the XCom `return_value`, a JSON array of objects):
 
@@ -392,13 +426,46 @@ tasks:
     upstream: [load]
 ```
 
-`transform` steps: `extract`, `select`, `drop`, `rename`, `filter` (`== != > >= < <= contains exists not_exists`), `set`, `sort`, `limit`, `dedupe`, `snake_case` (rename every column to lowercase letters and `_`). A Postgres connection holds either `uri` (`postgres://user:pass@host/db`) or `host`, `port`, `login`, `password`, `database`, `sslmode`. Note that an `http` response is stored up to 64 KB, so use it for API pages, not bulk exports.
+`transform` steps: `extract`, `select`, `drop`, `rename`, `filter` (`== != > >= < <= contains exists not_exists`), `set`, `sort`, `limit`, `dedupe`, `snake_case` (rename every column to lowercase letters and `_`). A Postgres connection holds either `uri` (`postgres://user:pass@host/db`) or `host`, `port`, `login`, `password`, `database`, `sslmode`.
+
+HTTP responses: the body becomes the output up to `max_bytes` (default 10 MB, or `DAGSFLOW_HTTP_MAX_BYTES`). A bigger response fails the task with a clear error instead of being cut. For bulk exports, `save_to` streams the response of any size to a file and the output becomes `{path, bytes, status_code}`; a bare file name goes to the builder's uploads folder, so a `file_read` task can read it (CSV, Excel, JSON or NDJSON):
+
+```yaml
+  - id: download
+    operator: http
+    url: "https://api.example.com/export?date={{ .ds }}"
+    save_to: "orders_{{ .ds }}.json"   # streamed, no size limit (2 h default timeout)
+  - id: orders
+    operator: file_read
+    file: "orders_{{ .ds }}.json"      # a JSON array of objects or NDJSON; keys are kept as they are
+    upstream: [download]
+```
+
+Branching without Go (`branch`, the builder's **If** node): check a value, run the tasks in `then` when it holds and the ones in `else` otherwise; the other side is skipped (like `BranchPythonOperator`):
+
+```yaml
+  - id: has_rows
+    operator: branch
+    upstream: [orders]
+    path: length            # a dotted path into the upstream output; "length" = number of rows / keys / characters
+    op: ">"                 # == != > >= < <= contains not_contains empty not_empty (default) exists not_exists
+    value: 0                # templates work
+    then: [load]
+    else: [notify_empty]
+  # or check a template instead of an upstream output:
+  #   left: "{{ .params.mode }}"
+  - id: report              # joins both paths
+    upstream: [load, notify_empty]
+    trigger_rule: none_failed_min_one_success
+```
+
+The output of a `branch` task is `true` or `false`. Text from a shell or an HTTP body is trimmed before comparing. Numbers compare as numbers when both sides parse as numbers.
 
 Files and combining sources:
 
 ```yaml
   - id: sales
-    operator: file_read                # CSV / TSV / Excel (.xlsx)
+    operator: file_read                # CSV / TSV / Excel (.xlsx) / JSON / NDJSON
     file: sales_jan.xlsx               # an upload from the builder, or a path on the worker ({{ .ds }} works)
     sheet: Data Jan                    # name or number; default: first sheet
     range: B3:F                        # A1 notation: header on row 3, columns B to F, to the last row
@@ -434,7 +501,7 @@ Dump rows to object storage (a file per run, plain REST, no SDK):
     upstream: [read_bq]
 ```
 
-`gcs_write` uses the same service account as BigQuery and Sheets (it needs write access to the bucket). `s3_write` reads the `aws_default` connection (or `conn_id`) with `access_key_id`, `secret_access_key`, optional `session_token`, `region` and `endpoint_url` (for MinIO or R2; those use path style URLs), else the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_REGION` / `AWS_ENDPOINT_URL_S3` environment variables. IAM roles from the instance metadata service are not supported yet. The task output is `{uri, rows, bytes}`. CSV columns default to all fields, sorted; set `columns: [...]` for an order. The whole file is built in memory and uploaded in one request, so it suits files up to a few hundred MB. Both are tested against fake servers (S3 signing also against the examples published by AWS), not yet against real GCS or S3.
+`gcs_write` uses the same service account as BigQuery and Sheets (it needs write access to the bucket). `s3_write` reads the `aws_default` connection (or `conn_id`) with `access_key_id`, `secret_access_key`, optional `session_token`, `region` and `endpoint_url` (for MinIO or R2; those use path style URLs), else the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_REGION` / `AWS_ENDPOINT_URL_S3` environment variables. Without keys it uses the IAM role of where it runs, in the AWS SDK order: web identity (EKS IRSA: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`), container credentials (ECS task role, EKS Pod Identity), then the EC2 instance profile through IMDSv2 (`AWS_EC2_METADATA_DISABLED=true` skips it). A `role_arn` (and optional `external_id`) on the connection is assumed with STS on top of those credentials, for cross-account buckets. Temporary credentials are cached until shortly before they expire. The task output is `{uri, rows, bytes}`. CSV columns default to all fields, sorted; set `columns: [...]` for an order. The whole file is built in memory and uploaded in one request, so it suits files up to a few hundred MB. Both are tested against fake servers (S3 signing also against the examples published by AWS), not yet against real GCS or S3.
 
 BigQuery and Google Sheets as source or destination (plain REST, no extra dependencies):
 
@@ -466,9 +533,11 @@ Credentials come from the `google_cloud_default` connection (or `conn_id`): `cre
 
 **Builder** in the top menu (permission `builder.edit`, Admin by default). Drag nodes from the palette onto the canvas (or click one to add it after the selected node), drag from a node's right port to another node to connect them, and fill in the side panel. Dropping a connection on an empty spot opens a node picker.
 
-- **Nodes**: HTTP request, Postgres query / insert, BigQuery read rows / insert rows / SQL, Google Sheets read / write, CSV / Excel file (upload, sheet, start row and columns, with a preview), Transform rows, Merge / join, Google Cloud Storage dump, Amazon S3 dump, Shell command, Go code, Trigger another DAG, No-op, and four sensors. Every node also has retries, timeout, trigger rule, pool, dataset outlets, failure alerts and *run once per item* (dynamic mapping).
+- **Nodes**: HTTP request, Postgres query / insert, BigQuery read rows / insert rows / SQL, Google Sheets read / write, CSV / Excel / JSON file (upload, sheet, start row and columns, with a preview), Transform rows, Merge / join, Google Cloud Storage dump, Amazon S3 dump, Shell command, Go code, If / branch, Trigger another DAG, No-op, and four sensors. Every node also has retries, timeout, trigger rule, pool, dataset outlets, failure alerts and *run once per item* (dynamic mapping).
 - **Live validation**: missing fields, bad durations, loops and unknown connections are flagged on the node while you edit; saving is refused while there are errors.
 - **Save & Run** saves, triggers a run and colours the nodes by state; select a node to see its output rows, error and log.
+- **Run node** (side panel) runs only the selected node right away, without saving, and shows its output as a table (or JSON / text), its log and how long it took, so you can preview a source or check a transform before running the workflow. Its input comes from earlier *Run node* results in the editor, otherwise from the latest run of the saved workflow, otherwise the read-only nodes before it (sources, transform, merge, If, GET requests) are run too. A node before it that may change data (a shell command, a load, a BigQuery job) is never run automatically: run it first. Nothing is stored, *run once per item* nodes preview their first item, sensors check once, and a preview stops after 2 minutes. Nodes that write data ask for confirmation. It needs `dag.edit` and `dag.trigger` on the workflow. It runs where the workflow's tasks run: when a worker serving the `default` queue is alive (`--executor worker`), the preview goes through the task queue to a worker (the result says which one), otherwise it runs on the webserver. `DAGSFLOW_PREVIEW_ON=webserver` or `worker` forces one side. Kubernetes pods only run real task instances, so with that executor the preview runs on the webserver.
+- **If / branch**: connect the nodes that run when the condition holds and the ones that run otherwise; each connection leaving an If shows **true** or **false** (click the label, or select the connection, to switch it). A node after the If that joins both paths gets the trigger rule *none failed, min one success* automatically.
 - **Undo/redo**, auto-arrange, fit view, duplicate (`Ctrl+D`), delete, `Ctrl+S`. Unsaved edits survive an accidental reload (kept in the browser) and leaving the page asks first.
 - Workflows are saved as ordinary YAML DAGs in `<dags folder>/builder/<id>.yaml` (node positions in a `layout:` block), so the scheduler, executors, RBAC, Grid and Graph views treat them like any other DAG, and you can edit the YAML by hand. New scheduled workflows start **paused**: switch them on in the builder.
 - **Several sources and loads**: connect as many nodes as you like; one node can feed several destinations. To use two sources together, connect both to a **Merge / join** node (union or a two-way join). Other nodes read one input, chosen under *Read rows from* when several are connected.
@@ -523,7 +592,7 @@ dag.RegisterNodeType(dag.NodeType{
 
 In a workflow file the node is stored as `operator: custom`, `node: <type>`, `with: {...}`, plus the usual common settings (retries, timeout...). If a workflow uses a type that is not defined any more (YAML file removed, or no longer registered in Go), the DAG shows an import error naming it, and the builder still opens the workflow with that node marked red as missing: delete it and save. YAML and UI nodes are as powerful as the operator they wrap (a `bash` template runs shell commands), so treat `builder.edit` accordingly.
 
-API (all need `builder.edit`): `GET|PUT|DELETE /builder/custom-nodes/{type}`, `GET /builder/nodes`, `GET /builder/workflows`, `GET|PUT|DELETE /builder/workflows/{dag}`, `POST /builder/validate`. A workflow is `{"dag_id", "settings": {schedule, tags, ...}, "nodes": [{id, type, x, y, config}], "edges": [{from, to}]}`.
+API (all need `builder.edit`): `GET|PUT|DELETE /builder/custom-nodes/{type}`, `GET /builder/nodes`, `GET /builder/workflows`, `GET|PUT|DELETE /builder/workflows/{dag}`, `POST /builder/validate`, `POST /builder/run-node` (`{"graph": {...}, "node": "id", "outputs": {"node": value}}`). A workflow is `{"dag_id", "settings": {schedule, tags, ...}, "nodes": [{id, type, x, y, config}], "edges": [{from, to, branch}]}` (`branch` is `true` / `false` on connections leaving an If node).
 
 ## More Airflow features
 
@@ -598,7 +667,9 @@ Other endpoints: `dagRuns/{run}/clear`, `DELETE dagRuns/{run}`, `pools`, `variab
 
 ## Production
 
-Use **Postgres** as the metadata database in production. Without `DAGSFLOW_DATABASE_URL`, dagsflow uses JSON files (fine for a laptop or a single machine with one scheduler).
+Use **Postgres** as the metadata database in production. Without `DAGSFLOW_DATABASE_URL`, dagsflow uses JSON files (fine for a laptop or a single machine).
+
+With the JSON files, a second scheduler on the same machine (or on a shared folder with working file locks) starts as a **hot standby**: it waits on the lock and takes over within ~2 seconds when the active scheduler stops or dies, continuing its running DagRuns. Several *active* schedulers, workers on other machines and Kubernetes pods share state over the network, so they need Postgres.
 
 ```bash
 export DAGSFLOW_DATABASE_URL='postgres://dagsflow:***@db:5432/dagsflow?sslmode=require'   # or DAGSFLOW_DATABASE_URL_FILE
@@ -635,7 +706,7 @@ dagsflow-go webserver --addr 0.0.0.0:8080   # several replicas behind a load bal
 
 **Security**
 - HTTPS directly: `webserver --tls-cert cert.pem --tls-key key.pem`. Behind a proxy, forward `X-Forwarded-Proto`.
-- Login and Basic auth are locked for 15 minutes after 5 failures per username/IP. `X-Forwarded-For` is only trusted with `DAGSFLOW_TRUST_PROXY_HEADERS=true`.
+- Login and Basic auth are locked for 15 minutes after 5 failures per username/IP. The failures are kept in the metadata database (hashed, a row-locked update on Postgres), so the lockout holds across every webserver replica; each process also keeps its own count in case the database is unreachable. `X-Forwarded-For` is only trusted with `DAGSFLOW_TRUST_PROXY_HEADERS=true`.
 - Security headers: CSP, HSTS (over HTTPS), X-Frame-Options, nosniff. Requests that change data need the CSRF header (`X-Dagsflow`) or a Bearer token. The server has timeouts and body size limits.
 - Set `DAGSFLOW_FERNET_KEY` (encrypted variables/connections) and `DAGSFLOW_SECRET_KEY` (the same on every webserver replica). If `SECRET_KEY` is empty, a key is generated once and stored in the metadata database.
 
@@ -672,10 +743,9 @@ What this does and does not show:
 
 ## Current limitations
 
-- Go tasks run as goroutines; a task that ignores `ctx` keeps running after a timeout. Bash tasks are killed as a process group. On workers/pods, cancellation from the scheduler also relies on `ctx`.
-- With the JSON store only one scheduler may run (enforced with a lock file). HA, workers and pods need Postgres.
-- Login rate limiting is kept per webserver process (not shared between replicas).
-- The visual builder has no "run this node only" or data preview before a run yet, and no branching/IF node (use a Go DAG for branches). `http` outputs are cut at 64 KB.
+- With the JSON store one scheduler is active at a time (others wait as standbys); several active schedulers, workers on other machines and pods share state over the network and need Postgres.
+- The builder edits YAML workflows; Go DAGs are shown read-only in the DAG views but can't be opened in the builder (they are code).
+- GCS and S3 uploads are tested against fake servers (S3 signing also against the examples published by AWS), not yet against real buckets.
 
 ## Connections
 

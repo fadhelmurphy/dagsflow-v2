@@ -3,6 +3,7 @@ package dag
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/csv"
@@ -13,7 +14,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -253,34 +253,9 @@ type awsCreds struct {
 	Key, Secret, Token, Region, Endpoint string
 }
 
-// awsCredentials resolves the keys of a connection (aws_default or conn_id:
-// access_key_id, secret_access_key, session_token, region, endpoint_url) and
-// falls back to the standard AWS_* environment variables.
+// awsCredentials resolves the credentials of a connection (see aws_creds.go).
 func awsCredentials(connID string) (awsCreds, error) {
-	id := firstNonEmpty(connID, defaultAWSCon)
-	c, _ := GetConnection(id)
-	get := func(key string, env ...string) string {
-		if v := strings.TrimSpace(c.String(key)); v != "" {
-			return v
-		}
-		for _, e := range env {
-			if v := strings.TrimSpace(os.Getenv(e)); v != "" {
-				return v
-			}
-		}
-		return ""
-	}
-	cr := awsCreds{
-		Key:      get("access_key_id", "AWS_ACCESS_KEY_ID"),
-		Secret:   get("secret_access_key", "AWS_SECRET_ACCESS_KEY"),
-		Token:    get("session_token", "AWS_SESSION_TOKEN"),
-		Region:   get("region", "AWS_REGION", "AWS_DEFAULT_REGION"),
-		Endpoint: get("endpoint_url", "AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL"),
-	}
-	if cr.Key == "" || cr.Secret == "" {
-		return cr, fmt.Errorf("no AWS credentials: add access_key_id and secret_access_key to the %q connection (or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)", id)
-	}
-	return cr, nil
+	return awsCredentialsCtx(context.Background(), connID)
 }
 
 func hmacSHA256(key []byte, data string) []byte {
@@ -399,7 +374,7 @@ func s3Put(ctx *TaskContext, cr awsCreds, bucket, key, ctype string, data []byte
 func (d *DAG) NewS3WriteTask(id string, cfg StoreWriteConfig, opts ...TaskOption) *Task {
 	return d.newStoreTask(id, "s3_write", "S3WriteOperator", "s3", cfg,
 		func(ctx *TaskContext, name, ctype string, data []byte) (string, error) {
-			cr, err := awsCredentials(cfg.ConnID)
+			cr, err := awsCredentialsCtx(ctx, cfg.ConnID)
 			if err != nil {
 				return "", err
 			}

@@ -39,11 +39,15 @@ func NewScheduler(e *Engine) *Scheduler {
 
 func (s *Scheduler) Run(ctx context.Context) error {
 	if !s.Store.Distributed() {
-		// JSON files are not safe for several schedulers: hold an exclusive lock
-		unlock, err := lockFile(filepath.Join(s.Store.Home, "state", "scheduler.lock"))
+		// JSON files take one active scheduler at a time: the others wait as
+		// hot standbys on the lock and take over (adopting the runs of the
+		// previous one) as soon as it stops or dies.
+		unlock, err := s.waitForLock(ctx)
 		if err != nil {
-			pid, _ := SchedulerInfo(s.Store)
-			return fmt.Errorf("another scheduler is already running (pid %d); several schedulers need the Postgres metadata database", pid)
+			return err
+		}
+		if unlock == nil { // stopped while waiting
+			return nil
 		}
 		defer unlock()
 	}
@@ -80,6 +84,38 @@ func (s *Scheduler) Run(ctx context.Context) error {
 				s.Log.Printf("stop requested")
 				stop()
 			}
+		}
+	}
+}
+
+// StandbyPoll is how often a standby scheduler (JSON store) retries the lock.
+var StandbyPoll = 2 * time.Second
+
+// waitForLock takes the scheduler lock of the JSON store, waiting as a standby
+// while another scheduler holds it. It returns (nil, nil) if ctx ends first.
+func (s *Scheduler) waitForLock(ctx context.Context) (func(), error) {
+	path := filepath.Join(s.Store.Home, "state", "scheduler.lock")
+	announced := false
+	for {
+		unlock, err := lockFile(path)
+		if err == nil {
+			if announced {
+				s.Log.Printf("standby: lock acquired, taking over as the active scheduler")
+			}
+			return unlock, nil
+		}
+		if !announced {
+			who := "another scheduler is active"
+			if pid, _ := SchedulerInfo(s.Store); pid > 0 {
+				who = fmt.Sprintf("another scheduler is active (pid %d)", pid)
+			}
+			s.Log.Printf("standby: %s; waiting to take over", who)
+			announced = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case <-time.After(StandbyPoll):
 		}
 	}
 }

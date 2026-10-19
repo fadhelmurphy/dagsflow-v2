@@ -21,6 +21,7 @@ const ICONS = {
   play: '<path d="m6 4 14 8-14 8z"/>',
   dot: '<circle cx="12" cy="12" r="4"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  branch: '<path d="M6 3v18M6 12h4a5 5 0 0 0 5-5V5m0 0-3 3m3-3 3 3M10 12a5 5 0 0 1 5 5v2m0 0-3-3m3 3 3-3"/>',
 };
 const icon = (n, s = 18) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ICONS.dot}</svg>`;
 const SCHEDULES = [["", "Manual only"], ["@hourly", "Every hour"], ["@daily", "Every day (midnight)"], ["@weekly", "Every week"], ["@monthly", "Every month"], ["0 6 * * *", "Every day at 06:00"], ["*/15 * * * *", "Every 15 minutes"]];
@@ -123,6 +124,12 @@ main.bldmain{padding:0;max-width:none}
 .bld-pick{position:fixed;z-index:60;background:#fff;border:1px solid var(--rule);border-radius:8px;box-shadow:0 8px 24px rgba(22,32,42,.2);padding:6px;width:230px;max-height:340px;overflow:auto}
 .bld-pick .bp-item{cursor:pointer;margin-bottom:2px;border-color:transparent}
 .bld-pick h5{margin:6px 6px 3px;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.bld-edges .elab{pointer-events:all;cursor:pointer}
+.bld-edges .elab text{font:600 10.5px var(--sans,system-ui);fill:#fff;pointer-events:none}
+.bprev{border-top:1px solid var(--line);margin-top:10px;padding-top:10px}
+.bprev .hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px}
+.bprev .st{font-weight:700}.bprev .st.ok{color:var(--s-success,#2E9B57)}.bprev .st.bad{color:var(--s-failed,#D23B3B)}
+.btn.run{background:#EEF3FB;border-color:#C9D9F2;color:#1F5FD0;font-weight:600}
 .bld-pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11.5px;font-weight:600;color:#fff}
 .bld-list td .badge{margin-right:6px}
 @media(max-width:900px){.bld-pal{width:150px}.bld-side{width:280px}}
@@ -403,7 +410,14 @@ function connect(from, to) {
   if (B.ro || from === to) return;
   if (B.graph.edges.some(e => e.from === from && e.to === to)) return toast("Already connected");
   if (reaches(to, from)) return toast("That would create a loop");
-  snap(); B.graph.edges.push({ from, to }); markDirty(); drawEdges(); renderSide(); scheduleValidate();
+  const e = { from, to };
+  if (isIf(from)) e.branch = B.graph.edges.some(x => x.from === from && x.branch === "true") ? "false" : "true";
+  snap(); B.graph.edges.push(e); markDirty(); drawEdges(); renderSide(); scheduleValidate();
+}
+const isIf = id => typeOf(node(id)?.type).operator === "branch";
+function flipEdge(i) {
+  const e = B.graph.edges[i]; if (B.ro || !e || !isIf(e.from)) return;
+  snap(); e.branch = e.branch === "true" ? "false" : "true"; markDirty(); drawEdges(); renderSide(); scheduleValidate();
 }
 function removeEdge(i) { if (B.ro) return; snap(); B.graph.edges.splice(i, 1); B.sel = null; markDirty(); renderAll(); scheduleValidate(); }
 function removeNode(id) {
@@ -528,12 +542,21 @@ function decorate() { // selection, validation badges, run state
 
 function portPos(id, out) { const n = node(id); return n ? { x: n.x + (out ? W : 0), y: n.y + H / 2 } : { x: 0, y: 0 }; }
 function curve(a, b) { const dx = Math.max(40, Math.abs(b.x - a.x) / 2); return `M${a.x} ${a.y} C${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`; }
+function bez(a, b, t) { // point on curve(a, b)
+  const dx = Math.max(40, Math.abs(b.x - a.x) / 2), u = 1 - t;
+  const px = [a.x, a.x + dx, b.x - dx, b.x], py = [a.y, a.y, b.y, b.y];
+  const f = p => u * u * u * p[0] + 3 * u * u * t * p[1] + 3 * u * t * t * p[2] + t * t * t * p[3];
+  return { x: f(px), y: f(py) };
+}
 function drawEdges() {
   const g = $("#bel"); if (!g) return;
   g.innerHTML = B.graph.edges.map((e, i) => {
     const a = portPos(e.from, true), b = portPos(e.to, false), sel = B.sel?.k === "edge" && B.sel.id === i, d = curve(a, b);
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    return `<g class="${sel ? "sel" : ""}"><path class="hit" data-edge="${i}" d="${d}"/><path class="ln" d="${d}" marker-end="url(#${sel ? "barrowsel" : "barrow"})"/>
+    const lab = isIf(e.from) ? (e.branch === "true" || e.branch === "false" ? e.branch : "?") : "";
+    const { x: lx, y: ly } = bez(a, b, 0.35);
+    const pill = lab ? `<g class="elab" data-eflip="${i}"><title>Runs when the condition is ${lab}. Click to switch.</title><rect x="${lx - 19}" y="${ly - 9}" width="38" height="18" rx="9" fill="${lab === "true" ? "#2E9B57" : lab === "false" ? "#D23B3B" : "#E0A21B"}"/><text x="${lx}" y="${ly + 4}" text-anchor="middle">${lab}</text></g>` : "";
+    return `<g class="${sel ? "sel" : ""}"><path class="hit" data-edge="${i}" d="${d}"/><path class="ln" d="${d}" marker-end="url(#${sel ? "barrowsel" : "barrow"})"/>${pill}
       ${sel && !B.ro ? `<g class="edel" data-edel="${i}"><circle cx="${mx}" cy="${my}" r="10" fill="#fff" stroke="#D23B3B" stroke-width="1.5"/><path d="M${mx - 4} ${my - 4}l8 8M${mx + 4} ${my - 4}l-8 8" stroke="#D23B3B" stroke-width="1.8" stroke-linecap="round"/></g>` : ""}</g>`;
   }).join("");
 }
@@ -548,6 +571,8 @@ function onDown(e) {
   const cv = $("#bc");
   const del = e.target.closest("[data-edel]");
   if (del) { removeEdge(+del.dataset.edel); return; }
+  const flip = e.target.closest("[data-eflip]");
+  if (flip) { flipEdge(+flip.dataset.eflip); return; }
   const nodeEl = e.target.closest(".bn"), port = e.target.closest(".bn-port.out"), hit = e.target.closest("[data-edge]");
   cv.setPointerCapture(e.pointerId);
   if (port && nodeEl && !B.ro) {
@@ -667,8 +692,9 @@ function renderSide() { const s = $("#bside"); if (!s) return; s.innerHTML = B.s
 
 function edgePanel() {
   const e = B.graph.edges[B.sel.id]; if (!e) return "";
+  const side = isIf(e.from) ? `<div class="bf"><label>Runs when the condition is</label><div style="display:flex;gap:6px">${["true", "false"].map(v => `<button class="btn sm${e.branch === v ? " run" : ""}" type="button" data-sact="edgebranch" data-v="${v}" ${B.ro ? "disabled" : ""}>${v}</button>`).join("")}</div><div class="help">The nodes on the other side are skipped.</div></div>` : "";
   return `<h3>Connection</h3><p class="desc"><b>${esc(e.from)}</b> runs first, then <b>${esc(e.to)}</b>. The second node can read the first one's output.</p>
-    ${B.ro ? "" : `<button class="btn danger" data-sact="deledge">Remove connection</button>`}`;
+    ${side}${B.ro ? "" : `<button class="btn danger" data-sact="deledge">Remove connection</button>`}`;
 }
 
 function fieldHtml(f, obj, scope, id) {
@@ -771,8 +797,55 @@ function nodePanel(n) {
     <div class="bf"><label>Node id</label><input data-sact="rename" id="bnid" value="${esc(n.id)}" spellcheck="false"><div class="help">Reference its output with <code>{{ xcom_pull "${esc(n.id)}" "return_value" }}</code></div></div>
     ${(t.fields || []).map(f => fieldHtml(f, n.config, "cfg", n.id)).join("")}
     <details><summary>Settings: retries, timeout, alerts…</summary>${CAT.common.map(f => fieldHtml(f, n.config, "cfg", n.id)).join("")}</details>
-    <div style="display:flex;gap:6px;margin:14px 0"><button class="btn sm" data-sact="dup" type="button">Duplicate</button><button class="btn sm danger" data-sact="delnode" type="button">Delete</button></div></fieldset>
+    <div style="display:flex;gap:6px;margin:14px 0"><button class="btn sm run" data-sact="runnode" type="button" title="Run only this node now and show its output (nothing is saved)">▶ Run node</button><button class="btn sm" data-sact="dup" type="button">Duplicate</button><button class="btn sm danger" data-sact="delnode" type="button">Delete</button></div></fieldset>
+    <div id="bprev">${previewHtml(n.id)}</div>
     ${nodeRunHtml(n)}`;
+}
+
+// ---- run one node (preview) ------------------------------------------------------------------------------------------------
+const DEST = new Set(["postgres_insert", "bigquery_insert", "gsheet_write", "gcs_write", "s3_write", "bigquery", "trigger_dagrun"]);
+function previewHtml(id) {
+  const p = B.prev?.[id]; if (!p) return "";
+  if (p.loading) return `<div class="bprev"><div class="help">Running ${esc(id)}…</div></div>`;
+  const r = p.res, ok = r.status === "success";
+  const inputs = Object.entries(r.inputs || {}).map(([k, v]) => `<code>${esc(k)}</code> from ${esc(v)}`).join(", ");
+  let body = "";
+  if (r.selected) body += `<div class="help">Condition → runs <b>${r.selected.length ? r.selected.map(esc).join(", ") : "nothing"}</b></div>`;
+  if (r.condition_met !== undefined) body += `<div class="help">Condition met: <b>${r.condition_met ? "yes" : "no"}</b></div>`;
+  if (r.note) body += `<div class="help">${esc(r.note)}</div>`;
+  const out = r.output;
+  if (Array.isArray(out) && out.length && out.every(isObj)) {
+    const cols = [...new Set(out.slice(0, 100).flatMap(o => Object.keys(o)))].slice(0, 20);
+    const cell = v => v == null ? "" : esc(typeof v === "object" ? JSON.stringify(v) : String(v)).slice(0, 60);
+    body += `<div class="help"><b>${r.rows_total} row${r.rows_total === 1 ? "" : "s"}</b>${r.rows_total > out.length ? ` (first ${out.length} shown)` : ""}</div>
+      <div class="pvt"><table><tr><th></th>${cols.map(c => `<th>${esc(c)}</th>`).join("")}</tr>${out.slice(0, 100).map((o, i) => `<tr><th>${i + 1}</th>${cols.map(c => `<td>${cell(o[c])}</td>`).join("")}</tr>`).join("")}</table></div>`;
+  } else if (out !== undefined) {
+    const txt = typeof out === "string" ? out : JSON.stringify(out, null, 2);
+    body += `<div class="help">Output${Array.isArray(out) ? ` · ${r.rows_total} item${r.rows_total === 1 ? "" : "s"}` : ""}</div><pre class="bld-out">${esc(txt.length > 8000 ? txt.slice(0, 8000) + "\n… (truncated)" : txt)}</pre>`;
+  }
+  return `<div class="bprev"><div class="hd"><span class="st ${ok ? "ok" : "bad"}">${ok ? "✓ Preview succeeded" : "✗ Preview failed"}</span>${r.duration_ms != null ? `<span class="sub">${r.duration_ms} ms${r.where ? ` · on ${r.where === "webserver" ? "the webserver" : "worker " + esc(r.where)}` : ""}</span>` : ""}<button class="lnk" type="button" data-sact="clearprev" style="margin-left:auto">clear</button></div>
+    ${inputs ? `<div class="help">Input: ${inputs}</div>` : ""}
+    ${r.error ? `<div class="iss e" style="cursor:default;margin-top:6px">${esc(r.error)}</div>` : ""}
+    ${body}${r.log ? `<details><summary>Log</summary><pre class="bld-out">${esc(r.log)}</pre></details>` : ""}</div>`;
+}
+function downstreamIds(id) { const out = new Set(), st = [id]; while (st.length) { const c = st.pop(); B.graph.edges.forEach(e => { if (e.from === c && !out.has(e.to)) { out.add(e.to); st.push(e.to); } }); } return out; }
+function stalePreview(id) { if (!B.prev) return; delete B.prev[id]; downstreamIds(id).forEach(d => delete B.prev[d]); }
+async function runNode(id) {
+  const n = node(id); if (!n || B.ro) return;
+  if (DEST.has(n.type) && !confirm(`${id} writes or changes data outside dagsflow. Run it now?`)) return;
+  B.prev = B.prev || {};
+  const outputs = {};
+  for (const [k, p] of Object.entries(B.prev)) if (k !== id && p.res?.status === "success" && p.res.full_output !== undefined) outputs[k] = p.res.full_output;
+  B.prev[id] = { loading: true };
+  const box = () => B.sel?.k === "node" && B.sel.id === id && $("#bprev");
+  if (box()) box().innerHTML = previewHtml(id);
+  let res;
+  try { res = await api("/builder/run-node", { method: "POST", body: JSON.stringify({ graph: payload(), node: id, outputs }) }); }
+  catch (x) { res = { status: "failed", error: x.message }; }
+  if (!B?.prev) return;
+  B.prev[id] = { res };
+  if (res.status === "success") for (const u of res.ran || []) B.prev[u] = B.prev[u] || { res: { status: "success", note: `run as the input of ${id}`, inputs: {} } };
+  if (box()) box().innerHTML = previewHtml(id);
 }
 
 function nodeRunHtml(n) {
@@ -951,7 +1024,7 @@ function onSideInput(e) {
     default: return;
   }
   touch(); setPath(obj, f, v);
-  if (el.dataset.scope === "cfg") refreshNode(B.sel.id); else updateStatus();
+  if (el.dataset.scope === "cfg") { stalePreview(B.sel.id); refreshNode(B.sel.id); } else updateStatus();
 }
 function onSideChange(e) {
   if (B.ro) return;
@@ -1076,6 +1149,9 @@ async function onSideClick(e) {
     case "dup": duplicateNode(B.sel.id); break;
     case "delnode": removeNode(B.sel.id); break;
     case "deledge": removeEdge(B.sel.id); break;
+    case "edgebranch": { const ed = B.graph.edges[B.sel.id]; if (ed && ed.branch !== b.dataset.v) flipEdge(B.sel.id); break; }
+    case "runnode": runNode(B.sel.id); break;
+    case "clearprev": if (B.prev) delete B.prev[B.sel.id]; $("#bprev").innerHTML = ""; break;
     case "gotoissue": if (b.dataset.node && node(b.dataset.node)) { select({ k: "node", id: b.dataset.node }); const n = node(b.dataset.node); const r = $("#bc").getBoundingClientRect(); B.vx = r.width / 2 - (n.x + W / 2) * B.k; B.vy = r.height / 2 - (n.y + H / 2) * B.k; applyView(); } break;
     case "rerun": runAction("clear"); break;
     case "markok": runAction("mark", "success"); break;

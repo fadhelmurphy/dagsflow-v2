@@ -132,7 +132,7 @@ func tasksCmd() *cobra.Command {
 			var err error
 			if sn := t.Sensor(); sn != nil {
 				var ok bool
-				ok, err = sn.Poke(tctx)
+				ok, err = t.Poke(tctx)
 				fmt.Println("sensor condition met:", ok)
 			} else {
 				sel, err = t.Run(tctx)

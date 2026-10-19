@@ -149,6 +149,10 @@ func convert[T any](v any) (T, error) {
 //
 // Keys in extra are also available at top level ({{ .target_table }}).
 func (c *TaskContext) Render(raw string, extra map[string]any) (string, error) {
+	return c.renderDepth(raw, extra, 0)
+}
+
+func (c *TaskContext) renderDepth(raw string, extra map[string]any, depth int) (string, error) {
 	data := map[string]any{
 		"ds":                  c.LogicalDate.Format("2006-01-02"),
 		"ds_nodash":           c.LogicalDate.Format("20060102"),
@@ -169,7 +173,8 @@ func (c *TaskContext) Render(raw string, extra map[string]any) (string, error) {
 	for k, v := range extra {
 		data[k] = v
 	}
-	funcs := template.FuncMap{
+	funcs := jinjaFuncs(c, depth)
+	for k, v := range (template.FuncMap{
 		"xcom_pull": func(taskID, key string) any { return c.XComPull(taskID, key) },
 		"xcom":      func(key string) any { return c.XComPull("", key) },
 		"var":       GetVariable,
@@ -177,20 +182,25 @@ func (c *TaskContext) Render(raw string, extra map[string]any) (string, error) {
 			b, err := json.Marshal(v)
 			return string(b), err
 		},
-		"ds_add": func(ds string, days int) (string, error) {
+		"ds_add": func(ds string, days any) (string, error) {
 			t, err := time.Parse("2006-01-02", ds)
 			if err != nil {
 				return "", err
 			}
-			return t.AddDate(0, 0, days).Format("2006-01-02"), nil
+			return t.AddDate(0, 0, jtoInt(days)).Format("2006-01-02"), nil
 		},
+	}) {
+		funcs[k] = v
 	}
 	known := make(map[string]bool, len(data))
 	for k := range data {
 		known[k] = true
 	}
-	raw = jinjaCompat(raw, known)
-	tmpl, err := template.New(c.Task.ID).Option("missingkey=error").Funcs(funcs).Parse(raw)
+	src, err := jinjaTranslate(raw, known)
+	if err != nil {
+		return "", fmt.Errorf("template: %w", err)
+	}
+	tmpl, err := template.New(c.Task.ID).Option("missingkey=error").Funcs(funcs).Parse(src)
 	if err != nil {
 		return "", err
 	}

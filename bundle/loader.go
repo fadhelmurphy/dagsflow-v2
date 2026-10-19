@@ -457,7 +457,10 @@ func tail(s string, n int) string {
 
 // ---- proxy DAGs (host side) ----------------------------------------------------
 
-type proxy struct{ bin string }
+type proxy struct {
+	bin  string
+	args []string // before `run` (e.g. the hidden `__task` command of the host binary)
+}
 
 func (p *proxy) build(s DagSpec) *dag.DAG {
 	opts := []dag.DAGOption{dag.WithStartDate(s.StartDate), dag.WithCatchup(s.Catchup),
@@ -556,7 +559,7 @@ func (p *proxy) invoke(ctx context.Context, tctx *dag.TaskContext, req Request, 
 	if err != nil {
 		return Result{}, err
 	}
-	cmd := dag.CommandContext(ctx, p.bin, "run")
+	cmd := dag.CommandContext(ctx, p.bin, append(append([]string{}, p.args...), "run")...)
 	cmd.Env = append(os.Environ(), "DAGSFLOW_RPC_ADDR="+h.addr, "DAGSFLOW_RPC_TOKEN="+tok)
 	cmd.Stdin = bytes.NewReader(body)
 	cmd.Stdout, cmd.Stderr = logOut, logOut

@@ -104,11 +104,12 @@ func (d *DAG) NewExternalTaskSensor(id, externalDagID, externalTaskID string, cf
 func (d *DAG) NewHTTPSensor(id string, req HTTPRequest, cfg SensorConfig, opts ...TaskOption) *Task {
 	opts = append([]TaskOption{WithTemplateFields(httpTemplateFields(req)...), WithOperatorName("HttpSensor")}, opts...)
 	return d.NewSensor(id, func(ctx *TaskContext) (bool, error) {
-		code, _, err := doHTTP(ctx, req)
+		resp, err := httpDo(ctx, req)
 		if err != nil {
 			ctx.Logf("poke failed: %v", err)
 			return false, nil
 		}
-		return statusOK(code, req.ExpectStatus), nil
+		_ = resp.Body.Close()
+		return statusOK(resp.StatusCode, req.ExpectStatus), nil
 	}, cfg, opts...)
 }

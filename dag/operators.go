@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"dagsflow-go/operator"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -178,22 +181,104 @@ type HTTPRequest struct {
 	Body         string
 	ExpectStatus []int // default: any 2xx
 	Timeout      time.Duration
+	// MaxBytes caps the response kept as the output (default HTTPMaxBytes()).
+	// A larger response fails the task instead of being cut.
+	MaxBytes int64
+	// SaveTo streams the response of any size to this file (templated; a bare
+	// name goes to the builder's uploads folder, so a "CSV / Excel file" node
+	// can read it). The output is then {path, bytes, status_code}.
+	SaveTo string
 }
 
-// NewHTTPTask sends a request; the response body (max 64KB) is XCom "return_value".
+// DefaultHTTPMaxBytes is the response size an HTTP node keeps as its output
+// when max_bytes isn't set (override with DAGSFLOW_HTTP_MAX_BYTES).
+const DefaultHTTPMaxBytes = 10 << 20
+
+// HTTPMaxBytes returns the default response cap.
+func HTTPMaxBytes() int64 {
+	if v, err := strconv.ParseInt(strings.TrimSpace(os.Getenv("DAGSFLOW_HTTP_MAX_BYTES")), 10, 64); err == nil && v > 0 {
+		return v
+	}
+	return DefaultHTTPMaxBytes
+}
+
+func (r HTTPRequest) maxBytes() int64 {
+	if r.MaxBytes > 0 {
+		return r.MaxBytes
+	}
+	return HTTPMaxBytes()
+}
+
+// errHTTPTooLarge: the response is bigger than max_bytes.
+var errHTTPTooLarge = errors.New("response too large")
+
+// NewHTTPTask sends a request; the response body is XCom "return_value"
+// (up to MaxBytes), or with SaveTo it is written to a file.
 func (d *DAG) NewHTTPTask(id string, req HTTPRequest, opts ...TaskOption) *Task {
-	opts = append([]TaskOption{WithTemplateFields(httpTemplateFields(req)...), WithOperatorName("HttpOperator")}, opts...)
+	tf := httpTemplateFields(req)
+	if req.SaveTo != "" {
+		tf = append(tf, TemplateField{Name: "save_to", Raw: req.SaveTo, Lang: "text"})
+	}
+	opts = append([]TaskOption{WithTemplateFields(tf...), WithOperatorName("HttpOperator")}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
+		if req.SaveTo != "" {
+			return httpToFile(ctx, req)
+		}
 		code, body, err := doHTTP(ctx, req)
-		if err != nil {
+		if err != nil && !errors.Is(err, errHTTPTooLarge) {
 			return err
 		}
-		ctx.Logf("HTTP %d", code)
+		ctx.Logf("HTTP %d, %d bytes", code, len(body))
 		if !statusOK(code, req.ExpectStatus) {
 			return fmt.Errorf("unexpected status %d: %s", code, truncate(body, 500))
 		}
+		if err != nil {
+			return fmt.Errorf("the response is larger than %d bytes: raise max_bytes (or DAGSFLOW_HTTP_MAX_BYTES), or set save_to to write it to a file", req.maxBytes())
+		}
 		return ctx.XComPush("return_value", body)
 	}, opts...)
+}
+
+// httpToFile streams the response to req.SaveTo.
+func httpToFile(ctx *TaskContext, req HTTPRequest) error {
+	name, err := ctx.RenderTemplateField("save_to")
+	if err != nil {
+		return err
+	}
+	path, err := ResolveFile(name)
+	if err != nil {
+		return fmt.Errorf("save_to: %w", err)
+	}
+	resp, err := httpDo(ctx, req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if !statusOK(resp.StatusCode, req.ExpectStatus) {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
+		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(b))
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".part"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	n, err := io.Copy(f, resp.Body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("download: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	ctx.Logf("HTTP %d, %d bytes saved to %s", resp.StatusCode, n, path)
+	return ctx.XComPush("return_value", map[string]any{"path": path, "bytes": n, "status_code": resp.StatusCode})
 }
 
 func httpTemplateFields(req HTTPRequest) []TemplateField {
@@ -216,20 +301,21 @@ func httpTemplateFields(req HTTPRequest) []TemplateField {
 	return f
 }
 
-func doHTTP(ctx *TaskContext, req HTTPRequest) (int, string, error) {
+// httpDo renders and sends the request; the caller closes the body.
+func httpDo(ctx *TaskContext, req HTTPRequest) (*http.Response, error) {
 	url := req.URL
 	var conn Connection
 	if req.ConnID != "" {
 		c, ok := GetConnection(req.ConnID)
 		if !ok {
-			return 0, "", fmt.Errorf("connection %q not found", req.ConnID)
+			return nil, fmt.Errorf("connection %q not found", req.ConnID)
 		}
 		conn = c
 		url = strings.TrimRight(c.String("host"), "/") + "/" + strings.TrimLeft(req.Endpoint, "/")
 	}
 	url, err := ctx.Render(url, nil)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	if req.ConnID != "" {
 		ctx.RecordRendered("endpoint", strings.TrimPrefix(url, strings.TrimRight(conn.String("host"), "/")+"/"))
@@ -238,7 +324,7 @@ func doHTTP(ctx *TaskContext, req HTTPRequest) (int, string, error) {
 	}
 	body, err := ctx.Render(req.Body, nil)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	if req.Body != "" {
 		ctx.RecordRendered("data", body)
@@ -246,7 +332,7 @@ func doHTTP(ctx *TaskContext, req HTTPRequest) (int, string, error) {
 	method := firstNonEmpty(strings.ToUpper(req.Method), http.MethodGet)
 	hreq, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(body))
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	if tok := conn.String("token"); tok != "" {
 		hreq.Header.Set("Authorization", "Bearer "+tok)
@@ -255,7 +341,7 @@ func doHTTP(ctx *TaskContext, req HTTPRequest) (int, string, error) {
 	for k, v := range req.Headers {
 		rv, err := ctx.Render(v, nil)
 		if err != nil {
-			return 0, "", err
+			return nil, err
 		}
 		hreq.Header.Set(k, rv)
 		rendered[k] = rv
@@ -268,14 +354,30 @@ func doHTTP(ctx *TaskContext, req HTTPRequest) (int, string, error) {
 	client := &http.Client{Timeout: req.Timeout}
 	if client.Timeout == 0 {
 		client.Timeout = 5 * time.Minute
+		if req.SaveTo != "" {
+			client.Timeout = 2 * time.Hour // downloads
+		}
 	}
 	ctx.Logf("%s %s", method, url)
-	resp, err := client.Do(hreq)
+	return client.Do(hreq)
+}
+
+// doHTTP sends the request and reads the body up to req.maxBytes(). A larger
+// body returns the first max bytes and errHTTPTooLarge.
+func doHTTP(ctx *TaskContext, req HTTPRequest) (int, string, error) {
+	resp, err := httpDo(ctx, req)
 	if err != nil {
 		return 0, "", err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	limit := req.maxBytes()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return resp.StatusCode, string(b), err
+	}
+	if int64(len(b)) > limit {
+		return resp.StatusCode, string(b[:limit]), errHTTPTooLarge
+	}
 	return resp.StatusCode, string(b), nil
 }
 

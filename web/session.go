@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -48,8 +49,9 @@ func (s *Server) secret() ([]byte, error) {
 }
 
 // loginLimiter slows down password guessing: after 5 failures for the same
-// username or client IP within 15 minutes, logins are refused for a while
-// (per webserver process).
+// username or client IP within 15 minutes, logins are refused for a while.
+// The shared copy lives in the metadata store (see Server.loginBlocked); this
+// in-memory one keeps the lockout working if the database is unreachable.
 type loginLimiter struct {
 	mu   sync.Mutex
 	hits map[string][]time.Time
@@ -111,6 +113,28 @@ func (l *loginLimiter) reset(keys ...string) {
 	for _, k := range keys {
 		delete(l.hits, k)
 	}
+}
+
+// loginBlocked: the lockout shared by all webserver replicas (metadata store),
+// or this process's own if the store can't be read.
+func (s *Server) loginBlocked(keys ...string) time.Duration {
+	wait := s.limiter.blocked(keys...)
+	if w, err := s.Store.LoginBlocked(keys...); err == nil && w > wait {
+		wait = w
+	}
+	return wait
+}
+
+func (s *Server) loginFailed(keys ...string) {
+	s.limiter.fail(keys...)
+	if err := s.Store.LoginFailed(keys...); err != nil {
+		log.Printf("login limiter: %v (using this process's counters)", err)
+	}
+}
+
+func (s *Server) loginOK(keys ...string) {
+	s.limiter.reset(keys...)
+	_ = s.Store.LoginSucceeded(keys...)
 }
 
 func userFingerprint(u *engine.User) string {
@@ -201,7 +225,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimSpace(body.Username)
 	keys := []string{"u:" + strings.ToLower(name), "ip:" + clientIP(r)}
-	if wait := s.limiter.blocked(keys...); wait > 0 {
+	if wait := s.loginBlocked(keys...); wait > 0 {
 		s.Store.Audit(engine.AuditEvent{User: name, Event: "login_blocked", Extra: clientIP(r)})
 		w.Header().Set("Retry-After", fmt.Sprint(int(wait.Seconds())+1))
 		fail(w, http.StatusTooManyRequests, "Too many failed logins. Try again in %s.", wait.Round(time.Minute))
@@ -209,13 +233,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	u, ok := s.Store.Authenticate(name, body.Password, "")
 	if !ok {
-		s.limiter.fail(keys...)
+		s.loginFailed(keys...)
 		s.Store.Audit(engine.AuditEvent{User: name, Event: "login_failed", Extra: clientIP(r)})
 		time.Sleep(400 * time.Millisecond) // slow down guessing
 		fail(w, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
-	s.limiter.reset(keys...)
+	s.loginOK(keys...)
 	s.Store.RecordLogin(u.Username)
 	s.Store.Audit(engine.AuditEvent{User: u.Username, Event: "login", Extra: clientIP(r)})
 	if err := s.setSession(w, r, u); err != nil {

@@ -95,6 +95,10 @@ func TestJinjaCompat(t *testing.T) {
 		`{{ if eq .x "ds" }}ok{{ end }}`:                      `{{ if eq .x "ds" }}ok{{ end }}`,
 		"{{ range $i, $x := .params.list }}{{ $x }}{{ end }}": "{{ range $i, $x := .params.list }}{{ $x }}{{ end }}",
 		"{{- ds_nodash -}}":                                   "{{- .ds_nodash -}}",
+		"{{ len .params }}":                                   "{{ len .params }}",
+		"{{ printf \"%s\" .ds }}":                             "{{ printf \"%s\" .ds }}",
+		"{{ index .conf \"k\" }}":                             "{{ index .conf \"k\" }}",
+		"{{ not .flag }}":                                     "{{ not .flag }}",
 		"no template":                                         "no template",
 	}
 	for in, want := range cases {

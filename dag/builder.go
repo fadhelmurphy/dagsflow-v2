@@ -73,7 +73,10 @@ var httpFields = []NodeField{
 // Nodes is the palette. Order = display order.
 var Nodes = []NodeType{
 	{Type: "http", Operator: "http", Label: "HTTP request", Category: "Sources", Icon: "globe",
-		Description: "Call an API. The response body (up to 64KB) is the node's output.", Fields: httpFields},
+		Description: "Call an API. The response body is the node's output (up to 10 MB by default), or save it to a file of any size.",
+		Fields: append(append([]NodeField{}, httpFields...),
+			NodeField{Name: "max_bytes", Label: "Max response size (bytes)", Kind: "number", Placeholder: "10485760", Help: "A larger response fails the node instead of being cut. Default 10 MB (DAGSFLOW_HTTP_MAX_BYTES)."},
+			NodeField{Name: "save_to", Label: "Save the response to a file", Kind: "text", Placeholder: "orders_{{ .ds }}.json", Help: "For big downloads: any size, streamed to disk. A bare name goes to the uploads folder, so a CSV / Excel / JSON file node can read it. The output becomes {path, bytes, status_code}."})},
 	{Type: "postgres_query", Operator: "postgres", Label: "Postgres query", Category: "Sources", Icon: "db",
 		Description: "Run SQL on Postgres. Returned rows are the node's output (JSON array).",
 		Fields: []NodeField{
@@ -101,7 +104,7 @@ var Nodes = []NodeType{
 			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default"},
 		}},
 	{Type: "file_read", Operator: "file_read", Label: "CSV / Excel file", Category: "Sources", Icon: "file",
-		Description: "Read an uploaded CSV, TSV or Excel (.xlsx) file. Pick the sheet, start row and columns; headers become column names.",
+		Description: "Read an uploaded CSV, TSV, Excel (.xlsx), JSON or NDJSON file. Pick the sheet, start row and columns; headers become column names.",
 		Fields: []NodeField{
 			{Name: "file", Label: "File", Kind: "file", Required: true, Help: "Upload one, or type a path on the worker (can use {{ .ds }})"},
 			{Name: "sheet", Label: "Sheet (Excel)", Kind: "text", Placeholder: "first sheet", Help: "Sheet name or number"},
@@ -205,6 +208,15 @@ var Nodes = []NodeType{
 			{Name: "conf", Label: "Conf", Kind: "json"},
 			{Name: "wait_for_completion", Label: "Wait until it finishes", Kind: "bool"},
 		}},
+	{Type: "if", Operator: "branch", Label: "If / branch", Category: "Control", Icon: "branch",
+		Description: "Check a value, then run the nodes connected as true or as false. The other side is skipped. Click a connection to switch it between true and false.",
+		Fields: []NodeField{
+			{Name: "input", Label: "Check the output of", Kind: "upstream", Help: "Default: the only connected node before this one"},
+			{Name: "path", Label: "Field", Kind: "text", Placeholder: "length", Help: "Empty = the whole output. A dotted path such as 0.status or meta.count; end with length for the number of rows, keys or characters."},
+			{Name: "left", Label: "Or check this value", Kind: "text", Placeholder: "{{ .params.mode }}", Help: "A template checked instead of an upstream output"},
+			{Name: "op", Label: "Condition", Kind: "select", Options: IfOps},
+			{Name: "value", Label: "Compare with", Kind: "text", Help: "For ==, !=, >, <, contains… Templates work."},
+		}},
 	{Type: "empty", Operator: "empty", Label: "No-op / join", Category: "Control", Icon: "dot",
 		Description: "Does nothing. Handy as a start, end or join point.", Fields: []NodeField{}},
 	{Type: "file_sensor", Operator: "file_sensor", Label: "Wait for file", Category: "Sensors", Icon: "clock",
@@ -260,6 +272,8 @@ type GNode struct {
 type GEdge struct {
 	From string `json:"from"`
 	To   string `json:"to"`
+	// Branch is "true" or "false" on the connections leaving an If node.
+	Branch string `json:"branch,omitempty"`
 }
 
 // Graph is the builder's view of a YAML DAG. Settings holds the DAG-level keys
@@ -474,6 +488,7 @@ func (g *Graph) ToYAML() ([]byte, error) {
 	for _, e := range g.Edges {
 		ups[e.To] = append(ups[e.To], e.From)
 	}
+	joins := g.branchJoins()
 	var tasks []any
 	layout := &ordered{}
 	for _, n := range g.Nodes {
@@ -482,6 +497,29 @@ func (g *Graph) ToYAML() ([]byte, error) {
 			return nil, fmt.Errorf("node %s: unknown type %q", n.ID, n.Type)
 		}
 		t := g.taskMap(n, nt)
+		if nt.Operator == "branch" {
+			var then, els []any
+			for _, e := range g.Edges {
+				if e.From == n.ID {
+					if e.Branch == "false" {
+						els = append(els, e.To)
+					} else {
+						then = append(then, e.To)
+					}
+				}
+			}
+			if len(then) > 0 {
+				t.set("then", then)
+			}
+			if len(els) > 0 {
+				t.set("else", els)
+			}
+		}
+		if joins[n.ID] {
+			if _, set := t.vals["trigger_rule"]; !set {
+				t.set("trigger_rule", "none_failed_min_one_success")
+			}
+		}
 		if u := ups[n.ID]; len(u) > 0 {
 			ul := make([]any, len(u))
 			for i, x := range u {
@@ -503,6 +541,54 @@ func (g *Graph) ToYAML() ([]byte, error) {
 	}
 	_ = enc.Close()
 	return buf.Bytes(), nil
+}
+
+// branchJoins: nodes after an If node that join several paths. One of the
+// paths may have been skipped by the If, so they run when none failed and at
+// least one succeeded (the If's direct targets are skipped by the If itself).
+func (g *Graph) branchJoins() map[string]bool {
+	isIf := map[string]bool{}
+	for _, n := range g.Nodes {
+		if nt, ok := nodeByType(n.Type); ok && nt.Operator == "branch" {
+			isIf[n.ID] = true
+		}
+	}
+	if len(isIf) == 0 {
+		return nil
+	}
+	next := map[string][]string{}
+	ups := map[string][]string{}
+	for _, e := range g.Edges {
+		next[e.From] = append(next[e.From], e.To)
+		ups[e.To] = append(ups[e.To], e.From)
+	}
+	after := map[string]bool{} // reachable from an If
+	var walk func(string)
+	walk = func(id string) {
+		for _, n := range next[id] {
+			if !after[n] {
+				after[n] = true
+				walk(n)
+			}
+		}
+	}
+	for id := range isIf {
+		walk(id)
+	}
+	out := map[string]bool{}
+	for id, us := range ups {
+		if len(us) < 2 || !after[id] {
+			continue
+		}
+		direct := false
+		for _, u := range us {
+			direct = direct || isIf[u]
+		}
+		if !direct {
+			out[id] = true
+		}
+	}
+	return out
 }
 
 // Etag identifies a version of a file.
@@ -591,6 +677,15 @@ func (g *Graph) Validate() ([]byte, []GraphIssue) {
 		}
 	}
 	g.Edges = edges
+	for _, n := range g.Nodes {
+		if nt, ok := nodeByType(n.Type); ok && nt.Operator == "branch" {
+			for _, e := range g.Edges {
+				if e.From == n.ID && e.Branch != "true" && e.Branch != "false" {
+					add(n.ID, fmt.Sprintf("choose whether %s runs when the condition is true or false (click the connection)", e.To))
+				}
+			}
+		}
+	}
 	if len(iss) > 0 {
 		return nil, iss
 	}
@@ -790,6 +885,10 @@ func ParseGraph(data []byte) (*Graph, error) {
 		for k, v := range t {
 			switch k {
 			case "id", "operator", "upstream":
+			case "then", "else":
+				if op != "branch" {
+					cfg[k] = v
+				}
 			case "node":
 				if op != "custom" {
 					cfg[k] = v
@@ -825,6 +924,25 @@ func ParseGraph(data []byte) (*Graph, error) {
 				if us, ok := u.(string); ok {
 					g.Edges = append(g.Edges, GEdge{From: us, To: id})
 				}
+			}
+		}
+	}
+	// If nodes: label their connections from then/else
+	for _, tv := range tasks {
+		t, _ := tv.(map[string]any)
+		if str(t["operator"]) != "branch" {
+			continue
+		}
+		side := map[string]string{}
+		for _, k := range []string{"then", "else"} {
+			l, _ := t[k].([]any)
+			for _, x := range l {
+				side[str(x)] = map[string]string{"then": "true", "else": "false"}[k]
+			}
+		}
+		for i, e := range g.Edges {
+			if e.From == str(t["id"]) {
+				g.Edges[i].Branch = side[e.To]
 			}
 		}
 	}

@@ -47,7 +47,7 @@ func asRows(v any) ([]any, error) {
 	if s, ok := v.(string); ok {
 		var parsed any
 		if err := json.Unmarshal([]byte(s), &parsed); err != nil {
-			return nil, fmt.Errorf("input is not valid JSON (%v); note HTTP responses are cut at 64KB", err)
+			return nil, fmt.Errorf("input is not valid JSON (%v)", err)
 		}
 		v = parsed
 	}
@@ -234,7 +234,7 @@ func ApplyTransform(input any, steps []TransformStep, render func(raw string, ro
 			if str, ok := cur.(string); ok {
 				var p any
 				if err := json.Unmarshal([]byte(str), &p); err != nil {
-					return nil, fmt.Errorf("step %d: input is not valid JSON (%v); note HTTP responses are cut at 64KB", i+1, err)
+					return nil, fmt.Errorf("step %d: input is not valid JSON (%v)", i+1, err)
 				}
 				cur = p
 			}

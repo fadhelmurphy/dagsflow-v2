@@ -1036,7 +1036,7 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 func (rc *runCtx) sense(ctx *dag.TaskContext, k tiKey, sn *dag.SensorSpec, out io.Writer, release func(), reacquire func() error) error {
 	deadline := time.Now().Add(sn.Timeout)
 	for {
-		ok, err := safePoke(ctx, sn)
+		ok, err := safePoke(ctx, ctx.Task)
 		if err != nil {
 			return err
 		}
@@ -1066,13 +1066,13 @@ func (rc *runCtx) sense(ctx *dag.TaskContext, k tiKey, sn *dag.SensorSpec, out i
 	}
 }
 
-func safePoke(ctx *dag.TaskContext, sn *dag.SensorSpec) (ok bool, err error) {
+func safePoke(ctx *dag.TaskContext, t *dag.Task) (ok bool, err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("panic: %v\n%s", p, debug.Stack())
 		}
 	}()
-	return sn.Poke(ctx)
+	return t.Poke(ctx)
 }
 
 type result struct {

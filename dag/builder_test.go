@@ -17,7 +17,7 @@ func sampleGraph() *Graph {
 			}}},
 			{ID: "load", Type: "postgres_insert", X: 600, Y: 20, Config: map[string]any{"conn_id": "wh", "table": "public.orders", "on_conflict": "do_nothing"}},
 		},
-		Edges: []GEdge{{"fetch", "shape"}, {"shape", "load"}},
+		Edges: []GEdge{{From: "fetch", To: "shape"}, {From: "shape", To: "load"}},
 	}
 }
 
@@ -67,8 +67,8 @@ func TestBuilderValidation(t *testing.T) {
 		mut  func(*Graph)
 		want string
 	}{
-		{"cycle", func(g *Graph) { g.Edges = append(g.Edges, GEdge{"load", "fetch"}) }, "loop"},
-		{"self", func(g *Graph) { g.Edges = append(g.Edges, GEdge{"fetch", "fetch"}) }, "itself"},
+		{"cycle", func(g *Graph) { g.Edges = append(g.Edges, GEdge{From: "load", To: "fetch"}) }, "loop"},
+		{"self", func(g *Graph) { g.Edges = append(g.Edges, GEdge{From: "fetch", To: "fetch"}) }, "itself"},
 		{"dup id", func(g *Graph) { g.Nodes[1].ID = "fetch" }, "duplicate"},
 		{"bad dag id", func(g *Graph) { g.DagID = "../evil" }, "DAG id"},
 		{"no input", func(g *Graph) { g.Edges = g.Edges[:1] }, "provides the rows"},

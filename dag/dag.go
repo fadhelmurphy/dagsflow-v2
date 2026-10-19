@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -53,6 +54,10 @@ type DAG struct {
 	Source   string    // "go" (compiled in), a YAML file, or a Go bundle (file/dir) in the DAG folder
 	File     string    // file that defines the DAG (for the Code view)
 	ParsedAt time.Time // when this definition was (re)loaded
+
+	// compiledIn: registered with Register (a Go DAG compiled into this
+	// binary), so a child process of the binary has the same DAG.
+	compiledIn bool
 
 	tasks    []*Task
 	taskMap  map[string]*Task
@@ -399,28 +404,80 @@ func (t *Task) OnRetryCallbacks() []Callback   { return t.onRetry }
 
 // Run executes the task body. For branch tasks it returns the selected task IDs.
 func (t *Task) Run(ctx *TaskContext) ([]string, error) {
+	if r := t.isolated(); r != nil {
+		sel, _, err := r(ctx, t, "task")
+		if err != nil || t.branch == nil {
+			return nil, err
+		}
+		return t.checkBranch(sel)
+	}
 	if t.branch != nil {
 		sel, err := t.branch(ctx)
 		if err != nil {
 			return nil, err
 		}
-		for _, id := range sel {
-			ok := false
-			for _, dn := range t.downstream {
-				if dn.ID == id {
-					ok = true
-				}
-			}
-			if !ok {
-				return nil, fmt.Errorf("branch returned %q which is not a direct downstream of %s", id, t.ID)
-			}
-		}
-		return sel, nil
+		return t.checkBranch(sel)
 	}
 	if t.execute == nil {
 		return nil, nil
 	}
 	return nil, t.execute(ctx)
+}
+
+// Poke runs one poke of a sensor task (in a child process when the task's
+// Go code is isolated, see SetIsolatedRunner).
+func (t *Task) Poke(ctx *TaskContext) (bool, error) {
+	if t.sensor == nil {
+		return false, fmt.Errorf("task %s is not a sensor", t.ID)
+	}
+	if r := t.isolated(); r != nil {
+		_, ok, err := r(ctx, t, "poke")
+		return ok, err
+	}
+	return t.sensor.Poke(ctx)
+}
+
+func (t *Task) checkBranch(sel []string) ([]string, error) {
+	for _, id := range sel {
+		ok := false
+		for _, dn := range t.downstream {
+			if dn.ID == id {
+				ok = true
+			}
+		}
+		if !ok {
+			return nil, fmt.Errorf("branch returned %q which is not a direct downstream of %s", id, t.ID)
+		}
+	}
+	return sel, nil
+}
+
+// IsolatedRunner runs one action ("task" or "poke") of a task in a separate
+// process and reports the branch selection / poke result.
+type IsolatedRunner func(ctx *TaskContext, t *Task, action string) (selected []string, pokeOK bool, err error)
+
+var isolatedRunner atomic.Pointer[IsolatedRunner]
+
+// SetIsolatedRunner makes the tasks of compiled-in Go DAGs (added with
+// Register, so a child process of this binary has them too) run through r, normally in a child process of this binary, so a timeout or a
+// cancel can kill them even when their code ignores ctx. nil turns it off.
+func SetIsolatedRunner(r IsolatedRunner) {
+	if r == nil {
+		isolatedRunner.Store(nil)
+		return
+	}
+	isolatedRunner.Store(&r)
+}
+
+func (t *Task) isolated() IsolatedRunner {
+	p := isolatedRunner.Load()
+	if p == nil || t.dag == nil || !t.dag.compiledIn {
+		return nil
+	}
+	if t.execute == nil && t.branch == nil && t.sensor == nil {
+		return nil
+	}
+	return *p
 }
 
 // ---- DAG accessors -----------------------------------------------------------
@@ -444,6 +501,10 @@ func (d *DAG) IsDatasetScheduled() bool    { return d.schedule == nil && len(d.D
 
 // validate parses the schedule, wires mapping dependencies and checks the graph
 // is acyclic (topological sort).
+// Validate checks the DAG (ids, links, cycles) and orders its tasks, as
+// Register does. Needed before Tasks() for a DAG that isn't registered.
+func (d *DAG) Validate() error { return d.validate() }
+
 func (d *DAG) validate() error {
 	if len(d.errs) > 0 {
 		return errors.Join(d.errs...)
@@ -517,6 +578,7 @@ func Register(d *DAG) {
 		return
 	}
 	d.ParsedAt = time.Now()
+	d.compiledIn = d.Source == "go"
 	registry[d.ID] = d
 }
 
