@@ -42,7 +42,7 @@ main.bldmain{padding:0;max-width:none}
 .bld .btn.sm{padding:3px 9px;font-size:12.5px}
 .bld-top .sep{width:1px;height:22px;background:var(--rule);margin:0 2px}
 .bld-main{flex:1;display:flex;min-height:0}
-.bld-pal{width:210px;background:#fff;border-right:1px solid var(--rule);overflow-y:auto;padding:10px;flex:none}
+.bld-pal{width:var(--palW,210px);background:#fff;border-right:1px solid var(--rule);overflow-y:auto;padding:10px;flex:none}
 .bld-pal input{width:100%;margin-bottom:8px}
 .bld-pal h4{margin:12px 0 6px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .bp-item{display:flex;align-items:center;gap:9px;padding:7px 9px;margin-bottom:5px;border:1px solid var(--rule);border-radius:6px;background:#fff;cursor:grab;font-size:13px;user-select:none}
@@ -91,7 +91,7 @@ main.bldmain{padding:0;max-width:none}
 .bld-zoom button:hover{background:#EEF1F4}
 .bld-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;color:var(--muted);text-align:center;font-size:14px;line-height:1.7}
 .bld-empty b{display:block;font-size:17px;color:var(--ink);margin-bottom:4px}
-.bld-side{width:340px;background:#fff;border-left:1px solid var(--rule);overflow-y:auto;padding:14px;flex:none}
+.bld-side{width:var(--sideW,340px);background:#fff;border-left:1px solid var(--rule);overflow-y:auto;padding:14px;flex:none}
 .bld-side h3{margin:0 0 4px;font-size:15px}
 .bld-side .desc{font-size:12.5px;color:var(--muted);margin:0 0 12px}
 .bf{margin-bottom:12px}
@@ -132,7 +132,11 @@ main.bldmain{padding:0;max-width:none}
 .btn.run{background:#EEF3FB;border-color:#C9D9F2;color:#1F5FD0;font-weight:600}
 .bld-pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11.5px;font-weight:600;color:#fff}
 .bld-list td .badge{margin-right:6px}
-@media(max-width:900px){.bld-pal{width:150px}.bld-side{width:280px}}
+@media(max-width:900px){.bld-pal{width:150px}.bld-side{width:280px}.bld-rz{display:none}}
+.bld-rz{width:9px;margin:0 -4px;flex:none;cursor:col-resize;position:relative;z-index:6;touch-action:none}
+.bld-rz::before{content:"";position:absolute;left:4px;top:0;bottom:0;width:1px}
+.bld-rz:hover::before,.bld-rz.drag::before{left:3px;width:3px;background:#8DB4E2}
+body.bld-resizing{cursor:col-resize;user-select:none}
 `;
 
 // ---- small helpers ---------------------------------------------------------------
@@ -272,11 +276,13 @@ function drawShell() {
         <div id="bpal">${palHtml()}</div>
         <button class="btn sm" data-act="newnode" type="button" style="width:100%;margin-top:6px" title="Define your own node type">+ Create node</button>
         <p class="sub" style="margin-top:14px;font-size:11.5px">Drag a node onto the canvas, or click it to add it after the selected node.</p></aside>
+      <div class="bld-rz" data-rz="palW" role="separator" aria-orientation="vertical" aria-label="Resize node list" title="Drag to resize · double-click to reset" tabindex="0"></div>
       <div class="bld-cv" id="bc" tabindex="0" aria-label="Workflow canvas">
         <div class="bld-world" id="bw"><svg class="bld-edges" id="be"><defs><marker id="barrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8A96A3"/></marker><marker id="barrowsel" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#1F5FD1"/></marker></defs><g id="bel"></g><path class="tmp" id="btmp" hidden></path></svg></div>
         <div class="bld-empty" id="bempty"><div><b>Start building</b>Drag a node from the left, or click one to add it.</div></div>
         <div class="bld-zoom"><button data-act="zout" title="Zoom out" aria-label="Zoom out">−</button><button data-act="zin" title="Zoom in" aria-label="Zoom in">+</button></div>
       </div>
+      <div class="bld-rz" data-rz="sideW" role="separator" aria-orientation="vertical" aria-label="Resize details panel" title="Drag to resize · double-click to reset" tabindex="0"></div>
       <aside class="bld-side" id="bside" aria-label="Details"></aside>
     </div>
     <datalist id="bconns">${B.conns.map(c => `<option value="${esc(c)}">`).join("")}</datalist>
@@ -287,8 +293,41 @@ function drawShell() {
 function palHtml() { const cats = [...new Set(CAT.nodes.map(n => n.category))]; return cats.map(c => `<h4>${esc(c)}</h4>` + CAT.nodes.filter(n => n.category === c).map(n => palItem(n, true)).join("")).join(""); }
 const palItem = (n, tools) => `<div class="bp-item" draggable="true" data-type="${n.type}" title="${esc(n.description)}"><span class="bp-ic" style="background:${CAT_COLOR[n.category] || "#64748B"}">${icon(n.icon, 15)}</span><span style="flex:1">${esc(n.label)}</span>${tools && n.custom && n.source === "yaml" ? `<button class="bp-x" type="button" data-pal="edit" data-type="${n.type}" title="Edit node definition" aria-label="Edit">✎</button><button class="bp-x" type="button" data-pal="del" data-type="${n.type}" title="Delete node definition" aria-label="Delete">×</button>` : ""}</div>`;
 
+// side panels: drag the edge to resize (saved per browser), double-click to reset
+const RZ = { palW: { min: 150, max: 480, def: 210, sign: 1 }, sideW: { min: 260, max: 900, def: 340, sign: -1 } };
+function rzGet(k) { try { return +localStorage.getItem("dagsflow.builder." + k) || 0; } catch { return 0; } }
+function rzSet(main, k, w) {
+  const r = RZ[k], room = main.clientWidth - 300 - (k === "palW" ? $(".bld-side").offsetWidth : $(".bld-pal").offsetWidth);
+  w = Math.round(Math.max(r.min, Math.min(w, r.max, room)));
+  main.style.setProperty("--" + k, w + "px");
+  try { localStorage.setItem("dagsflow.builder." + k, String(w)); } catch {}
+}
+function bindResizers() {
+  const main = $(".bld-main");
+  for (const k of Object.keys(RZ)) { const w = rzGet(k); if (w) main.style.setProperty("--" + k, w + "px"); }
+  $$(".bld-rz").forEach(h => {
+    const k = h.dataset.rz, r = RZ[k], panel = () => k === "palW" ? $(".bld-pal") : $(".bld-side");
+    h.addEventListener("pointerdown", e => {
+      e.preventDefault();
+      const x0 = e.clientX, w0 = panel().offsetWidth;
+      h.classList.add("drag"); document.body.classList.add("bld-resizing"); h.setPointerCapture?.(e.pointerId);
+      const move = ev => rzSet(main, k, w0 + r.sign * (ev.clientX - x0));
+      const up = () => { h.classList.remove("drag"); document.body.classList.remove("bld-resizing");
+        h.removeEventListener("pointermove", move); h.removeEventListener("pointerup", up); h.removeEventListener("pointercancel", up); };
+      h.addEventListener("pointermove", move); h.addEventListener("pointerup", up); h.addEventListener("pointercancel", up);
+    });
+    h.addEventListener("dblclick", () => { main.style.removeProperty("--" + k); try { localStorage.removeItem("dagsflow.builder." + k); } catch {} });
+    h.addEventListener("keydown", e => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault(); e.stopPropagation();
+      rzSet(main, k, panel().offsetWidth + r.sign * (e.key === "ArrowRight" ? 40 : -40));
+    });
+  });
+}
+
 function bindShell() {
   const root = $(".bld");
+  bindResizers();
   root.addEventListener("click", onClick);
   $("#bid").addEventListener("input", e => { B.graph.dag_id = e.target.value.trim(); touch(); updateStatus(); });
   $("#bpsearch").addEventListener("input", e => {
