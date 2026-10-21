@@ -33,6 +33,7 @@ type fakeGoogle struct {
 	octypes map[string]string
 	sheet   [][]any
 	calls   []string
+	queries []string
 }
 
 func (f *fakeGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +66,9 @@ func (f *fakeGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	switch {
 	case strings.HasSuffix(p, "/projects/prj/queries") && r.Method == "POST":
+		var q struct{ Query string }
+		_ = json.Unmarshal(body, &q)
+		f.queries = append(f.queries, q.Query)
 		_, _ = w.Write([]byte(`{"jobComplete":false,"jobReference":{"jobId":"j1","location":"US"}}`))
 	case strings.HasSuffix(p, "/queries/j1") && r.URL.Query().Get("pageToken") == "":
 		f.polled = true

@@ -78,28 +78,33 @@ type yamlTask struct {
 	Input      string          `yaml:"input"` // transform
 	Steps      []TransformStep `yaml:"steps"`
 
-	ProjectID     string   `yaml:"project_id"` // bigquery_* / gsheet_*
-	Location      string   `yaml:"location"`
-	Dataset       string   `yaml:"dataset"`
-	SpreadsheetID string   `yaml:"spreadsheet_id"`
-	Range         string   `yaml:"range"`
-	NoHeader      bool     `yaml:"no_header"`
-	Columns       []string `yaml:"columns"`
-	WriteMode     string   `yaml:"write_mode"`
-	UserEntered   bool     `yaml:"user_entered"`
-	KeepHeaders   bool     `yaml:"keep_headers"` // gsheet_read / file_read
-	File          string   `yaml:"file"`         // file_read
-	Format        string   `yaml:"format"`
-	Sheet         string   `yaml:"sheet"`
-	Delimiter     string   `yaml:"delimiter"`
-	Inputs        []string `yaml:"inputs"` // merge
-	On            []string `yaml:"on"`
-	JoinType      string   `yaml:"join_type"`
-	Bucket        string   `yaml:"bucket"` // gcs_write / s3_write
-	Object        string   `yaml:"object"`
-	Key           string   `yaml:"key"`
-	Region        string   `yaml:"region"`
-	Gzip          bool     `yaml:"gzip"`
+	ProjectID     string            `yaml:"project_id"` // bigquery_* / gsheet_*
+	Location      string            `yaml:"location"`
+	Dataset       string            `yaml:"dataset"`
+	SpreadsheetID string            `yaml:"spreadsheet_id"`
+	Range         string            `yaml:"range"`
+	NoHeader      bool              `yaml:"no_header"`
+	Columns       []string          `yaml:"columns"`
+	WriteMode     string            `yaml:"write_mode"`
+	UserEntered   bool              `yaml:"user_entered"`
+	KeepHeaders   bool              `yaml:"keep_headers"` // gsheet_read / file_read
+	File          string            `yaml:"file"`         // file_read
+	Format        string            `yaml:"format"`
+	Sheet         string            `yaml:"sheet"`
+	Delimiter     string            `yaml:"delimiter"`
+	Inputs        []string          `yaml:"inputs"` // merge
+	On            []string          `yaml:"on"`
+	JoinType      string            `yaml:"join_type"`
+	Bucket        string            `yaml:"bucket"` // gcs_write / s3_write
+	Object        string            `yaml:"object"`
+	Key           string            `yaml:"key"`
+	Region        string            `yaml:"region"`
+	Gzip          bool              `yaml:"gzip"`
+	AllFiles      bool              `yaml:"all_files"` // bigquery_external_table (+ table, rows_from, format, columns)
+	DefaultType   string            `yaml:"default_type"`
+	ColumnTypes   map[string]string `yaml:"column_types"`
+	IfNotExists   bool              `yaml:"if_not_exists"`
+	URIs          []string          `yaml:"uris"`
 
 	TriggerDagID string         `yaml:"trigger_dag_id"` // trigger_dagrun
 	Conf         map[string]any `yaml:"conf"`
@@ -364,6 +369,10 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 	case "gcs_write":
 		d.NewGCSWriteTask(yt.ID, StoreWriteConfig{ConnID: yt.ConnID, Bucket: yt.Bucket, Object: yt.Object, Format: yt.Format,
 			Columns: yt.Columns, Delim: yt.Delimiter, Gzip: yt.Gzip, RowsFrom: yt.RowsFrom}, opts...)
+	case "bigquery_external_table":
+		d.NewBigQueryExternalTableTask(yt.ID, BigQueryExternalConfig{ConnID: yt.ConnID, ProjectID: yt.ProjectID, Location: yt.Location,
+			Table: yt.Table, RowsFrom: yt.RowsFrom, AllFiles: yt.AllFiles, DefaultType: yt.DefaultType, ColumnTypes: yt.ColumnTypes,
+			IfNotExists: yt.IfNotExists, URIs: yt.URIs, Format: yt.Format, Columns: yt.Columns}, opts...)
 	case "s3_write":
 		d.NewS3WriteTask(yt.ID, StoreWriteConfig{ConnID: yt.ConnID, Bucket: yt.Bucket, Object: firstNonEmpty(yt.Key, yt.Object),
 			Region: yt.Region, Format: yt.Format, Columns: yt.Columns, Delim: yt.Delimiter, Gzip: yt.Gzip, RowsFrom: yt.RowsFrom}, opts...)
@@ -402,7 +411,7 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			d.NewHTTPSensor(yt.ID, yt.httpReq(), cfg, opts...)
 		}
 	default:
-		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, branch, gcs_write, s3_write, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
+		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, branch, gcs_write, s3_write, bigquery_external_table, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
 	}
 	return nil
 }

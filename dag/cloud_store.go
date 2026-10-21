@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -218,7 +219,7 @@ func (d *DAG) newStoreTask(id, op, opName, scheme string, cfg StoreWriteConfig,
 		}
 		ctx.Logf("written: %s", uri)
 		_ = ctx.XComPush("rows_affected", int64(len(rows)))
-		return ctx.XComPush("return_value", map[string]any{"uri": uri, "rows": len(rows), "bytes": len(data)})
+		return ctx.XComPush("return_value", storeOutput(cfg, uri, rows, len(data)))
 	}, opts...)
 }
 
@@ -384,4 +385,107 @@ func (d *DAG) NewS3WriteTask(id string, cfg StoreWriteConfig, opts ...TaskOption
 			}
 			return "s3://" + cfg.Bucket + "/" + name, nil
 		}, opts...)
+}
+
+// storeOutput is the XCom of a dump node: where the file is, plus its format and
+// columns (in file order) with a type guessed from the data, so a following
+// "BigQuery external table" node can describe the file.
+func storeOutput(cfg StoreWriteConfig, uri string, rows []any, size int) map[string]any {
+	format := strings.ToLower(strings.TrimSpace(cfg.Format))
+	switch format {
+	case "":
+		format = "csv"
+	case "jsonl":
+		format = "ndjson"
+	}
+	cols := cfg.Columns
+	if len(cols) == 0 || format != "csv" && format != "tsv" {
+		cols = rowColumns(rows)
+	}
+	schema := make([]any, len(cols))
+	for i, c := range cols {
+		schema[i] = map[string]any{"name": c, "type": guessBQType(rows, c, format == "ndjson" || format == "json")}
+	}
+	out := map[string]any{"uri": uri, "rows": len(rows), "bytes": size, "format": format, "columns": schema, "gzip": cfg.Gzip}
+	if format == "csv" || format == "tsv" {
+		d := ","
+		if format == "tsv" {
+			d = "\t"
+		}
+		if s := strings.TrimSpace(cfg.Delim); s != "" {
+			switch strings.ToLower(s) {
+			case "tab", "\\t":
+				d = "\t"
+			case "semicolon":
+				d = ";"
+			case "pipe":
+				d = "|"
+			case "comma":
+				d = ","
+			default:
+				d = cfg.Delim
+			}
+		}
+		out["delimiter"] = d
+	}
+	return out
+}
+
+// rowColumns: every field of the rows, sorted (the order the csv writer uses).
+func rowColumns(rows []any) []string {
+	set := map[string]bool{}
+	for _, r := range rows {
+		if m, ok := r.(map[string]any); ok {
+			for k := range m {
+				set[k] = true
+			}
+		}
+	}
+	cols := make([]string, 0, len(set))
+	for k := range set {
+		cols = append(cols, k)
+	}
+	sort.Strings(cols)
+	return cols
+}
+
+// guessBQType: INT64, FLOAT64, BOOL, JSON (json files only) or STRING.
+func guessBQType(rows []any, col string, jsonFile bool) string {
+	t := ""
+	for _, r := range rows {
+		m, _ := r.(map[string]any)
+		v, ok := m[col]
+		if !ok || v == nil {
+			continue
+		}
+		k := "STRING"
+		switch x := v.(type) {
+		case bool:
+			k = "BOOL"
+		case float64:
+			k = "FLOAT64"
+			if x == math.Trunc(x) && math.Abs(x) < 1<<53 {
+				k = "INT64"
+			}
+		case int, int32, int64:
+			k = "INT64"
+		case map[string]any, []any:
+			k = "STRING"
+			if jsonFile {
+				k = "JSON"
+			}
+		}
+		switch {
+		case t == "" || t == k:
+			t = k
+		case (t == "INT64" && k == "FLOAT64") || (t == "FLOAT64" && k == "INT64"):
+			t = "FLOAT64"
+		default:
+			return "STRING"
+		}
+	}
+	if t == "" {
+		return "STRING"
+	}
+	return t
 }

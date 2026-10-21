@@ -92,7 +92,7 @@ func builtinTaken(t string) bool {
 
 var baseOperators = map[string]bool{"empty": true, "bash": true, "go": true, "bigquery": true, "http": true, "postgres": true,
 	"bigquery_query": true, "bigquery_insert": true, "gsheet_read": true, "gsheet_write": true, "file_read": true,
-	"merge": true, "transform": true, "gcs_write": true, "s3_write": true, "trigger_dagrun": true,
+	"merge": true, "transform": true, "gcs_write": true, "s3_write": true, "bigquery_external_table": true, "trigger_dagrun": true,
 	"file_sensor": true, "time_delta_sensor": true, "external_task_sensor": true, "http_sensor": true}
 
 func checkNodeMeta(nt NodeType) error {

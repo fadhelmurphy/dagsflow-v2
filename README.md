@@ -397,7 +397,7 @@ tasks:
     outlets: [bq://proj.dw.sales]
 ```
 
-Operators: `empty`, `bash`, `go`, `bigquery`, `http`, `postgres`, `transform`, `branch`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`, `custom`. Custom logic needs a Go DAG (or a `go` / `bash` task).
+Operators: `empty`, `bash`, `go`, `bigquery`, `http`, `postgres`, `transform`, `branch`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `bigquery_external_table`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`, `custom`. Custom logic needs a Go DAG (or a `go` / `bash` task).
 
 ETL operators (rows travel between tasks as the XCom `return_value`, a JSON array of objects):
 
@@ -503,7 +503,21 @@ Dump rows to object storage (a file per run, plain REST, no SDK):
     upstream: [read_bq]
 ```
 
-`gcs_write` uses the same service account as BigQuery and Sheets (it needs write access to the bucket). `s3_write` reads the `aws_default` connection (or `conn_id`) with `access_key_id`, `secret_access_key`, optional `session_token`, `region` and `endpoint_url` (for MinIO or R2; those use path style URLs), else the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_REGION` / `AWS_ENDPOINT_URL_S3` environment variables. Without keys it uses the IAM role of where it runs, in the AWS SDK order: web identity (EKS IRSA: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`), container credentials (ECS task role, EKS Pod Identity), then the EC2 instance profile through IMDSv2 (`AWS_EC2_METADATA_DISABLED=true` skips it). A `role_arn` (and optional `external_id`) on the connection is assumed with STS on top of those credentials, for cross-account buckets. Temporary credentials are cached until shortly before they expire. The task output is `{uri, rows, bytes}`. CSV columns default to all fields, sorted; set `columns: [...]` for an order. The whole file is built in memory and uploaded in one request, so it suits files up to a few hundred MB. Both are tested against fake servers (S3 signing also against the examples published by AWS), not yet against real GCS or S3.
+`gcs_write` uses the same service account as BigQuery and Sheets (it needs write access to the bucket). `s3_write` reads the `aws_default` connection (or `conn_id`) with `access_key_id`, `secret_access_key`, optional `session_token`, `region` and `endpoint_url` (for MinIO or R2; those use path style URLs), else the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_REGION` / `AWS_ENDPOINT_URL_S3` environment variables. Without keys it uses the IAM role of where it runs, in the AWS SDK order: web identity (EKS IRSA: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`), container credentials (ECS task role, EKS Pod Identity), then the EC2 instance profile through IMDSv2 (`AWS_EC2_METADATA_DISABLED=true` skips it). A `role_arn` (and optional `external_id`) on the connection is assumed with STS on top of those credentials, for cross-account buckets. Temporary credentials are cached until shortly before they expire. The task output is `{uri, rows, bytes, format, columns, gzip, delimiter}` (`columns` lists each column with a type guessed from the data). CSV columns default to all fields, sorted; set `columns: [...]` for an order. The whole file is built in memory and uploaded in one request, so it suits files up to a few hundred MB. Both are tested against fake servers (S3 signing also against the examples published by AWS), not yet against real GCS or S3.
+
+Expose the dumped file to BigQuery as an external table, with exactly the column names of the file:
+
+```yaml
+  - id: ext
+    operator: bigquery_external_table
+    table: 7r_staging.testing_fadhel   # or project.dataset.table; CREATE OR REPLACE on every run
+    default_type: STRING               # STRING (default) for every column | auto: from the data
+    column_types: {amount: NUMERIC, order_date: DATE}   # optional overrides
+    all_files: true                    # uris = the folder of the file + /* (e.g. one file per day)
+    upstream: [dump_gcs]               # reads uri, format and columns from the gcs_write output
+```
+
+`auto` gives INT64, FLOAT64, BOOL, JSON (ndjson only) or STRING from the values that were written. CSV/TSV files get `skip_leading_rows = 1`, the delimiter and `compression = 'GZIP'` when gzipped. `format: json` (one array) can't be read by BigQuery: use `ndjson` or `csv`. `if_not_exists: true` keeps an existing table. Without a `gcs_write` before it, set `uris`, `format` and `columns` (all STRING) yourself.
 
 BigQuery and Google Sheets as source or destination (plain REST, no extra dependencies):
 
