@@ -152,14 +152,16 @@ kbd{font:11px var(--code);background:#E9ECEF;border-radius:3px;padding:0 4px;mar
 body.resizing{cursor:col-resize;user-select:none}
 .gridPane::-webkit-scrollbar{height:10px;width:10px}.gridPane::-webkit-scrollbar-thumb{background:#9AA3AD;border-radius:6px;border:2px solid #fff}.gridPane::-webkit-scrollbar-track{background:#F3F5F7}
 .detailPane{flex:1;min-width:0;display:flex;flex-direction:column}
-table.agrid{border-collapse:collapse}
+table.agrid{border-collapse:collapse;width:100%}
+.gwrap{min-width:100%;width:max-content;overflow-x:clip;padding-top:6px}  /* rotated run labels must not widen the scroll area */
 table.agrid th,table.agrid td{padding:0}
-.agrid .yaxis{position:sticky;left:0;z-index:2;background:#fff;height:150px;min-width:150px;vertical-align:top}
-.agrid .ylab{position:absolute;right:10px;font-size:11px;color:var(--muted);font-weight:600;top:24px!important}
+.agrid .yaxis{position:sticky;left:0;z-index:2;background:#fff;height:150px;min-width:150px;width:100%;vertical-align:top}
+.agrid .ylab{position:absolute;left:12px;font-size:11px;color:var(--muted);font-weight:600;top:24px!important}
 .agrid .yv{position:absolute;right:8px;font-size:10.5px;color:var(--muted);font-weight:600;transform:translateY(-50%)}
-.barcell{height:150px;vertical-align:bottom;position:relative;min-width:18px;background:
+.barcell{height:150px;vertical-align:bottom;position:relative;min-width:18px;width:18px;background:
   linear-gradient(#E4E7EB,#E4E7EB) 0 50px/100% 1px no-repeat,linear-gradient(#E4E7EB,#E4E7EB) 0 100px/100% 1px no-repeat,linear-gradient(#CED4DA,#CED4DA) 0 100%/100% 1px no-repeat}
-.barcell .xlab{position:absolute;left:50%;bottom:110px;transform:rotate(-30deg);transform-origin:left bottom;white-space:nowrap;font-size:10.5px;color:var(--muted);pointer-events:none}
+.barcell .xlab{position:absolute;left:50%;bottom:110px;transform:rotate(-30deg);transform-origin:left bottom;white-space:nowrap;font-size:10.5px;color:var(--muted);pointer-events:none;z-index:3}
+.barcell .xlab.left{left:auto;right:50%;transform:rotate(30deg);transform-origin:right bottom}  /* near the right edge: lean left so it stays visible */
 .barcell.tick::before{content:"";position:absolute;left:50%;top:44px;bottom:0;width:1px;background:#E4E7EB}
 .bar{display:block;width:10px;margin:0 auto 1px;border:0;border-radius:2px;padding:0;position:relative;z-index:1;cursor:pointer}
 .bar:hover{filter:brightness(1.1);box-shadow:0 0 0 1px #16202A55}
@@ -167,8 +169,9 @@ table.agrid th,table.agrid td{padding:0}
 .agrid td.sel{background-color:#D6E9FB}
 .agrid tr.sel{background:#D6E9FB}
 .agrid tr.sel th.tname{background:#D6E9FB}
-.agrid th.tname{position:sticky;left:0;z-index:1;background:#fff;text-align:left;font-weight:400;max-width:230px}
-.agrid th.tname button{border:0;background:none;padding:3px 10px 3px 12px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px;display:block;text-align:left;color:var(--ink)}
+.agrid th.tname{position:sticky;left:0;z-index:1;background:#fff;text-align:left;font-weight:400;max-width:none}
+.agrid th.tname button{border:0;background:none;padding:3px 10px 3px 12px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px;display:block;text-align:left;color:var(--ink)}
+.agrid tbody tr{border-bottom:1px solid #EEF0F3}
 .agrid th.tname button:hover{text-decoration:underline}
 .agrid tbody td{height:22px;text-align:center;vertical-align:middle}
 .gcell{display:block;width:12px;height:12px;margin:0 auto;border-radius:3px;border:0;padding:0;cursor:pointer}
@@ -745,11 +748,11 @@ function renderGrid(d, q){
   const maxS = Math.max(.001, ...runs.map(r=>secs(r.start_date, r.end_date)));
   const yl = v => maxS >= 10 ? hms(v) : maxS >= 1 ? `${v.toFixed(1)} s` : `${Math.round(v*1000)} ms`;
   const every = Math.max(4, Math.ceil(runs.length/3));
-  let h = `<table class="agrid"><thead><tr class="chartRow"><th class="yaxis"><span class="ylab" style="top:0">Duration</span>
+  let h = `<div class="gwrap"><table class="agrid"><thead><tr class="chartRow"><th class="yaxis"><span class="ylab" style="top:0">Duration</span>
       <span class="yv" style="top:50px">${yl(maxS)}</span><span class="yv" style="top:100px">${yl(maxS/2)}</span><span class="yv" style="top:149px">${yl(0)}</span></th>`;
   runs.forEach((r,i)=>{
     const s = secs(r.start_date, r.end_date), hgt = Math.max(2, Math.round(s/maxS*99));
-    const lab = (i % every === 0) ? `<span class="xlab">${esc(shortDate(r.logical_date))}</span>` : "";
+    const lab = (i % every === 0) ? `<span class="xlab${runs.length-1-i < 5 ? " left" : ""}">${esc(shortDate(r.logical_date))}</span>` : "";
     h += `<td class="barcell${lab?" tick":""} ${r.dag_run_id===sel.run?"sel":""}">${lab}<button class="bar" data-selrun="${esc(r.dag_run_id)}" style="height:${hgt}px;background:${color(r.state)}"
       title="${esc(r.dag_run_id)}&#10;${esc(r.state)} · ${esc(r.run_type)}&#10;${fmtZ(r.logical_date)}&#10;Duration ${hms(s)}" aria-label="Run ${esc(r.dag_run_id)}, ${esc(r.state)}">${r.run_type==="manual"?'<i class="manual">▸</i>':""}</button></td>`;
   });
@@ -765,7 +768,7 @@ function renderGrid(d, q){
     });
     h += `</tr>`;
   }
-  h += `</tbody></table>`;
+  h += `</tbody></table></div>`;
   if(!runs.length) h += `<p class="gempty">No runs match. ${q.toString().match(/run_type|run_state|base_date/)?"Clear the filters or t":"T"}rigger the DAG to create one.</p>`;
   if(q.get("filter_task")) h += `<p class="gempty">Showing ${q.get("filter_mode")==="up"?"upstream of":q.get("filter_mode")==="down"?"downstream of":"upstream and downstream of"} <b>${esc(q.get("filter_task"))}</b>. <button class="linkbtn" data-act="unfilter">Show all tasks</button></p>`;
   pane.innerHTML = h;
