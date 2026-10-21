@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"sort"
 	"strconv"
@@ -19,7 +20,7 @@ import (
 // travel between tasks as XCom "return_value": a JSON array of objects.
 
 const (
-	defaultRowLimit = 10000
+	defaultRowLimit = math.MaxInt // no cap unless the node sets limit
 	insertChunk     = 500
 )
 
@@ -408,7 +409,7 @@ type PostgresConfig struct {
 	SQL        string // templated
 	Table      string // set = insert mode ("schema.table")
 	RowsFrom   string // upstream task; default: the only upstream task
-	Limit      int    // max rows returned by a query (default 10000)
+	Limit      int    // max rows returned by a query (default: no limit)
 	OnConflict string // "" (error) or "do_nothing"
 }
 

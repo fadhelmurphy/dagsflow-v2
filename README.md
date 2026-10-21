@@ -424,7 +424,7 @@ tasks:
     operator: postgres                 # sql = run a statement, returned rows are the output
     conn_id: warehouse
     sql: "SELECT count(*) AS n FROM public.orders"
-    limit: 10000                       # max rows kept (default 10000)
+    limit: 10000                       # optional cap on rows kept (default: no limit)
     upstream: [load]
 ```
 
@@ -509,7 +509,7 @@ BigQuery and Google Sheets as source or destination (plain REST, no extra depend
 
 ```yaml
   - id: read_bq
-    operator: bigquery_query           # rows -> JSON array (limit default 10000)
+    operator: bigquery_query           # rows -> JSON array (no row limit unless limit: is set)
     sql: SELECT id, name FROM `proj.ds.users` WHERE d = '{{ .ds }}'
   - id: to_sheet
     operator: gsheet_write             # write_mode: append (default) | overwrite
