@@ -58,24 +58,63 @@ var (
 	tokens = map[string]cachedToken{}
 )
 
-// googleCreds resolves the key of a connection: credentials_path (file),
-// credentials_json (string or object) or GOOGLE_APPLICATION_CREDENTIALS.
+// googleCreds resolves the key of a connection, in this order:
+//   - credentials_json (string or object) or credentials_path (file),
+//   - the Airflow names: keyfile_dict / key_path, also with the
+//     extra__google_cloud_platform__ prefix, or inside an "extra" object/string,
+//   - the connection config being the service account key itself
+//     (the downloaded JSON pasted as the connection),
+//   - GOOGLE_APPLICATION_CREDENTIALS.
 func googleCreds(c Connection) (*saKey, error) {
 	var raw []byte
+	cfg := c.Config
+	if ex, ok := cfg["extra"]; ok { // Airflow export: extra is a JSON string or object
+		var m map[string]any
+		switch v := ex.(type) {
+		case string:
+			_ = json.Unmarshal([]byte(v), &m)
+		case map[string]any:
+			m = v
+		}
+		if m != nil {
+			merged := map[string]any{}
+			for k, v := range m {
+				merged[k] = v
+			}
+			for k, v := range cfg {
+				merged[k] = v
+			}
+			cfg = merged
+		}
+	}
+	pick := func(names ...string) any {
+		for _, n := range names {
+			for _, k := range []string{n, "extra__google_cloud_platform__" + n} {
+				if v, ok := cfg[k]; ok && v != nil && v != "" {
+					return v
+				}
+			}
+		}
+		return nil
+	}
+	str := func(v any) string { s, _ := v.(string); return s }
 	switch {
-	case c.Config["credentials_json"] != nil:
-		switch v := c.Config["credentials_json"].(type) {
+	case pick("credentials_json", "keyfile_dict") != nil:
+		switch v := pick("credentials_json", "keyfile_dict").(type) {
 		case string:
 			raw = []byte(v)
 		default:
 			raw, _ = json.Marshal(v)
 		}
-	case c.String("credentials_path") != "":
-		b, err := os.ReadFile(c.String("credentials_path"))
+	case str(pick("credentials_path", "key_path")) != "":
+		path := str(pick("credentials_path", "key_path"))
+		b, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("read credentials: %w", err)
 		}
 		raw = b
+	case str(cfg["client_email"]) != "" && str(cfg["private_key"]) != "":
+		raw, _ = json.Marshal(cfg)
 	case os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "":
 		b, err := os.ReadFile(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
 		if err != nil {
@@ -195,7 +234,7 @@ func metadataToken(ctx context.Context, scope string) (string, int, error) {
 		ExpiresIn   int    `json:"expires_in"`
 	}
 	if err := doJSON(req, &out); err != nil {
-		return "", 0, errors.New("no Google credentials: set credentials_path or credentials_json on the connection (or GOOGLE_APPLICATION_CREDENTIALS); the GCE metadata server is not reachable")
+		return "", 0, errors.New("no Google credentials: paste the service account key JSON as the connection config, or set credentials_json / credentials_path (or GOOGLE_APPLICATION_CREDENTIALS); the GCE metadata server is not reachable")
 	}
 	return out.AccessToken, out.ExpiresIn, nil
 }

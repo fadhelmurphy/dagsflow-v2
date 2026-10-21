@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -257,5 +258,30 @@ func TestGoogleErrors(t *testing.T) {
 	}
 	if SheetID("https://docs.google.com/spreadsheets/d/abc_1-X/edit") != "abc_1-X" {
 		t.Fatal("SheetID")
+	}
+}
+
+func TestGoogleCredsShapes(t *testing.T) {
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	key := map[string]any{"type": "service_account", "client_email": "sa@p.iam", "private_key": "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n", "project_id": "p"}
+	keyJS, _ := json.Marshal(key)
+	path := filepath.Join(t.TempDir(), "k.json")
+	_ = os.WriteFile(path, keyJS, 0o600)
+	for name, cfg := range map[string]map[string]any{
+		"key pasted as the config":   key,
+		"credentials_json object":    {"credentials_json": key},
+		"credentials_json string":    {"credentials_json": string(keyJS)},
+		"airflow keyfile_dict":       {"keyfile_dict": string(keyJS)},
+		"airflow prefixed key_path":  {"extra__google_cloud_platform__key_path": path},
+		"airflow extra string":       {"extra": `{"keyfile_dict":` + strconv.Quote(string(keyJS)) + `}`},
+		"airflow extra object, path": {"extra": map[string]any{"key_path": path}},
+	} {
+		k, err := googleCreds(Connection{Type: "google_cloud_platform", Config: cfg})
+		if err != nil || k == nil || k.ClientEmail != "sa@p.iam" || k.ProjectID != "p" {
+			t.Errorf("%s: key=%v err=%v", name, k, err)
+		}
+	}
+	if k, err := googleCreds(Connection{Config: map[string]any{"project_id": "p"}}); k != nil || err != nil {
+		t.Errorf("no key: want metadata fallback, got %v %v", k, err)
 	}
 }

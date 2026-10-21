@@ -145,20 +145,25 @@ select,input,textarea{font:inherit;border:1px solid #CED4DA;border-radius:4px;pa
 kbd{font:11px var(--code);background:#E9ECEF;border-radius:3px;padding:0 4px;margin:0 1px}
 .chip{font-size:11px;border:2px solid;border-radius:4px;padding:0 5px;line-height:18px;color:var(--ink);background:#fff}
 .dagBody{display:flex;border-top:1px solid var(--line);height:calc(100vh - 272px);min-height:460px}
-.gridPane{flex:0 0 42%;max-width:720px;min-width:320px;overflow:auto;padding:14px 12px 20px 0}
-.splitter{width:1px;background:var(--line);flex:none}
+.gridPane{flex:0 0 var(--gridW,42%);min-width:200px;overflow:auto;padding:14px 12px 20px 0;scrollbar-width:thin}
+.splitter{width:9px;margin:0 -4px;flex:none;cursor:col-resize;position:relative;z-index:3;touch-action:none}
+.splitter::before{content:"";position:absolute;left:4px;top:0;bottom:0;width:1px;background:var(--line)}
+.splitter:hover::before,.splitter.drag::before{left:3px;width:3px;background:#8DB4E2}
+body.resizing{cursor:col-resize;user-select:none}
+.gridPane::-webkit-scrollbar{height:10px;width:10px}.gridPane::-webkit-scrollbar-thumb{background:#9AA3AD;border-radius:6px;border:2px solid #fff}.gridPane::-webkit-scrollbar-track{background:#F3F5F7}
 .detailPane{flex:1;min-width:0;display:flex;flex-direction:column}
 table.agrid{border-collapse:collapse}
 table.agrid th,table.agrid td{padding:0}
 .agrid .yaxis{position:sticky;left:0;z-index:2;background:#fff;height:150px;min-width:150px;vertical-align:top}
-.agrid .ylab{position:absolute;right:10px;font-size:11px;color:var(--muted);font-weight:400;top:28px!important}
-.agrid .yv{position:absolute;right:8px;font-size:10px;color:var(--muted);font-weight:400;font-family:var(--code)}
+.agrid .ylab{position:absolute;right:10px;font-size:11px;color:var(--muted);font-weight:600;top:24px!important}
+.agrid .yv{position:absolute;right:8px;font-size:10.5px;color:var(--muted);font-weight:600;transform:translateY(-50%)}
 .barcell{height:150px;vertical-align:bottom;position:relative;min-width:18px;background:
   linear-gradient(#E4E7EB,#E4E7EB) 0 50px/100% 1px no-repeat,linear-gradient(#E4E7EB,#E4E7EB) 0 100px/100% 1px no-repeat,linear-gradient(#CED4DA,#CED4DA) 0 100%/100% 1px no-repeat}
-.barcell .xlab{position:absolute;left:4px;top:34px;transform:rotate(-40deg);transform-origin:left bottom;white-space:nowrap;font-size:10px;color:var(--muted);pointer-events:none}
-.bar{display:block;width:10px;margin:0 auto 1px;border:0;border-radius:2px 2px 0 0;padding:0;position:relative;cursor:pointer}
+.barcell .xlab{position:absolute;left:50%;bottom:110px;transform:rotate(-30deg);transform-origin:left bottom;white-space:nowrap;font-size:10.5px;color:var(--muted);pointer-events:none}
+.barcell.tick::before{content:"";position:absolute;left:50%;top:44px;bottom:0;width:1px;background:#E4E7EB}
+.bar{display:block;width:10px;margin:0 auto 1px;border:0;border-radius:2px;padding:0;position:relative;z-index:1;cursor:pointer}
 .bar:hover{filter:brightness(1.1);box-shadow:0 0 0 1px #16202A55}
-.bar .manual{position:absolute;bottom:0;left:0;right:0;font-size:8px;color:#fff;font-style:normal;line-height:10px}
+.bar .manual{position:absolute;bottom:1px;left:0;right:0;font-size:7px;color:#fff;font-style:normal;line-height:8px}
 .agrid td.sel{background-color:#D6E9FB}
 .agrid tr.sel{background:#D6E9FB}
 .agrid tr.sel th.tname{background:#D6E9FB}
@@ -166,7 +171,8 @@ table.agrid th,table.agrid td{padding:0}
 .agrid th.tname button{border:0;background:none;padding:3px 10px 3px 12px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px;display:block;text-align:left;color:var(--ink)}
 .agrid th.tname button:hover{text-decoration:underline}
 .agrid tbody td{height:22px;text-align:center;vertical-align:middle}
-.gcell{display:block;width:12px;height:12px;margin:0 auto;border-radius:2px;border:1px solid rgba(0,0,0,.12);padding:0;cursor:pointer}
+.gcell{display:block;width:12px;height:12px;margin:0 auto;border-radius:3px;border:0;padding:0;cursor:pointer}
+.gcell.none{box-shadow:inset 0 0 0 1px #D5DAE0}
 .gcell:hover{transform:scale(1.25)}
 .gcell.on{outline:2px solid #16202A;outline-offset:1px}
 .mtag{font-size:11px;color:var(--muted)}
@@ -275,7 +281,7 @@ dialog.wide{width:min(880px,94vw)}
 .stateTag{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600}
 .stateTag i{width:10px;height:10px;border-radius:2px;border:1px solid rgba(0,0,0,.12)}
 h3{font-size:13px;margin:18px 0 8px}
-@media (max-width:1000px){.dagBody{flex-direction:column;height:auto}.gridPane{max-width:none;flex:none;max-height:60vh}.detailPane{min-height:500px}.pbody{overflow:visible}}
+@media (max-width:1000px){.dagBody{flex-direction:column;height:auto}.splitter{display:none}.gridPane{max-width:none;flex:none;max-height:60vh}.detailPane{min-height:500px}.pbody{overflow:visible}}
 
 dialog{border:1px solid var(--rule);border-radius:8px;padding:0;width:min(520px,94vw)}
 dialog::backdrop{background:rgba(22,32,42,.35)}
@@ -341,6 +347,8 @@ a.circ:hover{text-decoration:none;box-shadow:0 0 0 2px #CFE0F7}
 .acts :last-child{border-radius:0 4px 4px 0}
 .acts button:hover,.acts a:hover{background:#F0F4FA}
 .acts .del{color:#D32F2F}
+.acts a.btn{width:auto;white-space:nowrap;padding:0 12px!important;font-size:12.5px;font-weight:500;text-decoration:none}
+.dagTop .acts a.btn{height:36px;width:auto}
 .acts .off{width:32px;height:32px;border:1px solid #CED4DA;background:#F3F5F7;margin-left:-1px;display:flex;align-items:center;justify-content:center;color:#B5BDC6;cursor:not-allowed}
 .acts .off svg{width:15px;height:15px}
 .acts svg{width:15px;height:15px}
@@ -632,6 +640,7 @@ async function viewDag(id, q){
   const d = current = DV.data = await api(`/dags/${enc(id)}?${p}`);
   let page = document.getElementById("dagPage");
   if(!page || page.dataset.dag !== id){ $app.innerHTML = dagSkeleton(d, q); DV.paneKey = ""; DV.first = true; DV.code = null; }
+  applyGridW();
   syncFilters(q);
   renderDagHeader(d);
   renderGrid(d, q);
@@ -645,7 +654,7 @@ function dagTopHtml(d){
       <span class="grow"></span>
       <span class="hbadge" id="hSched"></span><span class="hbadge" id="hNext"></span>
       <div class="acts">
-        ${/\.ya?ml$/i.test(d.file||"") ? `<a class="btn sm needs-builder-edit" href="#/builder/${enc(d.dag_id)}" title="Open this YAML DAG in the visual builder" style="padding:3px 9px;font-size:12.5px">Open in builder</a>` : ""}
+        ${/\.ya?ml$/i.test(d.file||"") ? `<a class="btn sm needs-builder-edit" href="#/builder/${enc(d.dag_id)}" title="Open this YAML DAG in the visual builder">Open in builder</a>` : ""}
         <button class="${dp(d,"trigger")}" data-trigger="${esc(d.dag_id)}" title="Trigger DAG" aria-label="Trigger DAG">${ICON.play}</button>
         <button class="${dp(d,"edit")}" id="reparseBtn" title="Reparse DAG" aria-label="Reparse DAG">${PI.reparse}</button>
         <span class="off${dp(d,"edit")}" id="reparseOff" title="Compiled into the binary (builtin_dags/): rebuild to change it" hidden>${PI.reparse}</span>
@@ -669,7 +678,7 @@ function dagSkeleton(d, q){
     </div>
     <div class="legendRow"><span class="hint">Keys: <kbd>←</kbd><kbd>→</kbd> runs · <kbd>↑</kbd><kbd>↓</kbd> tasks · <kbd>Esc</kbd> clear selection</span><span class="grow"></span>
       ${GRID_LEGEND.map(s=>`<span class="chip" style="border-color:${color(s)}">${s==="none"?"no_status":s}</span>`).join("")}</div>
-    <div class="dagBody"><section class="gridPane" id="gridPane" aria-label="Grid"></section><div class="splitter"></div><section class="detailPane" id="detailPane"></section></div>
+    <div class="dagBody"><section class="gridPane" id="gridPane" aria-label="Grid"></section><div class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize grid" title="Drag to resize · double-click to reset" tabindex="0"></div><section class="detailPane" id="detailPane"></section></div>
   </div>`;
 }
 
@@ -694,18 +703,54 @@ function renderDagHeader(d){
 }
 
 // ---- grid -------------------------------------------------------------------------
+// grid / details splitter: drag to resize (saved per browser), double-click or Esc-free reset
+function applyGridW(){
+  const body = document.querySelector(".dagBody"); if(!body) return;
+  let w = 0; try{ w = +localStorage.getItem("dagsflow.gridW") || 0; }catch{}
+  if(w) body.style.setProperty("--gridW", Math.min(w, body.clientWidth - 320) + "px"); else body.style.removeProperty("--gridW");
+}
+function setGridW(w){
+  const body = document.querySelector(".dagBody"); if(!body) return;
+  w = Math.round(Math.max(200, Math.min(w, body.clientWidth - 320)));
+  body.style.setProperty("--gridW", w + "px");
+  try{ localStorage.setItem("dagsflow.gridW", String(w)); }catch{}
+}
+document.addEventListener("pointerdown", e=>{
+  const sp = e.target.closest?.(".splitter"); if(!sp) return;
+  e.preventDefault();
+  const pane = document.getElementById("gridPane"), x0 = e.clientX, w0 = pane.getBoundingClientRect().width;
+  const atRight = pane.scrollLeft + pane.clientWidth >= pane.scrollWidth - 8;
+  sp.classList.add("drag"); document.body.classList.add("resizing"); sp.setPointerCapture?.(e.pointerId);
+  const move = ev => { setGridW(w0 + ev.clientX - x0); if(atRight) pane.scrollLeft = pane.scrollWidth; };
+  const up = () => { sp.classList.remove("drag"); document.body.classList.remove("resizing");
+    sp.removeEventListener("pointermove", move); sp.removeEventListener("pointerup", up); sp.removeEventListener("pointercancel", up); };
+  sp.addEventListener("pointermove", move); sp.addEventListener("pointerup", up); sp.addEventListener("pointercancel", up);
+});
+document.addEventListener("dblclick", e=>{
+  if(!e.target.closest?.(".splitter")) return;
+  try{ localStorage.removeItem("dagsflow.gridW"); }catch{}
+  applyGridW();
+});
+document.addEventListener("keydown", e=>{
+  const sp = e.target.closest?.(".splitter"); if(!sp || (e.key!=="ArrowLeft" && e.key!=="ArrowRight")) return;
+  e.preventDefault(); e.stopPropagation();
+  setGridW(document.getElementById("gridPane").getBoundingClientRect().width + (e.key==="ArrowLeft" ? -40 : 40));
+}, true);
+window.addEventListener("resize", applyGridW);
+
 function renderGrid(d, q){
   const pane = document.getElementById("gridPane");
   const atRight = pane.scrollLeft + pane.clientWidth >= pane.scrollWidth - 8, keepX = pane.scrollLeft, keepY = pane.scrollTop;
   const sel = selection(q), runs = d.runs, tasks = visibleTasks(d, q);
-  const maxS = Math.max(1, ...runs.map(r=>secs(r.start_date, r.end_date)));
-  const every = Math.max(1, Math.ceil(runs.length/5));
+  const maxS = Math.max(.001, ...runs.map(r=>secs(r.start_date, r.end_date)));
+  const yl = v => maxS >= 10 ? hms(v) : maxS >= 1 ? `${v.toFixed(1)} s` : `${Math.round(v*1000)} ms`;
+  const every = Math.max(4, Math.ceil(runs.length/3));
   let h = `<table class="agrid"><thead><tr class="chartRow"><th class="yaxis"><span class="ylab" style="top:0">Duration</span>
-      <span class="yv" style="top:42px">${hms(maxS)}</span><span class="yv" style="top:92px">${hms(maxS/2)}</span><span class="yv" style="top:140px">00:00:00</span></th>`;
+      <span class="yv" style="top:50px">${yl(maxS)}</span><span class="yv" style="top:100px">${yl(maxS/2)}</span><span class="yv" style="top:149px">${yl(0)}</span></th>`;
   runs.forEach((r,i)=>{
-    const s = secs(r.start_date, r.end_date), hgt = Math.max(3, Math.round(s/maxS*100));
+    const s = secs(r.start_date, r.end_date), hgt = Math.max(2, Math.round(s/maxS*99));
     const lab = (i % every === 0) ? `<span class="xlab">${esc(shortDate(r.logical_date))}</span>` : "";
-    h += `<td class="barcell ${r.dag_run_id===sel.run?"sel":""}">${lab}<button class="bar" data-selrun="${esc(r.dag_run_id)}" style="height:${hgt}px;background:${color(r.state)}"
+    h += `<td class="barcell${lab?" tick":""} ${r.dag_run_id===sel.run?"sel":""}">${lab}<button class="bar" data-selrun="${esc(r.dag_run_id)}" style="height:${hgt}px;background:${color(r.state)}"
       title="${esc(r.dag_run_id)}&#10;${esc(r.state)} · ${esc(r.run_type)}&#10;${fmtZ(r.logical_date)}&#10;Duration ${hms(s)}" aria-label="Run ${esc(r.dag_run_id)}, ${esc(r.state)}">${r.run_type==="manual"?'<i class="manual">▸</i>':""}</button></td>`;
   });
   h += `</tr></thead><tbody>`;
@@ -715,7 +760,7 @@ function renderGrid(d, q){
     runs.forEach(r=>{
       const ti = r.task_instances?.[t.task_id] || {}, s = st(ti.state);
       const on = r.dag_run_id===sel.run && rowSel;
-      h += `<td class="${r.dag_run_id===sel.run?"sel":""}"><button class="gcell ${on?"on":""}" data-selcell="${esc(r.dag_run_id)}|${esc(t.task_id)}" style="background:${color(s)}"
+      h += `<td class="${r.dag_run_id===sel.run?"sel":""}"><button class="gcell${s==="none"?" none":""} ${on?"on":""}" data-selcell="${esc(r.dag_run_id)}|${esc(t.task_id)}" style="background:${color(s)}"
         title="${esc(t.task_id)}&#10;${esc(r.dag_run_id)}&#10;${s}${ti.mapped?` · ${ti.mapped} mapped`:""}${ti.start_date?`&#10;Duration ${hms(secs(ti.start_date,ti.end_date))}`:""}" aria-label="${esc(t.task_id)} in ${esc(r.dag_run_id)}: ${s}"></button></td>`;
     });
     h += `</tr>`;
