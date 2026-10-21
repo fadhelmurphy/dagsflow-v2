@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/banner.jpg" alt="dagsflow — Orchestrator" width="100%"></p>
+
 # dagsflow-go
 
 A workflow orchestrator in Go with the execution model of **Apache Airflow**:
