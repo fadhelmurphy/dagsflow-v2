@@ -103,6 +103,7 @@ main.bldmain{padding:0;max-width:none}
 .bf .bf-err{font-size:11.5px;color:var(--s-failed);margin-top:3px}
 .bf label.chk{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;margin:0}
 .kvr{display:flex;gap:4px;margin-bottom:4px}
+.kvr.cm input[readonly]{background:#F6F8FA;color:#3B4652;font-family:var(--code);font-size:12.5px;cursor:default}.kvr.cm>*{flex:1;min-width:0}.kvr.gone{opacity:.55}.cond{display:flex;gap:4px;margin-bottom:4px}.cond>select,.cond>input{flex:1;min-width:0}.cond>select[data-op]{flex:0 0 96px}.cond>select[data-c]{flex:1.6}.cx .chk code{font-size:12px}.colmap{max-height:360px;overflow:auto}
 .kvr input{flex:1;min-width:0}
 .x{border:0;background:none;color:var(--muted);font-size:17px;line-height:1;padding:0 6px;border-radius:4px}
 .x:hover{background:#EEF1F4;color:var(--s-failed)}
@@ -729,6 +730,15 @@ function updateStatus() {
 // ---- side panel ----------------------------------------------------------------------------------------------------------------------
 function renderSide() { const s = $("#bside"); if (!s) return; s.innerHTML = B.sel?.k === "node" ? nodePanel(node(B.sel.id)) : B.sel?.k === "edge" ? edgePanel() : dagPanel(); }
 
+// redraw the side panel, keeping the scroll position and the field that has the focus
+function renderSideKeepFocus() {
+  const side = $("#bside"); if (!side) return;
+  const all = () => $$("input,select,textarea", side), act = document.activeElement, i = all().indexOf(act), y = side.scrollTop;
+  const val = act && i >= 0 && "value" in act ? act.value : null;
+  renderSide(); side.scrollTop = y;
+  const el = i >= 0 ? all()[i] : null;
+  if (el) { el.focus(); if (val != null && el.value !== val && el.tagName === "INPUT") { el.value = val; el.dispatchEvent(new Event("input", { bubbles: true })); } }
+}
 function edgePanel() {
   const e = B.graph.edges[B.sel.id]; if (!e) return "";
   const side = isIf(e.from) ? `<div class="bf"><label>Runs when the condition is</label><div style="display:flex;gap:6px">${["true", "false"].map(v => `<button class="btn sm${e.branch === v ? " run" : ""}" type="button" data-sact="edgebranch" data-v="${v}" ${B.ro ? "disabled" : ""}>${v}</button>`).join("")}</div><div class="help">The nodes on the other side are skipped.</div></div>` : "";
@@ -750,6 +760,8 @@ function fieldHtml(f, obj, scope, id) {
     case "list": inp = `<textarea ${a} rows="2" spellcheck="false" placeholder="one per line">${esc((v || []).join("\n"))}</textarea>`; break;
     case "intlist": inp = `<input ${a} value="${esc((v || []).join(", "))}" placeholder="200, 201">`; break;
     case "json": inp = `<textarea ${a} class="bcode" rows="4" spellcheck="false" placeholder="{ }">${v == null ? "" : esc(JSON.stringify(v, null, 2))}</textarea>`; break;
+    case "colmap": inp = colmapHtml(f, v || {}, a, id); break;
+    case "colpick": case "colsel": case "conds": case "checks": inp = cxHtml(f, v, id); break;
     case "kv": inp = `<div class="kv" ${a}>${Object.entries(v || {}).map(([k, x]) => kvRow(k, x)).join("")}<button class="btn sm" data-sact="kvadd" type="button">+ Add</button></div>`; break;
     case "steps": inp = stepsHtml(v || []); break;
     case "file":
@@ -764,6 +776,103 @@ function fieldHtml(f, obj, scope, id) {
     case "expand": inp = expandHtml(obj, id); break;
   }
   return `<div class="bf"><label>${esc(f.label)}${req}</label>${inp}${f.help ? `<div class="help">${esc(f.help)}</div>` : ""}<div class="bf-err" data-err="${esc(f.name)}"></div></div>`;
+}
+// ---- colmap: one row per column of the data (rename / type per column) --------------------------------------------------------
+// The column names come from a "Run node" preview or the last run, so they follow the source.
+const rowsOf = v => Array.isArray(v) && v.length && v.every(isObj) ? v : null;
+function outOf(id) { // [rows output, extra xcom] of a node, from the preview or else the last run
+  const p = B.prev?.[id]?.res, x = B.run?.xcom?.[id];
+  if (p?.status === "success" && (p.full_output !== undefined || p.output !== undefined)) return [p.full_output ?? p.output, p.xcom || {}];
+  if (x) return [x.return_value, x];
+  return [undefined, {}];
+}
+const keysOf = rows => [...new Set((rows || []).slice(0, 500).flatMap(o => Object.keys(o)))];
+const firstUp = (id, from) => from || (upstreamOf(id).length === 1 ? upstreamOf(id)[0] : "");
+const META_KINDS = ["path", "inserted_at", "job_id", "job_date"];
+function metaNames(cfg) { // the metadata columns a load node adds
+  const want = cfg.metadata?.length ? cfg.metadata : META_KINDS;
+  if (want.includes("none")) return [];
+  return META_KINDS.filter(k => want.includes(k)).map(k => (cfg.metadata_names?.[k] || "").trim() || (cfg.metadata_prefix || "metadata_") + k);
+}
+function colSource(f, id) { // {cols, src: node to run to load them, why}
+  const cfg = node(id)?.config || {};
+  if (f.columns?.startsWith("fixed:")) return { cols: f.columns.slice(6).split(","), src: "", why: "" };
+  if (f.columns === "src" || f.columns === "src+meta") { // columns of the table of the node before it
+    const up = firstUp(id, cfg.rows_from), u = node(up);
+    let r = { cols: null, src: "", why: cfg.source_table ? "Columns of source_table are not known here: type them." : "Connect the external table node first." };
+    if (u) {
+      const [uout] = outOf(up);
+      if (Array.isArray(uout?.columns)) r = { cols: uout.columns.map(c => c.name ?? c), src: "", why: "" };
+      else if (u.type === "bigquery_external_table") r = colSource({ columns: "gcs" }, up);
+      else if (u.type === "bigquery_load_table") { r = colSource({ columns: "src+meta" }, up); }
+      else if (rowsOf(uout)) r = { cols: keysOf(uout).sort(), src: "", why: "" };
+    }
+    if (r.cols && f.columns === "src+meta") r = { ...r, cols: [...r.cols, ...metaNames(cfg)] };
+    return r;
+  }
+  if (f.columns === "self") {
+    const [out, xc] = outOf(id);
+    let cols = Array.isArray(xc.columns) ? xc.columns : null;
+    if (!cols && rowsOf(out)) { const inv = Object.fromEntries(Object.entries(cfg[f.name] || {}).map(([k, v]) => [v, k])); cols = keysOf(out).map(k => inv[k] || k); }
+    return { cols, src: id, why: "Run this node to list its columns." };
+  }
+  const gcs = firstUp(id, cfg.rows_from), g = node(gcs);
+  if (!g) return { cols: null, src: "", why: "Connect the GCS node first." };
+  const [gout] = outOf(gcs);
+  if (Array.isArray(gout?.columns)) return { cols: gout.columns.map(c => c.name ?? c), src: "", why: "" };
+  if (g.config.columns?.length) return { cols: g.config.columns, src: "", why: "" };
+  const inp = firstUp(gcs, g.config.rows_from);
+  const [iout] = outOf(inp);
+  // a read node with "Rename columns" lists its original names in xcom.columns: apply the current renames to them
+  const [, ixc] = outOf(inp), ren = node(inp)?.config?.rename || {};
+  const icols = Array.isArray(ixc.columns) ? ixc.columns.map(c => ren[c] || c).sort() : rowsOf(iout) ? keysOf(iout).sort() : null;
+  return { cols: icols, src: inp, why: inp ? `Run ${inp} (the input of ${gcs}) to list the columns.` : `Connect the input of ${gcs} first.` };
+}
+function colmapHtml(f, v, a, id) {
+  const { cols, src, why } = colSource(f, id);
+  const list = [...new Set([...(cols || []), ...Object.keys(v)])];
+  const val = c => f.options?.length
+    ? `<select data-kvv>${(f.options.includes(v[c] ?? "") ? f.options : [...f.options, v[c]]).map(o => `<option value="${esc(o)}" ${(v[c] ?? "") === o ? "selected" : ""}>${o === "" ? "(default)" : esc(o)}</option>`).join("")}</select>`
+    : `<input data-kvv value="${esc(v[c] ?? "")}" placeholder="${esc(f.columns?.startsWith("fixed:") ? (node(id)?.config?.metadata_prefix || "metadata_") + c : c)}" spellcheck="false">`;
+  const rows = list.map(c => `<div class="kvr cm${cols && !cols.includes(c) ? " gone" : ""}"><input data-kvk value="${esc(c)}" readonly tabindex="-1" title="${cols && !cols.includes(c) ? "Not in the data any more" : esc(c)}">${val(c)}</div>`).join("");
+  const load = cols ? `<span class="sub" style="font-size:11.5px">${cols.length} column${cols.length === 1 ? "" : "s"}</span>` : `<span class="sub" style="font-size:11.5px">${esc(why)}</span>`;
+  return `<div class="kv colmap" ${a}>${rows || ""}<div class="frow" style="align-items:center">${src && !B.ro ? `<button class="btn sm" type="button" data-sact="colload" data-src="${esc(src)}">${cols ? "↻ Reload columns" : "Load columns"}</button>` : ""}${load}</div></div>`;
+}
+// ---- column pickers: merge keys, partition column, conditions, metadata checkboxes ------------------------------------------------
+const COND_OPS = [["=", "="], ["!=", "≠"], [">", ">"], [">=", "≥"], ["<", "<"], ["<=", "≤"], ["contains", "contains"], ["not_contains", "doesn't contain"], ["in", "in (a, b, …)"], ["not_in", "not in"], ["is_null", "is null"], ["not_null", "is not null"], ["is_empty", "is empty"], ["not_empty", "is not empty"]];
+function cxHtml(f, v, id) {
+  const a = `data-cx="${f.kind}" data-f="${esc(f.name)}"`;
+  if (f.kind === "checks") {
+    const on = Array.isArray(v) && v.length ? v : f.options; // default: all
+    return `<div class="cx" ${a}>${f.options.map(o => `<label class="chk" style="display:inline-flex;margin-right:12px"><input type="checkbox" data-o="${esc(o)}" ${on.includes(o) ? "checked" : ""}> ${esc(o)}</label>`).join("")}</div>`;
+  }
+  const { cols, src, why } = colSource(f, id);
+  const load = src && !B.ro ? `<button class="btn sm" type="button" data-sact="colload" data-src="${esc(src)}">${cols ? "↻ Reload columns" : "Load columns"}</button>` : "";
+  const foot = `<div class="frow" style="align-items:center">${load}<span class="sub" style="font-size:11.5px">${cols ? `${cols.length} columns` : esc(why)}</span></div>`;
+  const colSel = (cur, attr) => cols
+    ? `<select ${attr}><option value=""></option>${[...new Set([...cols, ...(cur ? [cur] : [])])].map(c => `<option value="${esc(c)}" ${c === cur ? "selected" : ""}>${esc(c)}${cols.includes(c) ? "" : " (not in the data)"}</option>`).join("")}</select>`
+    : `<input ${attr} value="${esc(cur || "")}" placeholder="column" spellcheck="false">`;
+  if (f.kind === "colsel") return `<div class="cx" ${a}>${colSel(v || "", "data-c")}${foot}</div>`;
+  if (f.kind === "colpick") {
+    const cur = v || [];
+    if (!cols) return `<div class="cx" ${a}><input data-list value="${esc(cur.join(", "))}" placeholder="col_a, col_b" spellcheck="false">${foot}</div>`;
+    return `<div class="cx colmap" ${a}>${[...new Set([...cols, ...cur])].map(c => `<label class="chk" style="display:flex"><input type="checkbox" data-o="${esc(c)}" ${cur.includes(c) ? "checked" : ""}> <code>${esc(c)}</code></label>`).join("")}${foot}</div>`;
+  }
+  // conds
+  const rows = (v || []).map((c, i) => `<div class="cond" data-i="${i}">${colSel(c.column, "data-c")}<select data-op>${COND_OPS.map(([o, l]) => `<option value="${o}" ${c.op === o ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>${["is_null", "not_null", "is_empty", "not_empty"].includes(c.op) ? "" : `<input data-v value="${esc(c.value ?? "")}" placeholder="value" spellcheck="false">`}<button class="x" type="button" data-sact="conddel" data-i="${i}" title="Remove" aria-label="Remove condition">×</button></div>`).join("");
+  return `<div class="cx" ${a}>${rows}<div class="frow" style="align-items:center"><button class="btn sm" type="button" data-sact="condadd">+ Condition</button>${load}<span class="sub" style="font-size:11.5px">${cols ? "" : esc(why)}</span></div></div>`;
+}
+function applyCx(cx, structural) {
+  const cfg = node(B.sel.id)?.config; if (!cfg) return;
+  const f = cx.dataset.f; let v;
+  switch (cx.dataset.cx) {
+    case "checks": { const all = $$("[data-o]", cx), on = all.filter(x => x.checked).map(x => x.dataset.o); v = on.length === all.length ? undefined : on.length ? on : ["none"]; break; }
+    case "colsel": v = $("[data-c]", cx).value.trim() || undefined; break;
+    case "colpick": { const l = $("[data-list]", cx); v = l ? l.value.split(",").map(x => x.trim()).filter(Boolean) : $$("[data-o]", cx).filter(x => x.checked).map(x => x.dataset.o); if (!v.length) v = undefined; break; }
+    case "conds": v = $$(".cond", cx).map(r => { const c = { column: $("[data-c]", r).value.trim(), op: $("[data-op]", r).value }; const x = $("[data-v]", r); if (x) c.value = x.value; return c; }); if (!v.length) v = undefined; break;
+  }
+  touch(); setPath(cfg, f, v); refreshNode(B.sel.id);
+  if (structural) renderSide(); else updateStatus();
 }
 const kvRow = (k, x) => `<div class="kvr"><input data-kvk value="${esc(k)}" placeholder="name" spellcheck="false"><input data-kvv value="${esc(typeof x === "string" ? x : JSON.stringify(x))}" placeholder="value" spellcheck="false"><button class="x" data-sact="kvdel" type="button" title="Remove" aria-label="Remove">×</button></div>`;
 
@@ -1044,6 +1153,7 @@ function onSideInput(e) {
   if (el.dataset.sact === "rename") return;
   if (el.matches("[data-sched]")) return;
   const kv = el.closest(".kv"); if (kv && (el.hasAttribute("data-kvk") || el.hasAttribute("data-kvv"))) return applyKv(kv);
+  const cx = el.closest("[data-cx]"); if (cx) return applyCx(cx, el.matches("[data-op]") || cx.dataset.cx === "checks" && false);
   if (el.dataset.sf !== undefined && el.dataset.si !== undefined) return applyStep(el);
   if (el.dataset.xf) return;
   const f = el.dataset.f; if (!f || !el.dataset.scope) return;
@@ -1075,14 +1185,17 @@ function onSideChange(e) {
     c.style.display = "none"; setPath(B.graph.settings, "schedule", el.value || undefined); c.value = el.value; updateStatus(); return;
   }
   if (el.dataset.xf) return applyExpand(el);
+  // the column pickers list the metadata column names: redraw when they change
+  if (el.closest('[data-f="metadata_prefix"],[data-f="metadata"],[data-f="metadata_names"],[data-f="rows_from"]') && B.sel?.k === "node") { setTimeout(renderSideKeepFocus, 0); return; }
   if (el.dataset.f === "schedule" || el.dataset.f?.startsWith("schedule")) updateStatus();
 }
 
 function applyKv(kv) {
-  const o = {}, strOnly = ["env", "headers"].includes(kv.dataset.f);
+  const o = {}, strOnly = ["env", "headers"].includes(kv.dataset.f) || kv.classList.contains("colmap");
   $$(".kvr", kv).forEach(r => {
     const k = $("[data-kvk]", r).value.trim(); if (!k) return;
     let v = $("[data-kvv]", r).value;
+    if (kv.classList.contains("colmap") && !v.trim()) return;
     if (!strOnly && /^(-?\d+(\.\d+)?|true|false)$/.test(v)) v = JSON.parse(v);
     o[k] = v;
   });
@@ -1177,6 +1290,10 @@ async function onSideClick(e) {
   const b = e.target.closest("[data-sact]"); if (!b || B.ro && b.dataset.sact !== "gotoissue" && b.dataset.sact !== "showlog") return;
   const act = b.dataset.sact;
   switch (act) {
+    case "condadd": { const cfg = node(B.sel.id).config; cfg.conditions = [...(cfg.conditions || []), { column: "", op: "=", value: "" }]; touch(); renderSide(); break; }
+    case "conddel": { const cfg = node(B.sel.id).config; cfg.conditions = (cfg.conditions || []).filter((_, i) => i !== +b.dataset.i); if (!cfg.conditions.length) delete cfg.conditions; touch(); refreshNode(B.sel.id); renderSide(); break; }
+    case "colload": { const src = b.dataset.src, me = B.sel.id; b.disabled = true; b.textContent = "Loading…";
+      runNode(src).then(() => { if (B.sel?.k === "node" && B.sel.id === me) renderSide(); }); break; }
     case "kvadd": { const kv = b.closest(".kv"); b.insertAdjacentHTML("beforebegin", kvRow("", "")); $$("[data-kvk]", kv).at(-1).focus(); break; }
     case "kvdel": { const kv = b.closest(".kv"); b.closest(".kvr").remove(); applyKv(kv); break; }
     case "stepadd": { const op = $("[data-newstep]").value; snap(); const s = { op }; if (op === "filter") s.cmp = "=="; if (op === "limit") s.n = 100; if (op === "rename") s.map = { "": "" }; steps().push(s); markDirty(); renderSide(); refreshNode(B.sel.id); scheduleValidate(); break; }

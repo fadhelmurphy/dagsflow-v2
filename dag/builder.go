@@ -32,6 +32,7 @@ type NodeField struct {
 	Placeholder string   `json:"placeholder,omitempty"`
 	Options     []string `json:"options,omitempty"`
 	Lang        string   `json:"lang,omitempty"`
+	Columns     string   `json:"columns,omitempty"` // colmap: where the column names come from: "self" (this node's output) or "gcs" (the file the GCS node before it writes)
 }
 
 // NodeType is one entry of the palette.
@@ -100,6 +101,7 @@ var Nodes = []NodeType{
 			{Name: "range", Label: "Range", Kind: "text", Required: true, Placeholder: "Sheet1!B3:F", Help: "A1 notation. The first row of the range is the header, so B3:F starts at row 3, columns B to F, down to the last row."},
 			{Name: "no_header", Label: "First row is data (no header)", Kind: "bool"},
 			{Name: "keep_headers", Label: "Keep header names as they are", Kind: "bool", Help: "Default: headers become snake_case column names (lowercase letters and _ only)"},
+			{Name: "rename", Label: "Rename columns", Kind: "colmap", Columns: "self", Help: "Type a new name next to the columns to rename; empty = keep the name."},
 			{Name: "limit", Label: "Max rows", Kind: "number", Placeholder: "no limit", Help: "Empty = all rows. All rows are kept in memory and passed to the next node, so cap very large results."},
 			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default"},
 		}},
@@ -111,6 +113,7 @@ var Nodes = []NodeType{
 			{Name: "range", Label: "Start row and columns", Kind: "text", Placeholder: "B3:F", Help: "A1 notation. The first row of the range is the header: B3:F = header on row 3, columns B to F, down to the last row. Empty = the whole sheet."},
 			{Name: "no_header", Label: "First row is data (no header)", Kind: "bool"},
 			{Name: "keep_headers", Label: "Keep header names as they are", Kind: "bool", Help: "Default: headers become snake_case column names (lowercase letters and _ only)"},
+			{Name: "rename", Label: "Rename columns", Kind: "colmap", Columns: "self", Help: "Type a new name next to the columns to rename; empty = keep the name."},
 			{Name: "delimiter", Label: "CSV delimiter", Kind: "text", Placeholder: "auto", Help: "auto-detected; or , ; tab pipe"},
 			{Name: "limit", Label: "Max rows", Kind: "number", Placeholder: "no limit", Help: "Empty = all rows. All rows are kept in memory and passed to the next node, so cap very large results."},
 		}},
@@ -193,12 +196,35 @@ var Nodes = []NodeType{
 		Fields: []NodeField{
 			{Name: "table", Label: "Table", Kind: "text", Required: true, Placeholder: "project.dataset.table", Help: "dataset.table uses the project below / of the connection. Replaced on every run."},
 			{Name: "default_type", Label: "Column types", Kind: "select", Options: []string{"", "STRING", "auto"}, Help: "STRING (default): every column STRING. auto: from the data (INT64, FLOAT64, BOOL, JSON for ndjson, else STRING)."},
-			{Name: "column_types", Label: "Type per column", Kind: "kv", Help: "Overrides, e.g. amount = NUMERIC, order_date = DATE"},
+			{Name: "column_types", Label: "Type per column", Kind: "colmap", Columns: "gcs", Options: []string{"", "STRING", "INT64", "NUMERIC", "BIGNUMERIC", "FLOAT64", "BOOL", "DATE", "DATETIME", "TIMESTAMP", "TIME", "JSON", "BYTES", "GEOGRAPHY"}, Help: "Pick a type for the columns that need one; the others use the default above."},
 			{Name: "all_files", Label: "All files in the folder (/*)", Kind: "bool", Help: "Point the table at every file next to the one just written (e.g. one file per day)"},
 			{Name: "if_not_exists", Label: "Keep the table if it exists", Kind: "bool", Help: "Default: CREATE OR REPLACE"},
 			{Name: "rows_from", Label: "GCS node", Kind: "upstream", Help: "Default: the only connected node before this one"},
 			{Name: "project_id", Label: "Project", Kind: "text", Help: "Default: from the table name, the connection or the credentials"},
 			{Name: "location", Label: "Location", Kind: "text", Placeholder: "US", Help: "Same as the dataset"},
+			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default"},
+		}},
+	{Type: "bigquery_load_table", Operator: "bigquery_load_table", Label: "BigQuery table (load / merge)", Category: "Destinations", Icon: "dbin", NeedsInput: true,
+		Description: "Load the table of the node before it (e.g. the external table) into a real BigQuery table: keep history, keep only the latest load, or merge (update / insert). Adds metadata columns.",
+		Fields: []NodeField{
+			{Name: "table", Label: "Table", Kind: "text", Required: true, Placeholder: "project.dataset.table", Help: "Created on the first run"},
+			{Name: "mode", Label: "Mode", Kind: "select", Options: []string{"", "append", "replace", "merge"}, Help: "append (default): historical, every run adds its rows. replace: only the latest load. merge: update the rows whose keys match, insert the others."},
+			{Name: "merge_keys", Label: "Merge keys", Kind: "colpick", Columns: "src", Help: "merge: the columns that identify a row"},
+			{Name: "when_matched", Label: "When the key exists", Kind: "select", Options: []string{"", "update", "skip"}, Help: "merge: update the row (default) or keep the old one (insert new keys only)"},
+			{Name: "conditions", Label: "Only rows where", Kind: "conds", Columns: "src", Help: "Optional filters on the source rows. Values can use templates, e.g. {{ .ds }}."},
+			{Name: "condition_mode", Label: "Match", Kind: "select", Options: []string{"", "all", "any"}, Help: "all conditions (AND, default) or any of them (OR)"},
+			{Name: "metadata", Label: "Metadata columns", Kind: "checks", Options: []string{"path", "inserted_at", "job_id", "job_date"}, Help: "path = the gs:// file of the row; inserted_at = load time; job_id = load time as yyyymmddHHMMSS; job_date = load date"},
+			{Name: "metadata_prefix", Label: "Metadata prefix", Kind: "text", Placeholder: "metadata_", Help: "e.g. metaingest_ gives metaingest_path, metaingest_inserted_at…"},
+			{Name: "metadata_names", Label: "Metadata column names", Kind: "colmap", Columns: "fixed:path,inserted_at,job_id,job_date", Help: "Optional full names, e.g. inserted_at → ingest_at"},
+			{Name: "inserted_at", Label: "inserted_at time", Kind: "select", Options: []string{"", "utc", "local"}, Help: "utc (default): TIMESTAMP. local: DATETIME in the time zone below."},
+			{Name: "job_date", Label: "job_date", Kind: "select", Options: []string{"", "local", "utc"}, Help: "Date of the load, local (default) or UTC"},
+			{Name: "timezone", Label: "Local time zone", Kind: "text", Placeholder: "Asia/Jakarta", Help: "Default: the server's time zone. Also used for job_id."},
+			{Name: "partition_by", Label: "Partition by", Kind: "colsel", Columns: "src+meta", Help: "Optional: a DATE / DATETIME / TIMESTAMP column, e.g. the job date"},
+			{Name: "cluster_by", Label: "Cluster by", Kind: "colpick", Columns: "src+meta"},
+			{Name: "rows_from", Label: "Source node", Kind: "upstream", Help: "Default: the only connected node before this one"},
+			{Name: "source_table", Label: "Source table", Kind: "text", Placeholder: "dataset.table", Help: "Instead of a node: load from this table"},
+			{Name: "project_id", Label: "Project", Kind: "text", Help: "Default: from the table name, the connection or the credentials"},
+			{Name: "location", Label: "Location", Kind: "text", Placeholder: "US"},
 			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default"},
 		}},
 	{Type: "s3_write", Operator: "s3_write", Label: "Amazon S3 dump", Category: "Destinations", Icon: "cloud", NeedsInput: true,

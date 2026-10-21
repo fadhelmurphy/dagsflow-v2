@@ -397,7 +397,7 @@ tasks:
     outlets: [bq://proj.dw.sales]
 ```
 
-Operators: `empty`, `bash`, `go`, `bigquery`, `http`, `postgres`, `transform`, `branch`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `bigquery_external_table`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`, `custom`. Custom logic needs a Go DAG (or a `go` / `bash` task).
+Operators: `empty`, `bash`, `go`, `bigquery`, `http`, `postgres`, `transform`, `branch`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `bigquery_external_table`, `bigquery_load_table`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`, `custom`. Custom logic needs a Go DAG (or a `go` / `bash` task).
 
 ETL operators (rows travel between tasks as the XCom `return_value`, a JSON array of objects):
 
@@ -482,7 +482,7 @@ Files and combining sources:
     upstream: [sales, customers]       # the first input is the left side
 ```
 
-Header names: `gsheet_read` and `file_read` turn the header row into column names in **snake_case, lowercase letters a-z and `_` only** (`Total (Rp)` becomes `total_rp`, `orderID` becomes `order_id`; accents are dropped, and digits and punctuation act as word separators, so `Qty 1` becomes `qty`). Names that end up equal get a letter suffix (`name`, `name_b`, `name_c`). Set `keep_headers: true` to keep the original text. For other sources use the `snake_case` transform step. Empty cells become `null`; fully blank lines are skipped. Excel dates come out as `2024-01-31` (or `2024-01-31 14:30:00`), numbers as numbers; CSV values stay text. `.xls` (old format) and password protected files are not supported; uploads are limited to 25 MB.
+Header names: `gsheet_read` and `file_read` turn the header row into column names in **snake_case, lowercase letters a-z and `_` only** (`Total (Rp)` becomes `total_rp`, `orderID` becomes `order_id`; accents are dropped, and digits and punctuation act as word separators, so `Qty 1` becomes `qty`). Names that end up equal get a letter suffix (`name`, `name_b`, `name_c`). Set `keep_headers: true` to keep the original text. `rename: {old_name: new name}` then renames columns (the names after snake_case, or the original ones with `keep_headers`); in the builder, "Rename columns" lists the columns of the data after a "Run node" (or the last run), with a box for the new name next to each. For other sources use the `snake_case` transform step. Empty cells become `null`; fully blank lines are skipped. Excel dates come out as `2024-01-31` (or `2024-01-31 14:30:00`), numbers as numbers; CSV values stay text. `.xls` (old format) and password protected files are not supported; uploads are limited to 25 MB.
 
 Dump rows to object storage (a file per run, plain REST, no SDK):
 
@@ -517,7 +517,32 @@ Expose the dumped file to BigQuery as an external table, with exactly the column
     upstream: [dump_gcs]               # reads uri, format and columns from the gcs_write output
 ```
 
-`auto` gives INT64, FLOAT64, BOOL, JSON (ndjson only) or STRING from the values that were written. CSV/TSV files get `skip_leading_rows = 1`, the delimiter and `compression = 'GZIP'` when gzipped. `format: json` (one array) can't be read by BigQuery: use `ndjson` or `csv`. `if_not_exists: true` keeps an existing table. Without a `gcs_write` before it, set `uris`, `format` and `columns` (all STRING) yourself.
+`auto` gives INT64, FLOAT64, BOOL, JSON (ndjson only) or STRING from the values that were written. In the builder, "Type per column" lists the columns of the file (from the GCS node's last output, or by running the node that feeds it) with a type picker for each; leave a column on (default) to use `default_type`. CSV/TSV files get `skip_leading_rows = 1`, the delimiter and `compression = 'GZIP'` when gzipped. `format: json` (one array) can't be read by BigQuery: use `ndjson` or `csv`. `if_not_exists: true` keeps an existing table. Without a `gcs_write` before it, set `uris`, `format` and `columns` (all STRING) yourself.
+
+Then load it into a real table, with metadata columns (all inside BigQuery, no rows pass through dagsflow):
+
+```yaml
+  - id: load
+    operator: bigquery_load_table
+    table: dw.orders                   # created on the first run
+    mode: merge                        # append (default, historical) | replace (latest load only) | merge
+    merge_keys: [order_id]             # merge: update matching rows, insert the others
+    when_matched: update               # or skip: insert new keys only
+    conditions:                        # optional filters on the source rows (templated values)
+      - {column: status, op: "=", value: paid}
+      - {column: amount, op: ">", value: "100000"}
+    condition_mode: all                # all (AND) | any (OR)
+    metadata: [path, inserted_at, job_id, job_date]   # default: all four
+    metadata_prefix: metaingest_       # default metadata_
+    metadata_names: {inserted_at: ingest_at}          # full names for some of them
+    inserted_at: utc                   # utc (TIMESTAMP, default) | local (DATETIME)
+    job_date: local                    # local (default) | utc
+    timezone: Asia/Jakarta             # "local"; default: the server's time zone
+    partition_by: metaingest_job_date  # optional DATE / DATETIME / TIMESTAMP column; cluster_by: [...]
+    upstream: [ext]                    # the external table (or set source_table: dataset.table)
+```
+
+The metadata columns: `path` is the `gs://` file each row came from (`_FILE_NAME` of the external table), `inserted_at` the load time, `job_id` the load time as an integer (`20261021191023`, local time), `job_date` the load date. The source columns are read from `INFORMATION_SCHEMA`, so they follow the data: a column that appears later is added to the table (`ADD COLUMN IF NOT EXISTS`) before the insert or merge. Condition ops: `= != > >= < <= contains not_contains in not_in is_null not_null is_empty not_empty`; `> >= < <=` compare as numbers when the value is a number, else as text. A merge keeps one source row per key (duplicates in the source would make MERGE fail). In the builder the merge keys, the condition columns and the partition column are picked from the columns of the data. Tested against a fake BigQuery, not yet a real one.
 
 BigQuery and Google Sheets as source or destination (plain REST, no extra dependencies):
 

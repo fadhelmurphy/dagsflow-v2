@@ -41,6 +41,7 @@ type FileReadConfig struct {
 	File, Format, Sheet, Range, Delimiter string
 	NoHeader, KeepHeaders                 bool
 	Limit                                 int
+	Rename                                map[string]string // column -> new name
 }
 
 func (d *DAG) NewFileReadTask(id string, cfg FileReadConfig, opts ...TaskOption) *Task {
@@ -53,6 +54,7 @@ func (d *DAG) NewFileReadTask(id string, cfg FileReadConfig, opts ...TaskOption)
 	if cfg.Limit <= 0 {
 		cfg.Limit = defaultRowLimit
 	}
+	checkRename(d, id, cfg.Rename)
 	opts = append([]TaskOption{WithOperatorName("FileReadOperator"),
 		WithTemplateFields(TemplateField{Name: "file", Raw: cfg.File, Lang: "text"}, TemplateField{Name: "range", Raw: cfg.Range, Lang: "text"})}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
@@ -89,7 +91,7 @@ func (d *DAG) NewFileReadTask(id string, cfg FileReadConfig, opts ...TaskOption)
 			where += fmt.Sprintf(" (sheets: %s)", strings.Join(info.Sheets, ", "))
 		}
 		ctx.Logf("%d rows read from %s", len(rows), where)
-		return ctx.XComPush("return_value", rows)
+		return pushRenamed(ctx, rows, cfg.Rename)
 	}, opts...)
 }
 
@@ -268,4 +270,83 @@ func PreviewRows(grid [][]any, rng string, noHeader, keepHeaders bool, sample in
 	}
 	p.Sample = rows[:min(sample, len(rows))]
 	return p, nil
+}
+
+// ---- rename columns (gsheet_read / file_read) ------------------------------------
+
+func checkRename(d *DAG, id string, ren map[string]string) {
+	seen := map[string]string{}
+	for from, to := range ren {
+		to = strings.TrimSpace(to)
+		if to == "" {
+			d.buildErr(fmt.Errorf("task %s: rename: the new name of %q is empty", id, from))
+			continue
+		}
+		if prev, dup := seen[to]; dup {
+			d.buildErr(fmt.Errorf("task %s: rename: %q and %q both become %q", id, prev, from, to))
+		}
+		seen[to] = from
+	}
+}
+
+// pushRenamed renames the columns, then pushes the rows (return_value) and the
+// original column names (columns), which the builder uses to list them.
+func pushRenamed(ctx *TaskContext, rows []any, ren map[string]string) error {
+	set := map[string]bool{}
+	var cols []string
+	for _, r := range rows {
+		if m, ok := r.(map[string]any); ok {
+			for k := range m {
+				if !set[k] {
+					set[k] = true
+					cols = append(cols, k)
+				}
+			}
+		}
+	}
+	sort.Strings(cols)
+	if len(ren) > 0 {
+		var missing []string
+		for from := range ren {
+			if !set[from] && len(rows) > 0 {
+				missing = append(missing, from)
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			ctx.Logf("WARNING: rename: no column %s (columns: %s)", strings.Join(missing, ", "), strings.Join(cols, ", "))
+		}
+		final := map[string]string{}
+		for _, c := range cols {
+			to := c
+			if t := strings.TrimSpace(ren[c]); t != "" {
+				to = t
+			}
+			if prev, dup := final[to]; dup {
+				return fmt.Errorf("rename: %q and %q would both be named %q", prev, c, to)
+			}
+			final[to] = c
+		}
+		for _, r := range rows {
+			m, ok := r.(map[string]any)
+			if !ok {
+				continue
+			}
+			out := make(map[string]any, len(m))
+			for k, v := range m {
+				if to := strings.TrimSpace(ren[k]); to != "" {
+					k = to
+				}
+				out[k] = v
+			}
+			for k := range m {
+				delete(m, k)
+			}
+			for k, v := range out {
+				m[k] = v
+			}
+		}
+	}
+	_ = ctx.XComPush("columns", cols)
+	return ctx.XComPush("return_value", rows)
 }

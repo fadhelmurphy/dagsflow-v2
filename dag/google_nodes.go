@@ -321,6 +321,7 @@ type GSheetReadConfig struct {
 	ConnID, SpreadsheetID, Range string
 	NoHeader, KeepHeaders        bool
 	Limit                        int
+	Rename                       map[string]string // column -> new name
 }
 
 // NewGSheetReadTask reads a range. With a header row (default) every following
@@ -335,6 +336,7 @@ func (d *DAG) NewGSheetReadTask(id string, cfg GSheetReadConfig, opts ...TaskOpt
 	if cfg.Limit <= 0 {
 		cfg.Limit = defaultRowLimit
 	}
+	checkRename(d, id, cfg.Rename)
 	opts = append([]TaskOption{WithOperatorName("GoogleSheetsReadOperator"),
 		WithTemplateFields(TemplateField{Name: "range", Raw: cfg.Range, Lang: "text"})}, opts...)
 	return d.NewTask(id, func(ctx *TaskContext) error {
@@ -357,7 +359,7 @@ func (d *DAG) NewGSheetReadTask(id string, cfg GSheetReadConfig, opts ...TaskOpt
 			rows = rows[:cfg.Limit]
 		}
 		ctx.Logf("%d rows read", len(rows))
-		return ctx.XComPush("return_value", rows)
+		return pushRenamed(ctx, rows, cfg.Rename)
 	}, opts...)
 }
 

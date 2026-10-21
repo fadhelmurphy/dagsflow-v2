@@ -69,6 +69,14 @@ func (f *fakeGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var q struct{ Query string }
 		_ = json.Unmarshal(body, &q)
 		f.queries = append(f.queries, q.Query)
+		if strings.Contains(q.Query, "INFORMATION_SCHEMA") { // table metadata for bigquery_load_table
+			rows := ""
+			if strings.Contains(q.Query, "table_name = 'ext'") {
+				rows = `,"rows":[{"f":[{"v":"order_id"},{"v":"STRING"},{"v":"EXTERNAL"}]},{"f":[{"v":"status"},{"v":"STRING"},{"v":"EXTERNAL"}]}]`
+			}
+			_, _ = w.Write([]byte(`{"jobComplete":true,"jobReference":{"jobId":"js"},"schema":{"fields":[{"name":"column_name","type":"STRING"},{"name":"data_type","type":"STRING"},{"name":"table_type","type":"STRING"}]}` + rows + `}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"jobComplete":false,"jobReference":{"jobId":"j1","location":"US"}}`))
 	case strings.HasSuffix(p, "/queries/j1") && r.URL.Query().Get("pageToken") == "":
 		f.polled = true

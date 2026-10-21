@@ -1,6 +1,10 @@
 package dag
 
 import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -70,5 +74,40 @@ func TestExternalDDLCSVAndErrors(t *testing.T) {
 	}
 	if _, err := ParseYAML("a.yaml", []byte("dag_id: a\ntasks:\n  - {id: x, operator: bigquery_external_table, table: p.d.t, uris: ['gs://b/*'], format: csv, columns: [a, b]}\n")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReadRename(t *testing.T) {
+	UploadsDir = t.TempDir()
+	t.Cleanup(func() { UploadsDir = "" })
+	_ = os.WriteFile(filepath.Join(UploadsDir, "u.csv"), []byte("User ID,Full Name\n1,ana\n"), 0o600)
+	dags, err := ParseYAML("r.yaml", []byte("dag_id: r\ntasks:\n  - id: src\n    operator: file_read\n    file: u.csv\n    rename: {user_id: id, full_name: 'Nama Lengkap'}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := &memRun{}
+	runDAG(t, dags[0], rs)
+	v, _ := rs.XComPull("src", "return_value")
+	row := v.([]any)[0].(map[string]any)
+	if row["id"] != "1" || row["Nama Lengkap"] != "ana" || len(row) != 2 {
+		t.Fatalf("row: %v", row)
+	}
+	cols, _ := rs.XComPull("src", "columns")
+	if fmt.Sprint(cols) != "[full_name user_id]" {
+		t.Fatalf("columns: %v", cols)
+	}
+	// two columns ending with the same name
+	dags, _ = ParseYAML("r.yaml", []byte("dag_id: r\ntasks:\n  - id: src\n    operator: file_read\n    file: u.csv\n    rename: {user_id: full_name}\n"))
+	task, _ := dags[0].Task("src")
+	ctx := NewTaskContext(t.Context(), task, RunInfo{RunID: "r", MapIndex: -1}, &memRun{}, io.Discard)
+	if _, err := task.Run(ctx); err == nil || !strings.Contains(err.Error(), "both be named") {
+		t.Fatalf("collision: %v", err)
+	}
+	dd, err := ParseYAML("r.yaml", []byte("dag_id: r\ntasks:\n  - {id: s, operator: file_read, file: u.csv, rename: {a: x, b: x}}\n"))
+	if err == nil {
+		err = dd[0].validate()
+	}
+	if err == nil {
+		t.Fatal("duplicate target should fail")
 	}
 }
