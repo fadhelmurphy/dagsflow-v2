@@ -23,6 +23,7 @@ type BigQueryExternalConfig struct {
 	DefaultType                 string            // STRING (default) | auto
 	ColumnTypes                 map[string]string // column -> BigQuery type
 	IfNotExists                 bool              // keep an existing table
+	Expiration                  string            // table expiration: 7d, 12h, 2026-12-31 (see bq_expire.go)
 	// Without a GCS node before it: describe the files yourself.
 	URIs    []string
 	Format  string // csv | tsv | ndjson
@@ -37,6 +38,7 @@ var (
 type bqCol struct{ Name, Type string }
 
 func (cfg BigQueryExternalConfig) check(d *DAG, id string) {
+	checkExpiration(d, id, cfg.Expiration)
 	if !bqTableRe.MatchString(strings.TrimSpace(cfg.Table)) {
 		d.buildErr(fmt.Errorf("task %s: table must be dataset.table or project.dataset.table, got %q", id, cfg.Table))
 	}
@@ -81,6 +83,11 @@ func (d *DAG) NewBigQueryExternalTableTask(id string, cfg BigQueryExternalConfig
 			return errBQProject
 		}
 		table := project + "." + m[2] + "." + m[3]
+		exp, err := renderExpiration(ctx, cfg.Expiration)
+		if err != nil {
+			return err
+		}
+		src.expiration = exp
 		ddl, cols, err := externalDDL(table, cfg, src)
 		if err != nil {
 			return err
@@ -99,11 +106,12 @@ func (d *DAG) NewBigQueryExternalTableTask(id string, cfg BigQueryExternalConfig
 }
 
 type extSource struct {
-	uris      []string
-	format    string // csv | tsv | ndjson
-	delimiter string
-	gzip      bool
-	cols      []bqCol // name + guessed type
+	uris       []string
+	format     string // csv | tsv | ndjson
+	delimiter  string
+	gzip       bool
+	expiration string  // SQL for expiration_timestamp
+	cols       []bqCol // name + guessed type
 }
 
 // externalSource reads the output of the GCS dump node, or the files listed on the node.
@@ -231,6 +239,9 @@ func externalDDL(table string, cfg BigQueryExternalConfig, s extSource) (string,
 		return "", nil, fmt.Errorf("format %q: use csv, tsv or ndjson", s.format)
 	}
 	o = append(o, "uris = ["+strings.Join(uris, ", ")+"]")
+	if s.expiration != "" {
+		o = append(o, "expiration_timestamp = "+s.expiration)
+	}
 	if s.gzip {
 		o = append(o, "compression = 'GZIP'")
 	}

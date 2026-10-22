@@ -514,6 +514,7 @@ Expose the dumped file to BigQuery as an external table, with exactly the column
     default_type: STRING               # STRING (default) for every column | auto: from the data
     column_types: {amount: NUMERIC, order_date: DATE}   # optional overrides
     all_files: true                    # uris = the folder of the file + /* (e.g. one file per day)
+    expiration: 7d                     # optional: 7d, 12h, 90m, 2w (a bare number = days) or a date; counts from each run
     upstream: [dump_gcs]               # reads uri, format and columns from the gcs_write output
 ```
 
@@ -544,6 +545,8 @@ Then load it into a real table, with metadata columns (all inside BigQuery, no r
       tgl: {name: order_date, cast: "my_project.utils.to_date({col})"}   # your own SQL; {col} = the column
       paid: {cast: my_project.utils.to_bool}               # a bare function gets the column as argument
     cast_mode: safe                    # safe (default): SAFE_CAST, bad values become NULL | strict: CAST, fails
+    expiration: 90d                    # optional: delete the table 90 days after the last load (or a date: 2026-12-31)
+    partition_expiration_days: 365     # optional: drop partitions older than a year (needs partition_by)
     partition_by: metaingest_job_date  # optional DATE / DATETIME / TIMESTAMP column; cluster_by: [...]
     upstream: [ext]                    # the external table (or set source_table: dataset.table)
 ```

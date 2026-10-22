@@ -36,7 +36,9 @@ type BigQueryLoadConfig struct {
 	PartitionBy                 string
 	ClusterBy                   []string
 	ColumnMap                   map[string]ColumnSpec // source column -> new name and/or cast
+	PartitionExpirationDays     float64               // drop partitions older than this (needs partition_by)
 	CastMode                    string                // safe (default: SAFE_CAST, bad values become NULL) | strict (CAST, fails)
+	Expiration                  string                // table expiration: 30d, 12h, 2026-12-31; a duration counts from the last load (see bq_expire.go)
 
 	Metadata       []string          // which metadata columns: path, inserted_at, job_id, job_date (default all; ["none"] = none)
 	MetadataPrefix string            // default "metadata_"
@@ -113,6 +115,13 @@ var (
 )
 
 func (cfg BigQueryLoadConfig) check(d *DAG, id string) {
+	if cfg.PartitionExpirationDays < 0 {
+		d.buildErr(fmt.Errorf("task %s: partition_expiration_days must be positive", id))
+	}
+	if cfg.PartitionExpirationDays > 0 && strings.TrimSpace(cfg.PartitionBy) == "" {
+		d.buildErr(fmt.Errorf("task %s: partition_expiration_days needs partition_by", id))
+	}
+	checkExpiration(d, id, cfg.Expiration)
 	if !bqTableRe.MatchString(strings.TrimSpace(cfg.Table)) {
 		d.buildErr(fmt.Errorf("task %s: table must be dataset.table or project.dataset.table, got %q", id, cfg.Table))
 	}
@@ -567,14 +576,31 @@ func loadScript(ctx *TaskContext, cfg BigQueryLoadConfig, src, dst string, si, t
 	}
 	T := bqIdent(dst)
 	count := ";\nSELECT @@row_count AS n"
+	exp, err := renderExpiration(ctx, cfg.Expiration)
+	if err != nil {
+		return "", err
+	}
+	var opt []string
+	if exp != "" {
+		opt = append(opt, "expiration_timestamp = "+exp)
+	}
+	if cfg.PartitionExpirationDays > 0 {
+		opt = append(opt, "partition_expiration_days = "+strconv.FormatFloat(cfg.PartitionExpirationDays, 'f', -1, 64))
+	}
 	if mode == "replace" || !ti.exists {
 		create := "CREATE TABLE "
 		if mode == "replace" {
 			create = "CREATE OR REPLACE TABLE "
 		}
+		if len(opt) > 0 {
+			tableOpts += "\nOPTIONS (" + strings.Join(opt, ", ") + ")"
+		}
 		return create + T + tableOpts + " AS\n" + query + ";\nSELECT COUNT(*) AS n FROM " + T, nil
 	}
 	var b strings.Builder
+	if len(opt) > 0 { // keep the expirations current on an existing table (a duration counts from this load)
+		b.WriteString("ALTER TABLE " + T + " SET OPTIONS (" + strings.Join(opt, ", ") + ");\n")
+	}
 	have := map[string]bool{}
 	for _, c := range ti.cols {
 		have[c.Name] = true

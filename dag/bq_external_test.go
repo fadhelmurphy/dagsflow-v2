@@ -20,7 +20,7 @@ func TestBigQueryExternalTableFromGCS(t *testing.T) {
 	})
 	dump := d.NewGCSWriteTask("dump", StoreWriteConfig{Bucket: "bkt", Object: "export/testing/{{ .ds }}", Format: "ndjson"})
 	ext := d.NewBigQueryExternalTableTask("ext", BigQueryExternalConfig{Table: "7r_staging.testing_fadhel", DefaultType: "auto",
-		ColumnTypes: map[string]string{"phone number": "string"}, AllFiles: true})
+		ColumnTypes: map[string]string{"phone number": "string"}, AllFiles: true, Expiration: "7d"})
 	src.Then(dump).Then(ext)
 	rs := &memRun{}
 	runDAG(t, d, rs)
@@ -36,6 +36,9 @@ func TestBigQueryExternalTableFromGCS(t *testing.T) {
 		if !strings.Contains(q, want) {
 			t.Fatalf("missing %q in:\n%s", want, q)
 		}
+	}
+	if !strings.Contains(q, "expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 10080 MINUTE)") {
+		t.Fatalf("expiration:\n%s", q)
 	}
 	v, _ := rs.XComPull("ext", "return_value")
 	if m := v.(map[string]any); m["table"] != "prj.7r_staging.testing_fadhel" {

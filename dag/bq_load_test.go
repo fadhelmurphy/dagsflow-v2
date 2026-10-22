@@ -186,3 +186,29 @@ func TestLoadColumnMap(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadExpiration(t *testing.T) {
+	ctx := loadCtx(t)
+	src := tableInfo{exists: true, cols: []bqCol{{"id", "STRING"}}}
+	cfg := BigQueryLoadConfig{Metadata: []string{"job_date"}, PartitionBy: "metadata_job_date", PartitionExpirationDays: 90, Expiration: "30d"}
+	meta, _ := cfg.metaColumns(time.Now(), false, "")
+	sc, err := loadScript(ctx, cfg, "p.s.ext", "p.d.t", src, tableInfo{}, meta, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "PARTITION BY `metadata_job_date`\nOPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 43200 MINUTE), partition_expiration_days = 90) AS"
+	if !strings.Contains(sc, want) {
+		t.Fatalf("create:\n%s", sc)
+	}
+	sc, _ = loadScript(ctx, cfg, "p.s.ext", "p.d.t", src, tableInfo{exists: true, cols: []bqCol{{"id", "STRING"}, {"metadata_job_date", "DATE"}}}, meta, nil)
+	if !strings.HasPrefix(sc, "ALTER TABLE `p.d.t` SET OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 43200 MINUTE), partition_expiration_days = 90);") {
+		t.Fatalf("existing:\n%s", sc)
+	}
+	dd, err := ParseYAML("a.yaml", []byte("dag_id: a\ntasks:\n  - {id: x, operator: bigquery_load_table, table: d.t, partition_expiration_days: 30}\n"))
+	if err == nil {
+		err = dd[0].validate()
+	}
+	if err == nil || !strings.Contains(err.Error(), "needs partition_by") {
+		t.Fatalf("partition expiration without partition: %v", err)
+	}
+}
