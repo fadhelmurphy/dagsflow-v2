@@ -976,7 +976,7 @@ function nodePanel(n) {
 }
 
 // ---- run one node (preview) ------------------------------------------------------------------------------------------------
-const DEST = new Set(["postgres_insert", "bigquery_insert", "gsheet_write", "gcs_write", "s3_write", "bigquery", "trigger_dagrun"]);
+const DEST = new Set(["postgres_insert", "bigquery_insert", "gsheet_write", "gcs_write", "s3_write", "bigquery", "trigger_dagrun", "bigquery_external_table", "bigquery_load_table", "bigquery_delete_table"]);
 function previewHtml(id) {
   const p = B.prev?.[id]; if (!p) return "";
   if (p.loading) return `<div class="bprev"><div class="help">Running ${esc(id)}…</div></div>`;

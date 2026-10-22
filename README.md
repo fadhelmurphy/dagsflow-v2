@@ -397,7 +397,7 @@ tasks:
     outlets: [bq://proj.dw.sales]
 ```
 
-Operators: `empty`, `bash`, `go`, `bigquery`, `http`, `postgres`, `transform`, `branch`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `bigquery_external_table`, `bigquery_load_table`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`, `custom`. Custom logic needs a Go DAG (or a `go` / `bash` task).
+Operators: `empty`, `bash`, `go`, `bigquery`, `http`, `postgres`, `transform`, `branch`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `bigquery_external_table`, `bigquery_load_table`, `bigquery_delete_table`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`, `custom`. Custom logic needs a Go DAG (or a `go` / `bash` task).
 
 ETL operators (rows travel between tasks as the XCom `return_value`, a JSON array of objects):
 
@@ -549,6 +549,18 @@ Then load it into a real table, with metadata columns (all inside BigQuery, no r
 ```
 
 The metadata columns: `path` is the `gs://` file each row came from (`_FILE_NAME` of the external table), `inserted_at` the load time, `job_id` the load time as an integer (`20261021191023`, local time), `job_date` the load date. The source columns are read from `INFORMATION_SCHEMA`, so they follow the data: a column that appears later is added to the table (`ADD COLUMN IF NOT EXISTS`) before the insert or merge. Condition ops: `= != > >= < <= contains not_contains in not_in is_null not_null is_empty not_empty`; `> >= < <=` compare as numbers when the value is a number, else as text. Merge keys, `partition_by` and `cluster_by` use the names after `column_map`; conditions use the source names. The type of a column converted with your own SQL comes from a BigQuery dry run of the query, which also checks the SQL before anything is written. A merge keeps one source row per key (duplicates in the source would make MERGE fail). In the builder the merge keys, the condition columns and the partition column are picked from the columns of the data. Tested against a fake BigQuery, not yet a real one.
+
+Delete tables (tables, views or external tables, through the BigQuery API):
+
+```yaml
+  - id: cleanup
+    operator: bigquery_delete_table
+    tables:                            # dataset.table or project.dataset.table, templated
+      - 7r_staging.orders_ext
+      - staging.orders_{{ .ds_nodash }}
+    fail_if_missing: false             # default: a table that isn't there is skipped
+    upstream: [load]
+```
 
 BigQuery and Google Sheets as source or destination (plain REST, no extra dependencies):
 

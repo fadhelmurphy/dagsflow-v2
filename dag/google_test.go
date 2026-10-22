@@ -85,6 +85,8 @@ func (f *fakeGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 "rows":[{"f":[{"v":"1"},{"v":"ann"},{"v":"true"}]}]}`))
 	case strings.HasSuffix(p, "/queries/j1"):
 		_, _ = w.Write([]byte(`{"jobComplete":true,"rows":[{"f":[{"v":"2"},{"v":null},{"v":"false"}]}]}`))
+	case r.Method == "DELETE" && strings.HasSuffix(p, "/projects/prj/datasets/stg/tables/old_20260131"):
+		w.WriteHeader(204)
 	case strings.HasSuffix(p, "/tables/t/insertAll"):
 		var in struct {
 			Rows []struct {

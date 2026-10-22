@@ -108,6 +108,8 @@ type yamlTask struct {
 	PartitionBy    string                `yaml:"partition_by"`
 	ClusterBy      []string              `yaml:"cluster_by"`
 	ColumnMap      map[string]ColumnSpec `yaml:"column_map"`
+	Tables         []string              `yaml:"tables"` // bigquery_delete_table
+	FailIfMissing  bool                  `yaml:"fail_if_missing"`
 	CastMode       string                `yaml:"cast_mode"`
 	Metadata       []string              `yaml:"metadata"`
 	MetadataPrefix string                `yaml:"metadata_prefix"`
@@ -389,6 +391,9 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 		d.NewBigQueryExternalTableTask(yt.ID, BigQueryExternalConfig{ConnID: yt.ConnID, ProjectID: yt.ProjectID, Location: yt.Location,
 			Table: yt.Table, RowsFrom: yt.RowsFrom, AllFiles: yt.AllFiles, DefaultType: yt.DefaultType, ColumnTypes: yt.ColumnTypes,
 			IfNotExists: yt.IfNotExists, URIs: yt.URIs, Format: yt.Format, Columns: yt.Columns}, opts...)
+	case "bigquery_delete_table":
+		d.NewBigQueryDeleteTableTask(yt.ID, BigQueryDeleteConfig{ConnID: yt.ConnID, ProjectID: yt.ProjectID,
+			Tables: yt.Tables, FailIfMissing: yt.FailIfMissing}, opts...)
 	case "bigquery_load_table":
 		d.NewBigQueryLoadTableTask(yt.ID, BigQueryLoadConfig{ConnID: yt.ConnID, ProjectID: yt.ProjectID, Location: yt.Location,
 			Table: yt.Table, SourceTable: yt.SourceTable, RowsFrom: yt.RowsFrom, Mode: yt.Mode, MergeKeys: yt.MergeKeys,
@@ -433,7 +438,7 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			d.NewHTTPSensor(yt.ID, yt.httpReq(), cfg, opts...)
 		}
 	default:
-		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, branch, gcs_write, s3_write, bigquery_external_table, bigquery_load_table, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
+		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, branch, gcs_write, s3_write, bigquery_external_table, bigquery_load_table, bigquery_delete_table, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
 	}
 	return nil
 }

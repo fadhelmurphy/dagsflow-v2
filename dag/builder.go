@@ -230,6 +230,14 @@ var Nodes = []NodeType{
 			{Name: "location", Label: "Location", Kind: "text", Placeholder: "US"},
 			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default"},
 		}},
+	{Type: "bigquery_delete_table", Operator: "bigquery_delete_table", Label: "BigQuery delete table", Category: "Destinations", Icon: "bq",
+		Description: "Delete BigQuery tables, views or external tables. A table that is not there is skipped.",
+		Fields: []NodeField{
+			{Name: "tables", Label: "Tables", Kind: "list", Required: true, Help: "One per line: dataset.table or project.dataset.table. Templates work, e.g. staging.orders_{{ .ds_nodash }}"},
+			{Name: "fail_if_missing", Label: "Fail if a table doesn't exist", Kind: "bool", Help: "Default: skip it"},
+			{Name: "project_id", Label: "Project", Kind: "text", Help: "Default: from the table name, the connection or the credentials"},
+			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default (needs bigquery.tables.delete)"},
+		}},
 	{Type: "s3_write", Operator: "s3_write", Label: "Amazon S3 dump", Category: "Destinations", Icon: "cloud", NeedsInput: true,
 		Description: "Write the rows from the node before it to a file in an S3 bucket (or MinIO, R2 and other S3 compatible stores).",
 		Fields: []NodeField{
