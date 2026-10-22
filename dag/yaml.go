@@ -112,6 +112,21 @@ type yamlTask struct {
 	FailIfMissing           bool                  `yaml:"fail_if_missing"`
 	Expiration              string                `yaml:"expiration"` // bigquery_external_table / bigquery_load_table
 	PartitionExpirationDays float64               `yaml:"partition_expiration_days"`
+	Workgroup               string                `yaml:"workgroup"` // athena_*
+	OutputLocation          string                `yaml:"output_location"`
+	Catalog                 string                `yaml:"catalog"`
+	Database                string                `yaml:"database"` // athena_* / redshift_*
+	TableLocation           string                `yaml:"table_location"`
+	Partitioning            []string              `yaml:"partitioning"`
+	S3Location              string                `yaml:"s3_location"`
+	ClusterIdentifier       string                `yaml:"cluster_identifier"` // redshift_*
+	WorkgroupName           string                `yaml:"workgroup_name"`
+	DbUser                  string                `yaml:"db_user"`
+	SecretArn               string                `yaml:"secret_arn"`
+	IAMRole                 string                `yaml:"iam_role"`
+	S3Region                string                `yaml:"s3_region"`
+	DistKey                 string                `yaml:"dist_key"`
+	SortKey                 []string              `yaml:"sort_key"`
 	CastMode                string                `yaml:"cast_mode"`
 	Metadata                []string              `yaml:"metadata"`
 	MetadataPrefix          string                `yaml:"metadata_prefix"`
@@ -393,6 +408,9 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 		d.NewBigQueryExternalTableTask(yt.ID, BigQueryExternalConfig{ConnID: yt.ConnID, ProjectID: yt.ProjectID, Location: yt.Location,
 			Table: yt.Table, RowsFrom: yt.RowsFrom, AllFiles: yt.AllFiles, DefaultType: yt.DefaultType, ColumnTypes: yt.ColumnTypes,
 			IfNotExists: yt.IfNotExists, Expiration: yt.Expiration, URIs: yt.URIs, Format: yt.Format, Columns: yt.Columns}, opts...)
+	case "athena_query", "athena_external_table", "athena_load_table", "athena_delete_table",
+		"redshift_query", "redshift_load_table", "redshift_delete_table":
+		yt.addAWS(d, opts)
 	case "bigquery_delete_table":
 		d.NewBigQueryDeleteTableTask(yt.ID, BigQueryDeleteConfig{ConnID: yt.ConnID, ProjectID: yt.ProjectID,
 			Tables: yt.Tables, FailIfMissing: yt.FailIfMissing}, opts...)
@@ -440,7 +458,7 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			d.NewHTTPSensor(yt.ID, yt.httpReq(), cfg, opts...)
 		}
 	default:
-		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, branch, gcs_write, s3_write, bigquery_external_table, bigquery_load_table, bigquery_delete_table, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
+		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, branch, gcs_write, s3_write, bigquery_external_table, bigquery_load_table, bigquery_delete_table, athena_query, athena_external_table, athena_load_table, athena_delete_table, redshift_query, redshift_load_table, redshift_delete_table, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
 	}
 	return nil
 }
@@ -510,5 +528,34 @@ func LoadDagFolder(dir string) {
 			delete(folderStamp, src)
 			ReplaceSource(src, nil, nil)
 		}
+	}
+}
+
+// addAWS adds the Athena and Redshift tasks.
+func (yt yamlTask) addAWS(d *DAG, opts []TaskOption) {
+	ath := AthenaConn{ConnID: yt.ConnID, Region: yt.Region, Workgroup: yt.Workgroup, OutputLocation: yt.OutputLocation, Catalog: yt.Catalog, Database: yt.Database}
+	rs := RedshiftConn{ConnID: yt.ConnID, Region: yt.Region, ClusterIdentifier: yt.ClusterIdentifier, WorkgroupName: yt.WorkgroupName,
+		Database: yt.Database, DbUser: yt.DbUser, SecretArn: yt.SecretArn}
+	lo := LoadOptions{Mode: yt.Mode, MergeKeys: yt.MergeKeys, WhenMatched: yt.WhenMatched, Conditions: yt.Conditions, ConditionMode: yt.ConditionMode,
+		ColumnMap: yt.ColumnMap, CastMode: yt.CastMode, Metadata: yt.Metadata, MetadataPrefix: yt.MetadataPrefix, MetadataNames: yt.MetadataNames,
+		InsertedAt: yt.InsertedAt, JobDate: yt.JobDate, Timezone: yt.Timezone}
+	switch yt.Operator {
+	case "athena_query":
+		d.NewAthenaQueryTask(yt.ID, AthenaQueryConfig{AthenaConn: ath, SQL: yt.SQL, Limit: yt.Limit}, opts...)
+	case "athena_external_table":
+		d.NewAthenaExternalTableTask(yt.ID, AthenaExternalConfig{AthenaConn: ath, Table: yt.Table, RowsFrom: yt.RowsFrom, DefaultType: yt.DefaultType,
+			ColumnTypes: yt.ColumnTypes, IfNotExists: yt.IfNotExists, Location: yt.S3Location, Format: yt.Format, Columns: yt.Columns}, opts...)
+	case "athena_load_table":
+		d.NewAthenaLoadTableTask(yt.ID, AthenaLoadConfig{AthenaConn: ath, LoadOptions: lo, Table: yt.Table, TableLocation: yt.TableLocation,
+			SourceTable: yt.SourceTable, RowsFrom: yt.RowsFrom, PartitionBy: yt.Partitioning}, opts...)
+	case "athena_delete_table":
+		d.NewAthenaDeleteTableTask(yt.ID, AthenaDeleteConfig{AthenaConn: ath, Tables: yt.Tables, FailIfMissing: yt.FailIfMissing}, opts...)
+	case "redshift_query":
+		d.NewRedshiftQueryTask(yt.ID, RedshiftQueryConfig{RedshiftConn: rs, SQL: yt.SQL, Limit: yt.Limit}, opts...)
+	case "redshift_load_table":
+		d.NewRedshiftLoadTableTask(yt.ID, RedshiftLoadConfig{RedshiftConn: rs, LoadOptions: lo, Table: yt.Table, IAMRole: yt.IAMRole, RowsFrom: yt.RowsFrom,
+			SourceTable: yt.SourceTable, AllFiles: yt.AllFiles, S3Region: yt.S3Region, DistKey: yt.DistKey, SortKey: yt.SortKey}, opts...)
+	case "redshift_delete_table":
+		d.NewRedshiftDeleteTableTask(yt.ID, RedshiftDeleteConfig{RedshiftConn: rs, Tables: yt.Tables, FailIfMissing: yt.FailIfMissing}, opts...)
 	}
 }

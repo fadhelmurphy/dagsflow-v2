@@ -397,7 +397,7 @@ tasks:
     outlets: [bq://proj.dw.sales]
 ```
 
-Operators: `empty`, `bash`, `go`, `bigquery`, `http`, `postgres`, `transform`, `branch`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `bigquery_external_table`, `bigquery_load_table`, `bigquery_delete_table`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`, `custom`. Custom logic needs a Go DAG (or a `go` / `bash` task).
+Operators: `empty`, `bash`, `go`, `bigquery`, `http`, `postgres`, `transform`, `branch`, `bigquery_query`, `bigquery_insert`, `gsheet_read`, `gsheet_write`, `file_read`, `merge`, `gcs_write`, `s3_write`, `bigquery_external_table`, `bigquery_load_table`, `bigquery_delete_table`, `athena_query`, `athena_external_table`, `athena_load_table`, `athena_delete_table`, `redshift_query`, `redshift_load_table`, `redshift_delete_table`, `trigger_dagrun`, `file_sensor`, `time_delta_sensor`, `external_task_sensor`, `http_sensor`, `custom`. Custom logic needs a Go DAG (or a `go` / `bash` task).
 
 ETL operators (rows travel between tasks as the XCom `return_value`, a JSON array of objects):
 
@@ -564,6 +564,53 @@ Delete tables (tables, views or external tables, through the BigQuery API):
     fail_if_missing: false             # default: a table that isn't there is skipped
     upstream: [load]
 ```
+
+### AWS: Athena and Redshift
+
+The same flow on AWS: dump to S3, then an Athena external table and an Iceberg table, or a Redshift table. The load nodes take the options of `bigquery_load_table` (`mode`, `merge_keys`, `when_matched`, `conditions`, `condition_mode`, `column_map`, `metadata*`, `inserted_at`, `job_date`, `timezone`). They call the Athena and Redshift Data APIs directly (signed REST, no SDK, no JDBC) with the credentials of the `aws_default` connection, the same as `s3_write` (keys, IAM role, or `role_arn`).
+
+```yaml
+  - id: dump
+    operator: s3_write
+    bucket: my-bucket
+    key: export/orders/{{ .ds }}.ndjson
+    format: ndjson
+    upstream: [read_sheet]
+
+  # Athena: external table over the folder, then an Iceberg table
+  - id: ext
+    operator: athena_external_table
+    table: stg.orders_ext              # replaced every run; Athena reads every file of the folder
+    default_type: STRING               # or auto; column_types: {amount: decimal(18,2)}
+    output_location: s3://my-bucket/athena-results/   # unless the workgroup sets one (workgroup: primary)
+    upstream: [dump]
+  - id: load_athena
+    operator: athena_load_table
+    table: dw.orders                   # Iceberg, created on the first run (CTAS)
+    table_location: s3://my-bucket/warehouse/
+    mode: merge
+    merge_keys: [order_id]
+    column_map: {amount: {name: total, cast: "decimal(18,2)"}}   # cast_mode: safe = TRY_CAST
+    partitioning: [metadata_job_date]  # a timestamp column is partitioned by day(...)
+    output_location: s3://my-bucket/athena-results/
+    upstream: [ext]
+
+  # Redshift: COPY the file, then append / replace / merge
+  - id: load_redshift
+    operator: redshift_load_table
+    table: dw.orders                   # schema.table, created on the first run
+    database: dev
+    workgroup_name: my-wg              # serverless; or cluster_identifier + db_user (or secret_arn)
+    iam_role: arn:aws:iam::123456789012:role/redshift-s3   # or default
+    mode: append
+    sort_key: [metadata_job_date]      # dist_key / sort_key: first load only
+    upstream: [dump]
+
+  - {id: q, operator: athena_query, database: dw, sql: "SELECT count(*) AS n FROM orders", output_location: s3://my-bucket/athena-results/}
+  - {id: drop, operator: redshift_delete_table, tables: [stg.tmp_{{ ds_nodash }}], database: dev, workgroup_name: my-wg}
+```
+
+Notes. Athena: Glue column names are lowercase letters, digits and `_`, so the external table renames the columns of the file to that (JSON keys are still matched through SerDe mappings); `metadata_path` is Athena's `"$path"` of each row; MERGE and DELETE need the Iceberg table, which is why the load node writes one; table and partition expiration don't exist in Athena (use S3 lifecycle rules). Redshift: the file is copied into a temporary table first, so every column arrives as text and `column_map` casts it (there is no safe cast: a value that doesn't convert fails the load); an expression that makes a new column needs `::type` at its end; `metadata_path` is the S3 path that was copied; MERGE with `when_matched: skip` becomes an insert of the missing keys. Every load runs in one transaction (Redshift) or as a few Athena statements. Tested against fake Athena and Redshift Data API servers, not yet against real AWS.
 
 BigQuery and Google Sheets as source or destination (plain REST, no extra dependencies):
 

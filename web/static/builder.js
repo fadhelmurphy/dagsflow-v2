@@ -809,8 +809,9 @@ function colSource(f, id) { // {cols, src: node to run to load them, why}
     if (u) {
       const [uout] = outOf(up);
       if (Array.isArray(uout?.columns)) r = { cols: uout.columns.map(c => c.name ?? c), src: "", why: "" };
-      else if (u.type === "bigquery_external_table") r = colSource({ columns: "gcs" }, up);
-      else if (u.type === "bigquery_load_table") { r = colSource({ columns: "out+meta" }, up); }
+      else if (u.type === "bigquery_external_table" || u.type === "athena_external_table") r = colSource({ columns: "gcs" }, up);
+      else if (["bigquery_load_table", "athena_load_table", "redshift_load_table"].includes(u.type)) { r = colSource({ columns: "out+meta" }, up); }
+      else if (u.type === "gcs_write" || u.type === "s3_write") r = colSource({ columns: "gcs" }, id); // a load straight from the file (Redshift COPY)
       else if (rowsOf(uout)) r = { cols: keysOf(uout).sort(), src: "", why: "" };
     }
     if (r.cols && f.columns === "src+meta") r = { ...r, cols: [...r.cols, ...metaNames(cfg)] };
@@ -976,7 +977,7 @@ function nodePanel(n) {
 }
 
 // ---- run one node (preview) ------------------------------------------------------------------------------------------------
-const DEST = new Set(["postgres_insert", "bigquery_insert", "gsheet_write", "gcs_write", "s3_write", "bigquery", "trigger_dagrun", "bigquery_external_table", "bigquery_load_table", "bigquery_delete_table"]);
+const DEST = new Set(["postgres_insert", "bigquery_insert", "gsheet_write", "gcs_write", "s3_write", "bigquery", "trigger_dagrun", "bigquery_external_table", "bigquery_load_table", "bigquery_delete_table", "athena_external_table", "athena_load_table", "athena_delete_table", "redshift_load_table", "redshift_delete_table"]);
 function previewHtml(id) {
   const p = B.prev?.[id]; if (!p) return "";
   if (p.loading) return `<div class="bprev"><div class="help">Running ${esc(id)}…</div></div>`;
