@@ -103,7 +103,7 @@ main.bldmain{padding:0;max-width:none}
 .bf .bf-err{font-size:11.5px;color:var(--s-failed);margin-top:3px}
 .bf label.chk{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;margin:0}
 .kvr{display:flex;gap:4px;margin-bottom:4px}
-.kvr.cm input[readonly]{background:#F6F8FA;color:#3B4652;font-family:var(--code);font-size:12.5px;cursor:default}.kvr.cm>*{flex:1;min-width:0}.kvr.gone{opacity:.55}.cond{display:flex;gap:4px;margin-bottom:4px}.cond>select,.cond>input{flex:1;min-width:0}.cond>select[data-op]{flex:0 0 96px}.cond>select[data-c]{flex:1.6}.cx .chk code{font-size:12px}.colmap{max-height:360px;overflow:auto}
+.kvr.cm input[readonly]{background:#F6F8FA;color:#3B4652;font-family:var(--code);font-size:12.5px;cursor:default}.kvr.cm>*{flex:1;min-width:0}.kvr.gone{opacity:.55}.cond{display:flex;gap:4px;margin-bottom:4px}.cdef{display:grid;grid-template-columns:1fr 1fr 1.2fr;gap:4px;margin-bottom:4px;align-items:center}.cdef>*{min-width:0}.cdef code{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#F6F8FA;border-radius:4px;padding:6px 7px}.cdef.hd{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px}.cdef.gone{opacity:.55}.cond>select,.cond>input{flex:1;min-width:0}.cond>select[data-op]{flex:0 0 96px}.cond>select[data-c]{flex:1.6}.cx .chk code{font-size:12px}.colmap{max-height:360px;overflow:auto}
 .kvr input{flex:1;min-width:0}
 .x{border:0;background:none;color:var(--muted);font-size:17px;line-height:1;padding:0 6px;border-radius:4px}
 .x:hover{background:#EEF1F4;color:var(--s-failed)}
@@ -761,7 +761,7 @@ function fieldHtml(f, obj, scope, id) {
     case "intlist": inp = `<input ${a} value="${esc((v || []).join(", "))}" placeholder="200, 201">`; break;
     case "json": inp = `<textarea ${a} class="bcode" rows="4" spellcheck="false" placeholder="{ }">${v == null ? "" : esc(JSON.stringify(v, null, 2))}</textarea>`; break;
     case "colmap": inp = colmapHtml(f, v || {}, a, id); break;
-    case "colpick": case "colsel": case "conds": case "checks": inp = cxHtml(f, v, id); break;
+    case "colpick": case "colsel": case "conds": case "checks": case "coldef": inp = cxHtml(f, v, id); break;
     case "kv": inp = `<div class="kv" ${a}>${Object.entries(v || {}).map(([k, x]) => kvRow(k, x)).join("")}<button class="btn sm" data-sact="kvadd" type="button">+ Add</button></div>`; break;
     case "steps": inp = stepsHtml(v || []); break;
     case "file":
@@ -797,6 +797,12 @@ function metaNames(cfg) { // the metadata columns a load node adds
 function colSource(f, id) { // {cols, src: node to run to load them, why}
   const cfg = node(id)?.config || {};
   if (f.columns?.startsWith("fixed:")) return { cols: f.columns.slice(6).split(","), src: "", why: "" };
+  if (f.columns === "out" || f.columns === "out+meta") { // the target's columns: source columns after column_map renames
+    const r = colSource({ columns: "src" }, id), cm = cfg.column_map || {};
+    if (!r.cols) return r;
+    const cols = r.cols.map(c => (cm[c]?.name || "").trim() || c);
+    return { ...r, cols: f.columns === "out+meta" ? [...cols, ...metaNames(cfg)] : cols };
+  }
   if (f.columns === "src" || f.columns === "src+meta") { // columns of the table of the node before it
     const up = firstUp(id, cfg.rows_from), u = node(up);
     let r = { cols: null, src: "", why: cfg.source_table ? "Columns of source_table are not known here: type them." : "Connect the external table node first." };
@@ -804,7 +810,7 @@ function colSource(f, id) { // {cols, src: node to run to load them, why}
       const [uout] = outOf(up);
       if (Array.isArray(uout?.columns)) r = { cols: uout.columns.map(c => c.name ?? c), src: "", why: "" };
       else if (u.type === "bigquery_external_table") r = colSource({ columns: "gcs" }, up);
-      else if (u.type === "bigquery_load_table") { r = colSource({ columns: "src+meta" }, up); }
+      else if (u.type === "bigquery_load_table") { r = colSource({ columns: "out+meta" }, up); }
       else if (rowsOf(uout)) r = { cols: keysOf(uout).sort(), src: "", why: "" };
     }
     if (r.cols && f.columns === "src+meta") r = { ...r, cols: [...r.cols, ...metaNames(cfg)] };
@@ -852,6 +858,14 @@ function cxHtml(f, v, id) {
   const colSel = (cur, attr) => cols
     ? `<select ${attr}><option value=""></option>${[...new Set([...cols, ...(cur ? [cur] : [])])].map(c => `<option value="${esc(c)}" ${c === cur ? "selected" : ""}>${esc(c)}${cols.includes(c) ? "" : " (not in the data)"}</option>`).join("")}</select>`
     : `<input ${attr} value="${esc(cur || "")}" placeholder="column" spellcheck="false">`;
+  if (f.kind === "coldef") {
+    const cur = v || {}, list = [...new Set([...(cols || []), ...Object.keys(cur)])];
+    const dl = `bdl-${esc(f.name)}`;
+    const row = c => `<div class="cdef${cols && !cols.includes(c) ? " gone" : ""}" data-col="${esc(c)}"><code title="${esc(c)}">${esc(c)}</code><input data-n value="${esc(cur[c]?.name || "")}" placeholder="${esc(c)}" spellcheck="false" aria-label="New name of ${esc(c)}"><input data-t list="${dl}" value="${esc(cur[c]?.cast || "")}" placeholder="type or SQL" spellcheck="false" aria-label="Type of ${esc(c)}"></div>`;
+    const head = list.length ? `<div class="cdef hd"><span>column</span><span>new name</span><span>type / SQL</span></div>` : "";
+    const extra = cols ? "" : `<div class="cdef" data-new="1"><input data-c placeholder="column" spellcheck="false"><input data-n placeholder="new name" spellcheck="false"><input data-t list="${dl}" placeholder="type or SQL" spellcheck="false"></div>`;
+    return `<div class="cx colmap" data-cx="coldef" data-f="${esc(f.name)}"><datalist id="${dl}">${(f.options || []).map(o => `<option value="${esc(o)}">`).join("")}</datalist>${head}${list.map(row).join("")}${extra}${foot}</div>`;
+  }
   if (f.kind === "colsel") return `<div class="cx" ${a}>${colSel(v || "", "data-c")}${foot}</div>`;
   if (f.kind === "colpick") {
     const cur = v || [];
@@ -869,6 +883,17 @@ function applyCx(cx, structural) {
     case "checks": { const all = $$("[data-o]", cx), on = all.filter(x => x.checked).map(x => x.dataset.o); v = on.length === all.length ? undefined : on.length ? on : ["none"]; break; }
     case "colsel": v = $("[data-c]", cx).value.trim() || undefined; break;
     case "colpick": { const l = $("[data-list]", cx); v = l ? l.value.split(",").map(x => x.trim()).filter(Boolean) : $$("[data-o]", cx).filter(x => x.checked).map(x => x.dataset.o); if (!v.length) v = undefined; break; }
+    case "coldef": {
+      const o = {};
+      $$(".cdef:not(.hd)", cx).forEach(r => {
+        const c = r.dataset.col || $("[data-c]", r)?.value.trim(); if (!c) return;
+        const n = $("[data-n]", r).value.trim(), t = $("[data-t]", r).value.trim();
+        if (n || t) o[c] = { ...(n ? { name: n } : {}), ...(t ? { cast: t } : {}) };
+      });
+      v = Object.keys(o).length ? o : undefined;
+      // merge keys / partition list the new names: redraw them once the user leaves the field
+      break;
+    }
     case "conds": v = $$(".cond", cx).map(r => { const c = { column: $("[data-c]", r).value.trim(), op: $("[data-op]", r).value }; const x = $("[data-v]", r); if (x) c.value = x.value; return c; }); if (!v.length) v = undefined; break;
   }
   touch(); setPath(cfg, f, v); refreshNode(B.sel.id);
@@ -1186,7 +1211,7 @@ function onSideChange(e) {
   }
   if (el.dataset.xf) return applyExpand(el);
   // the column pickers list the metadata column names: redraw when they change
-  if (el.closest('[data-f="metadata_prefix"],[data-f="metadata"],[data-f="metadata_names"],[data-f="rows_from"]') && B.sel?.k === "node") { setTimeout(renderSideKeepFocus, 0); return; }
+  if (el.closest('[data-f="metadata_prefix"],[data-f="metadata"],[data-f="metadata_names"],[data-f="rows_from"],[data-f="column_map"]') && B.sel?.k === "node") { setTimeout(renderSideKeepFocus, 0); return; }
   if (el.dataset.f === "schedule" || el.dataset.f?.startsWith("schedule")) updateStatus();
 }
 

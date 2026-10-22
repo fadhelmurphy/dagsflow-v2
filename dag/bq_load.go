@@ -2,7 +2,9 @@ package dag
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +35,8 @@ type BigQueryLoadConfig struct {
 	ConditionMode               string // all (default) | any
 	PartitionBy                 string
 	ClusterBy                   []string
+	ColumnMap                   map[string]ColumnSpec // source column -> new name and/or cast
+	CastMode                    string                // safe (default: SAFE_CAST, bad values become NULL) | strict (CAST, fails)
 
 	Metadata       []string          // which metadata columns: path, inserted_at, job_id, job_date (default all; ["none"] = none)
 	MetadataPrefix string            // default "metadata_"
@@ -40,6 +44,59 @@ type BigQueryLoadConfig struct {
 	InsertedAt     string            // utc (default, TIMESTAMP) | local (DATETIME)
 	JobDate        string            // local (default) | utc
 	Timezone       string            // the "local" time zone, default: the server's (TZ)
+}
+
+// ColumnSpec renames and/or converts one source column. Cast is a BigQuery
+// type (INT64, NUMERIC, DATE…) or an SQL expression, where {col} is the column:
+// "my_project.utils.to_date({col})". A bare function name gets the column as
+// its only argument: "my_project.utils.to_date".
+type ColumnSpec struct {
+	Name string `yaml:"name" json:"name,omitempty"`
+	Cast string `yaml:"cast" json:"cast,omitempty"`
+}
+
+var fnNameRe = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_-]*([.][A-Za-z_][A-Za-z0-9_-]*)*$|^`[^`]+`$")
+
+// castExpr returns the SQL for a column and the result type when it is known.
+func castExpr(col, cast, mode string) (string, string) {
+	c := strings.TrimSpace(cast)
+	id := bqIdent(col)
+	switch {
+	case c == "":
+		return id, ""
+	case bqTypeRe.MatchString(c):
+		t := strings.ToUpper(c)
+		if strings.EqualFold(mode, "strict") {
+			return "CAST(" + id + " AS " + t + ")", baseType(t)
+		}
+		return "SAFE_CAST(" + id + " AS " + t + ")", baseType(t)
+	case strings.Contains(c, "{col}"):
+		return "(" + strings.ReplaceAll(c, "{col}", id) + ")", ""
+	case fnNameRe.MatchString(c):
+		return c + "(" + id + ")", ""
+	default:
+		return "(" + c + ")", "" // an expression that names the column itself
+	}
+}
+
+// baseType: NUMERIC(10,2) -> NUMERIC; INTEGER -> INT64…
+func baseType(t string) string {
+	if i := strings.Index(t, "("); i > 0 {
+		t = t[:i]
+	}
+	switch t {
+	case "INTEGER":
+		return "INT64"
+	case "FLOAT":
+		return "FLOAT64"
+	case "BOOLEAN":
+		return "BOOL"
+	case "DECIMAL":
+		return "NUMERIC"
+	case "BIGDECIMAL":
+		return "BIGNUMERIC"
+	}
+	return t
 }
 
 // LoadCondition keeps the rows where column op value.
@@ -90,6 +147,21 @@ func (cfg BigQueryLoadConfig) check(d *DAG, id string) {
 	for k := range cfg.MetadataNames {
 		if !contains(metaKinds, k) {
 			d.buildErr(fmt.Errorf("task %s: metadata_names: %q is not one of path, inserted_at, job_id, job_date", id, k))
+		}
+	}
+	if m := strings.ToLower(cfg.CastMode); m != "" && m != "safe" && m != "strict" {
+		d.buildErr(fmt.Errorf("task %s: cast_mode must be safe or strict", id))
+	}
+	seenName := map[string]string{}
+	for c, sp := range cfg.ColumnMap {
+		if n := strings.TrimSpace(sp.Name); n != "" {
+			if prev, dup := seenName[n]; dup {
+				d.buildErr(fmt.Errorf("task %s: column_map: %q and %q are both renamed to %q", id, prev, c, n))
+			}
+			seenName[n] = c
+		}
+		if strings.Contains(sp.Cast, ";") {
+			d.buildErr(fmt.Errorf("task %s: column_map: the cast of %q can't contain ;", id, c))
 		}
 	}
 	if v := strings.ToLower(cfg.InsertedAt); v != "" && v != "utc" && v != "local" {
@@ -345,7 +417,8 @@ func (d *DAG) NewBigQueryLoadTableTask(id string, cfg BigQueryLoadConfig, opts .
 		if err != nil {
 			return err
 		}
-		script, err := loadScript(ctx, cfg, src, dst, si, ti, meta)
+		dry := func(q string) (map[string]string, error) { return bqDryRunTypes(ctx, conn, project, location, q) }
+		script, err := loadScript(ctx, cfg, src, dst, si, ti, meta, dry)
 		if err != nil {
 			return err
 		}
@@ -380,20 +453,51 @@ func (d *DAG) NewBigQueryLoadTableTask(id string, cfg BigQueryLoadConfig, opts .
 }
 
 // loadScript builds the BigQuery script for the mode.
-func loadScript(ctx *TaskContext, cfg BigQueryLoadConfig, src, dst string, si, ti tableInfo, meta []metaColumn) (string, error) {
+//
+// dryRun, when set, returns the column types of a query (a BigQuery dry run):
+// it gives the type of columns converted with an expression and checks the SQL.
+func loadScript(ctx *TaskContext, cfg BigQueryLoadConfig, src, dst string, si, ti tableInfo, meta []metaColumn, dryRun func(string) (map[string]string, error)) (string, error) {
 	srcSet := map[string]bool{}
 	for _, c := range si.cols {
 		srcSet[c.Name] = true
 	}
+	var unknown []string
+	for c := range cfg.ColumnMap {
+		if !srcSet[c] {
+			unknown = append(unknown, c)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return "", fmt.Errorf("column_map: %s not in %s (columns: %s)", strings.Join(unknown, ", "), src, names(si.cols))
+	}
 	var sel, cols []string
 	types := map[string]string{}
+	outSet := map[string]string{} // output name -> source column
+	needDry := false
 	for _, c := range si.cols {
-		sel = append(sel, bqIdent(c.Name))
-		cols = append(cols, c.Name)
-		types[c.Name] = c.Type
+		sp := cfg.ColumnMap[c.Name]
+		out := firstNonEmpty(strings.TrimSpace(sp.Name), c.Name)
+		if prev, dup := outSet[out]; dup {
+			return "", fmt.Errorf("column_map: %q and %q would both be named %q", prev, c.Name, out)
+		}
+		outSet[out] = c.Name
+		expr, t := castExpr(c.Name, sp.Cast, cfg.CastMode)
+		if strings.TrimSpace(sp.Cast) == "" {
+			t = c.Type
+		} else if t == "" {
+			needDry = true
+		}
+		if expr == bqIdent(out) {
+			sel = append(sel, expr)
+		} else {
+			sel = append(sel, expr+" AS "+bqIdent(out))
+		}
+		cols = append(cols, out)
+		types[out] = t
 	}
 	for _, m := range meta {
-		if srcSet[m.Name] {
+		if _, dup := outSet[m.Name]; dup {
 			return "", fmt.Errorf("metadata column %q is already a column of %s: rename it (metadata_prefix / metadata_names)", m.Name, src)
 		}
 		sel = append(sel, m.Expr+" AS "+bqIdent(m.Name))
@@ -413,12 +517,21 @@ func loadScript(ctx *TaskContext, cfg BigQueryLoadConfig, src, dst string, si, t
 	if where != "" {
 		query += "\n" + where
 	}
+	if needDry && dryRun != nil {
+		got, err := dryRun(query)
+		if err != nil {
+			return "", fmt.Errorf("check the column conversions: %w", err)
+		}
+		for c, t := range got {
+			types[c] = t
+		}
+	}
 	mode := cfg.mode()
 	if mode == "merge" {
 		var keys []string
 		for _, k := range cfg.MergeKeys {
-			if !srcSet[k] {
-				return "", fmt.Errorf("merge key %q is not a column of %s (columns: %s)", k, src, names(si.cols))
+			if _, ok := outSet[k]; !ok {
+				return "", fmt.Errorf("merge key %q is not a column (columns: %s)", k, strings.Join(cols, ", "))
 			}
 			keys = append(keys, bqIdent(k))
 		}
@@ -427,11 +540,13 @@ func loadScript(ctx *TaskContext, cfg BigQueryLoadConfig, src, dst string, si, t
 	}
 	tableOpts := ""
 	if p := strings.TrimSpace(cfg.PartitionBy); p != "" {
-		t := types[p]
-		if t == "" {
+		t, ok := types[p]
+		if !ok {
 			return "", fmt.Errorf("partition_by: %q is not a column (columns: %s)", p, strings.Join(cols, ", "))
 		}
 		switch {
+		case t == "":
+			return "", fmt.Errorf("partition_by: the type of %q is unknown: set a type in its cast", p)
 		case t == "DATE":
 			tableOpts += "\nPARTITION BY " + bqIdent(p)
 		case t == "TIMESTAMP" || t == "DATETIME":
@@ -443,7 +558,7 @@ func loadScript(ctx *TaskContext, cfg BigQueryLoadConfig, src, dst string, si, t
 	if len(cfg.ClusterBy) > 0 {
 		var cl []string
 		for _, c := range cfg.ClusterBy {
-			if types[c] == "" {
+			if _, ok := types[c]; !ok {
 				return "", fmt.Errorf("cluster_by: %q is not a column", c)
 			}
 			cl = append(cl, bqIdent(c))
@@ -466,6 +581,9 @@ func loadScript(ctx *TaskContext, cfg BigQueryLoadConfig, src, dst string, si, t
 	}
 	for _, c := range cols { // columns that are new in the source
 		if !have[c] {
+			if types[c] == "" {
+				return "", fmt.Errorf("column %q is new in the table but its type is unknown: set a type in its cast", c)
+			}
 			fmt.Fprintf(&b, "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s;\n", T, bqIdent(c), types[c])
 		}
 	}
@@ -495,4 +613,21 @@ func loadScript(ctx *TaskContext, cfg BigQueryLoadConfig, src, dst string, si, t
 	}
 	b.WriteString("\nWHEN NOT MATCHED THEN INSERT (" + strings.Join(qc, ", ") + ") VALUES (" + strings.Join(vals, ", ") + ")" + count)
 	return b.String(), nil
+}
+
+// bqDryRunTypes returns the result columns of a query without running it.
+func bqDryRunTypes(ctx *TaskContext, conn Connection, project, location, sql string) (map[string]string, error) {
+	body := map[string]any{"query": sql, "useLegacySql": false, "dryRun": true}
+	if location != "" {
+		body["location"] = location
+	}
+	var res bqResult
+	if err := googleCall(ctx, conn, scopeBigQuery, "POST", fmt.Sprintf("%s/projects/%s/queries", bqBase, url.PathEscape(project)), body, &res); err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, f := range res.Schema.Fields {
+		out[f.Name] = baseType(strings.ToUpper(f.Type))
+	}
+	return out, nil
 }

@@ -22,7 +22,7 @@ func TestLoadScriptModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	// first run: the table does not exist -> CREATE ... AS SELECT
-	sc, err := loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tableInfo{}, meta)
+	sc, err := loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tableInfo{}, meta, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestLoadScriptModes(t *testing.T) {
 	}
 	// next runs: append with the new column added first
 	tgt := tableInfo{exists: true, cols: []bqCol{{"order_id", "STRING"}, {"status", "STRING"}, {"metadata_path", "STRING"}}}
-	sc, _ = loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tgt, meta)
+	sc, _ = loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tgt, meta, nil)
 	for _, want := range []string{"ALTER TABLE `p.d.orders` ADD COLUMN IF NOT EXISTS `amount` STRING;", "ADD COLUMN IF NOT EXISTS `metadata_job_id` INT64;",
 		"INSERT INTO `p.d.orders` (`order_id`, `status`, `amount`, `metadata_path`", "SELECT @@row_count AS n"} {
 		if !strings.Contains(sc, want) {
@@ -48,7 +48,7 @@ func TestLoadScriptModes(t *testing.T) {
 		MetadataPrefix: "metaingest_", MetadataNames: map[string]string{"inserted_at": "ingest_at"}, InsertedAt: "local", JobDate: "utc",
 		Timezone: "Asia/Jakarta", Metadata: []string{"inserted_at", "job_date"}, PartitionBy: "metaingest_job_date"}
 	meta, _ = cfg.metaColumns(now, true, "")
-	sc, err = loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tgt, meta)
+	sc, err = loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tgt, meta, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestLoadScriptModes(t *testing.T) {
 	// replace with partition on the job date
 	cfg = BigQueryLoadConfig{Mode: "replace", PartitionBy: "metadata_job_date", Metadata: []string{"job_date"}}
 	meta, _ = cfg.metaColumns(now, false, "gs://b/x.ndjson")
-	sc, _ = loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tgt, meta)
+	sc, _ = loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tgt, meta, nil)
 	if !strings.Contains(sc, "CREATE OR REPLACE TABLE `p.d.orders`\nPARTITION BY `metadata_job_date` AS") {
 		t.Fatalf("replace:\n%s", sc)
 	}
@@ -77,7 +77,7 @@ func TestLoadScriptModes(t *testing.T) {
 		{MetadataNames: map[string]string{"path": "status"}},
 	} {
 		meta, _ := c.metaColumns(now, true, "")
-		if _, err := loadScript(ctx, c, "p.s.ext", "p.d.orders", src, tgt, meta); err == nil {
+		if _, err := loadScript(ctx, c, "p.s.ext", "p.d.orders", src, tgt, meta, nil); err == nil {
 			t.Fatalf("expected an error for %+v", c)
 		}
 	}
@@ -132,5 +132,57 @@ func TestLoadTableRun(t *testing.T) {
 	v, _ := rs.XComPull("load", "return_value")
 	if m := v.(map[string]any); m["table"] != "prj.dw.orders" || m["mode"] != "append" {
 		t.Fatalf("output: %v", v)
+	}
+}
+
+func TestLoadColumnMap(t *testing.T) {
+	ctx := loadCtx(t)
+	src := tableInfo{exists: true, cols: []bqCol{{"order_id", "STRING"}, {"amount", "STRING"}, {"tgl", "STRING"}, {"paid", "STRING"}}}
+	cfg := BigQueryLoadConfig{Mode: "merge", MergeKeys: []string{"id"}, Metadata: []string{"none"}, PartitionBy: "order_date",
+		ColumnMap: map[string]ColumnSpec{
+			"order_id": {Name: "id"},
+			"amount":   {Name: "total", Cast: "numeric"},
+			"tgl":      {Name: "order_date", Cast: "my-proj.utils.to_date({col})"},
+			"paid":     {Cast: "my-proj.utils.to_bool"},
+		}}
+	var dryQ string
+	dry := func(q string) (map[string]string, error) {
+		dryQ = q
+		return map[string]string{"id": "STRING", "total": "NUMERIC", "order_date": "DATE", "paid": "BOOL"}, nil
+	}
+	tgt := tableInfo{exists: true, cols: []bqCol{{"id", "STRING"}, {"total", "NUMERIC"}}}
+	sc, err := loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tgt, nil, dry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"`order_id` AS `id`", "SAFE_CAST(`amount` AS NUMERIC) AS `total`",
+		"(my-proj.utils.to_date(`tgl`)) AS `order_date`", "my-proj.utils.to_bool(`paid`) AS `paid`",
+		"ADD COLUMN IF NOT EXISTS `order_date` DATE;", "ADD COLUMN IF NOT EXISTS `paid` BOOL;",
+		"PARTITION BY `id`) = 1", "ON T.`id` = S.`id`"} {
+		if !strings.Contains(sc, want) {
+			t.Fatalf("missing %q in:\n%s", want, sc)
+		}
+	}
+	if !strings.Contains(dryQ, "SELECT `order_id` AS `id`") {
+		t.Fatalf("dry run query: %s", dryQ)
+	}
+	cfg.CastMode = "strict"
+	sc, _ = loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tgt, nil, dry)
+	if !strings.Contains(sc, "CAST(`amount` AS NUMERIC)") || strings.Contains(sc, "SAFE_CAST") {
+		t.Fatalf("strict:\n%s", sc)
+	}
+	// without types from a dry run, a new column converted by an expression can't be added
+	cfg.CastMode = ""
+	if _, err := loadScript(ctx, cfg, "p.s.ext", "p.d.orders", src, tgt, nil, nil); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("unknown type: %v", err)
+	}
+	for _, bad := range []map[string]ColumnSpec{
+		{"nope": {Name: "x"}},
+		{"amount": {Name: "order_id"}},
+	} {
+		c := BigQueryLoadConfig{Metadata: []string{"none"}, ColumnMap: bad}
+		if _, err := loadScript(ctx, c, "p.s.ext", "p.d.orders", src, tableInfo{}, nil, dry); err == nil {
+			t.Fatalf("expected an error for %v", bad)
+		}
 	}
 }

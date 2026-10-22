@@ -538,11 +538,17 @@ Then load it into a real table, with metadata columns (all inside BigQuery, no r
     inserted_at: utc                   # utc (TIMESTAMP, default) | local (DATETIME)
     job_date: local                    # local (default) | utc
     timezone: Asia/Jakarta             # "local"; default: the server's time zone
+    column_map:                        # optional, per source column: new name and/or conversion
+      order_id: {name: id}
+      amount: {name: total, cast: NUMERIC}                 # a BigQuery type
+      tgl: {name: order_date, cast: "my_project.utils.to_date({col})"}   # your own SQL; {col} = the column
+      paid: {cast: my_project.utils.to_bool}               # a bare function gets the column as argument
+    cast_mode: safe                    # safe (default): SAFE_CAST, bad values become NULL | strict: CAST, fails
     partition_by: metaingest_job_date  # optional DATE / DATETIME / TIMESTAMP column; cluster_by: [...]
     upstream: [ext]                    # the external table (or set source_table: dataset.table)
 ```
 
-The metadata columns: `path` is the `gs://` file each row came from (`_FILE_NAME` of the external table), `inserted_at` the load time, `job_id` the load time as an integer (`20261021191023`, local time), `job_date` the load date. The source columns are read from `INFORMATION_SCHEMA`, so they follow the data: a column that appears later is added to the table (`ADD COLUMN IF NOT EXISTS`) before the insert or merge. Condition ops: `= != > >= < <= contains not_contains in not_in is_null not_null is_empty not_empty`; `> >= < <=` compare as numbers when the value is a number, else as text. A merge keeps one source row per key (duplicates in the source would make MERGE fail). In the builder the merge keys, the condition columns and the partition column are picked from the columns of the data. Tested against a fake BigQuery, not yet a real one.
+The metadata columns: `path` is the `gs://` file each row came from (`_FILE_NAME` of the external table), `inserted_at` the load time, `job_id` the load time as an integer (`20261021191023`, local time), `job_date` the load date. The source columns are read from `INFORMATION_SCHEMA`, so they follow the data: a column that appears later is added to the table (`ADD COLUMN IF NOT EXISTS`) before the insert or merge. Condition ops: `= != > >= < <= contains not_contains in not_in is_null not_null is_empty not_empty`; `> >= < <=` compare as numbers when the value is a number, else as text. Merge keys, `partition_by` and `cluster_by` use the names after `column_map`; conditions use the source names. The type of a column converted with your own SQL comes from a BigQuery dry run of the query, which also checks the SQL before anything is written. A merge keeps one source row per key (duplicates in the source would make MERGE fail). In the builder the merge keys, the condition columns and the partition column are picked from the columns of the data. Tested against a fake BigQuery, not yet a real one.
 
 BigQuery and Google Sheets as source or destination (plain REST, no extra dependencies):
 
