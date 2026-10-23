@@ -215,7 +215,7 @@ async function listView() {
   $app.onclick = async e => {
     const b = e.target.closest("[data-bld-del]"); if (!b) return;
     const id = b.dataset.bldDel;
-    if (!confirm(`Delete workflow "${id}"? Its run history is kept.`)) return;
+    if (!(await confirmDlg(`Delete workflow "${id}"? Its run history is kept.`, { title: "Delete workflow", confirm: "Delete", danger: true }))) return;
     try { await api(`/builder/workflows/${enc(id)}`, { method: "DELETE" }); toast("Deleted " + id); listView(); } catch (x) { toast(x.message); }
   };
 }
@@ -237,7 +237,7 @@ async function editorView(id, isNew) {
   }
   if (can("connections.read")) { try { B.conns = (await api("/connections")).connections?.map(c => c.conn_id) || []; } catch { /* optional */ } }
   try { B.files = (await api("/builder/files")).files || []; } catch { /* optional */ }
-  window.builderGuard = () => !B || !B.dirty || confirm("You have unsaved changes in the builder. Leave without saving?");
+  window.builderGuard = () => !B || !B.dirty || B.leaving || confirmDlg("You have unsaved changes in the builder. Leave without saving?", { title: "Unsaved changes", confirm: "Leave", danger: true }).then(ok => { if (ok && B) B.leaving = true; return ok; });
   document.addEventListener("keydown", onKey);
   window.addEventListener("resize", onResize);
   window.addEventListener("beforeunload", onUnload);
@@ -1006,7 +1006,7 @@ function downstreamIds(id) { const out = new Set(), st = [id]; while (st.length)
 function stalePreview(id) { if (!B.prev) return; delete B.prev[id]; downstreamIds(id).forEach(d => delete B.prev[d]); }
 async function runNode(id) {
   const n = node(id); if (!n || B.ro) return;
-  if (DEST.has(n.type) && !confirm(`${id} writes or changes data outside dagsflow. Run it now?`)) return;
+  if (DEST.has(n.type) && !(await confirmDlg(`${id} writes or changes data outside dagsflow. Run it now?`, { title: "Run this node?", confirm: "Run" }))) return;
   B.prev = B.prev || {};
   const outputs = {};
   for (const [k, p] of Object.entries(B.prev)) if (k !== id && p.res?.status === "success" && p.res.full_output !== undefined) outputs[k] = p.res.full_output;
@@ -1054,11 +1054,11 @@ async function runAction(kind, state) {
       const r = await api(`${base}/clear`, { method: "POST", body: JSON.stringify(body) });
       toast(r.cleared?.length ? `Cleared ${r.cleared.join(", ")}: they will run again` : "Nothing to clear");
     } else if (kind === "mark") {
-      if (state === "failed" && !confirm(`Mark ${id} as failed?`)) return;
+      if (state === "failed" && !(await confirmDlg(`Mark ${id} as failed?`, { title: "Mark failed", confirm: "Mark failed", danger: true }))) return;
       const r = await api(`${base}/taskInstances/${enc(id)}/mark`, { method: "POST", body: JSON.stringify({ new_state: state, include_upstream: !!o.up, include_downstream: !!o.down }) });
       toast(r?.queued ? `Marking ${id} ${state} (queued, the scheduler applies it)` : `${id} marked ${state}`);
     } else if (kind === "markrun") {
-      if (!confirm(`Mark the whole run ${state}?`)) return;
+      if (!(await confirmDlg(`Mark the whole run ${state}?`, { title: `Mark run ${state}`, confirm: `Mark ${state}`, danger: state === "failed" }))) return;
       await api(`${base}/mark`, { method: "POST", body: JSON.stringify({ new_state: state }) });
       toast(`Run marked ${state}`);
     }
@@ -1423,7 +1423,7 @@ async function saveAndRun() {
   if (B.dirty || B.isNew) { if (!(await save())) return; }
   const id = B.graph.dag_id, st = $("#bst");
   if (B.paused) {
-    if (!confirm("This workflow is paused, so a manual run would only wait in the queue.\n\nTurn it on and run now?")) return;
+    if (!(await confirmDlg("This workflow is paused, so a manual run would only wait in the queue.\n\nTurn it on and run now?", { title: "Workflow is paused", confirm: "Turn on and run" }))) return;
     try { await api(`/dags/${enc(id)}`, { method: "PATCH", body: JSON.stringify({ is_paused: false }) }); B.paused = false; } catch (x) { return toast(x.message); }
   }
   st.textContent = "Deploying to the scheduler…";

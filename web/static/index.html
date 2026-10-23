@@ -288,6 +288,7 @@ h3{font-size:13px;margin:18px 0 8px}
 
 dialog{border:1px solid var(--rule);border-radius:8px;padding:0;width:min(520px,94vw)}
 dialog::backdrop{background:rgba(22,32,42,.35)}
+dialog.cfm{width:min(440px,94vw)}dialog.cfm h2{font-size:17px}dialog.cfm .dlgBody p{margin:0 0 6px;white-space:pre-line}
 dialog form{padding:20px}
 dialog h2{margin:0 0 12px;font-size:17px}
 dialog label{display:block;font-size:13px;margin:12px 0 4px;color:var(--muted)}
@@ -408,6 +409,7 @@ td .toggle{margin-left:4px}
   </form>
 </dialog>
 <dialog id="actDlg"></dialog>
+<dialog id="cfmDlg" class="cfm"></dialog>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -1107,6 +1109,19 @@ function durationTab(d, sel){
 }
 
 // ---- actions: clear / mark / filter / reparse -----------------------------------------
+// confirmDlg: the app's own confirm dialog (never the browser's). Resolves true / false.
+function confirmDlg(message, {title="Are you sure?", confirm="Confirm", danger=false, cancel="Cancel"}={}){
+  const dlg = document.getElementById("cfmDlg");
+  return new Promise(resolve => {
+    dlg.innerHTML = `<form method="dialog"><h2>${esc(title)}</h2><div class="dlgBody"><p>${esc(message)}</p></div>
+      <div class="row"><button class="btn" value="cancel">${esc(cancel)}</button><button class="btn ${danger?"dangerFill":"primary"}" value="ok" autofocus>${esc(confirm)}</button></div></form>`;
+    dlg.onclose = () => resolve(dlg.returnValue === "ok");
+    dlg.returnValue = "";
+    dlg.showModal();
+    dlg.querySelector('[value="ok"]').focus();
+  });
+}
+window.confirmDlg = confirmDlg;
 function openActDlg({title, body, confirm, danger, onConfirm, wide}){
   const dlg = document.getElementById("actDlg");
   dlg.classList.toggle("wide", !!wide);
@@ -1292,12 +1307,12 @@ async function adminAction(b){
   try{
     switch(b.dataset.admin){
       case "setpool": await post(`/pools/${enc(v("poolName"))}`, {slots:+v("poolSlots"), description:v("poolDesc")}, "PUT"); toast("Pool saved"); break;
-      case "delpool": if(!confirm(`Delete pool ${b.dataset.k}?`)) return; await api(`/pools/${enc(b.dataset.k)}`, {method:"DELETE"}); toast("Pool deleted"); break;
+      case "delpool": if(!await confirmDlg(`Delete pool ${b.dataset.k}?`, {title:"Delete pool", confirm:"Delete", danger:true})) return; await api(`/pools/${enc(b.dataset.k)}`, {method:"DELETE"}); toast("Pool deleted"); break;
       case "setvar": await post(`/variables/${enc(v("varKey"))}`, {value:document.getElementById("varVal").value, description:v("varDesc")}, "PUT"); toast("Variable saved"); break;
-      case "delvar": if(!confirm(`Delete variable ${b.dataset.k}?`)) return; await api(`/variables/${enc(b.dataset.k)}`, {method:"DELETE"}); toast("Variable deleted"); break;
+      case "delvar": if(!await confirmDlg(`Delete variable ${b.dataset.k}?`, {title:"Delete variable", confirm:"Delete", danger:true})) return; await api(`/variables/${enc(b.dataset.k)}`, {method:"DELETE"}); toast("Variable deleted"); break;
       case "setconn": { let cfg; try{ cfg = JSON.parse(v("connCfg")||"{}"); }catch{ toast("Config must be a JSON object"); return; }
         await post(`/connections/${enc(v("connId"))}`, {conn_type:v("connType"), config:cfg}, "PUT"); toast("Connection saved"); break; }
-      case "delconn": if(!confirm(`Delete connection ${b.dataset.k}?`)) return; await api(`/connections/${enc(b.dataset.k)}`, {method:"DELETE"}); toast("Connection deleted"); break;
+      case "delconn": if(!await confirmDlg(`Delete connection ${b.dataset.k}?`, {title:"Delete connection", confirm:"Delete", danger:true})) return; await api(`/connections/${enc(b.dataset.k)}`, {method:"DELETE"}); toast("Connection deleted"); break;
     }
     render();
   }catch(e){ toast(e.message); }
@@ -1585,7 +1600,7 @@ document.addEventListener("click", async e=>{
     catch(x){ toast(x.message); rp.disabled = false; } return; }
   const del = e.target.closest("[data-deldag]");
   if(del){ const id=del.dataset.deldag;
-    if(!confirm(`Delete all runs, task instances and logs of ${id}? The DAG definition stays and will show up again with no history.`)) return;
+    if(!await confirmDlg(`Delete all runs, task instances and logs of ${id}? The DAG definition stays and will show up again with no history.`, {title:"Delete DAG history", confirm:"Delete", danger:true})) return;
     try{ await api(`/dags/${enc(id)}`, {method:"DELETE"}); toast(`Deleted metadata of ${id}`); render(); }catch(x){ toast(x.message); } return; }
   const t = e.target.closest("[data-pause],[data-trigger],[data-admin]"); if(!t) return;
   if(t.dataset.admin){ adminAction(t); return; }
@@ -1620,7 +1635,12 @@ function refreshLoop(){ // live refresh, paused while the user is in a dialog or
     const y = scrollY; render().then(()=>scrollTo(0,y)); health(); }, 4000);
 }
 let lastPath = location.hash.split("?")[0];
-window.addEventListener("hashchange", ev=>{ if(window.builderGuard && !window.builderGuard()){ history.replaceState(null,"",ev.oldURL); return; }
+window.addEventListener("hashchange", ev=>{
+  const g = window.builderGuard && window.builderGuard();
+  if(g === false){ history.replaceState(null,"",ev.oldURL); return; }
+  if(g && typeof g.then === "function"){ // unsaved builder changes: ask, stay meanwhile
+    const to = location.hash; history.replaceState(null,"",ev.oldURL);
+    g.then(ok => { if(ok) location.hash = to; }); return; }
   const p = location.hash.split("?")[0]; if(p!==lastPath) scrollTo(0,0); lastPath = p; render(); });
 async function whoami(){ Object.assign(ME, await api("/me"));
   const all = ME.permissions.includes("*");
