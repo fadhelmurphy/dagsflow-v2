@@ -437,6 +437,47 @@ func (s *Store) ListRunsByState(dagID string, states ...string) ([]*DagRun, erro
 	return out, nil
 }
 
+// runSummarizer is implemented by backends that can count runs and read the
+// latest ones without loading every run (Postgres).
+type runSummarizer interface {
+	runCounts(dagID string) (map[string]int, error)
+	latestRuns(dagID string, n int) ([]*DagRun, error)
+}
+
+// RunSummary returns the number of runs per state and the n latest runs
+// (oldest first): what the DAG list shows, without reading every run.
+func (s *Store) RunSummary(dagID string, n int) (map[string]int, []*DagRun, error) {
+	if rs, ok := s.be().(runSummarizer); ok {
+		counts, err := rs.runCounts(dagID)
+		if err != nil {
+			return nil, nil, err
+		}
+		latest, err := rs.latestRuns(dagID, n)
+		if err != nil {
+			return nil, nil, err
+		}
+		sort.Slice(latest, func(i, j int) bool {
+			if latest[i].LogicalDate.Equal(latest[j].LogicalDate) {
+				return latest[i].QueuedAt.Before(latest[j].QueuedAt)
+			}
+			return latest[i].LogicalDate.Before(latest[j].LogicalDate)
+		})
+		return counts, latest, nil
+	}
+	runs, err := s.ListRuns(dagID)
+	if err != nil {
+		return nil, nil, err
+	}
+	counts := map[string]int{}
+	for _, r := range runs {
+		counts[r.State]++
+	}
+	if n > 0 && len(runs) > n {
+		runs = runs[len(runs)-n:]
+	}
+	return counts, runs, nil
+}
+
 // ClaimRun atomically moves a queued run to running, owned by this process,
 // unless the DAG already has maxActive running runs (across all schedulers).
 // Returns nil when the run was not claimed.

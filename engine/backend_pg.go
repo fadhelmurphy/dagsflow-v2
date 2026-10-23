@@ -113,6 +113,8 @@ var migrations = []string{
 		created_at timestamptz NOT NULL DEFAULT now(), started_at timestamptz, ended_at timestamptz, heartbeat_at timestamptz);
 	CREATE INDEX task_job_queue_idx ON task_job (state, queue, id);
 	CREATE INDEX task_job_run_idx ON task_job (dag_id, run_id);`,
+	// 2: the DAG list reads the latest runs of each DAG
+	`CREATE INDEX IF NOT EXISTS dag_run_latest_idx ON dag_run (dag_id, logical_date DESC, queued_at DESC);`,
 }
 
 // SchemaVersion is the schema this binary expects.
@@ -276,6 +278,48 @@ func (p *pgBackend) listRuns(dagID string, states []string) ([]*DagRun, error) {
 		states = []string{}
 	}
 	rows, err := p.pool.Query(ctx, `SELECT doc, version FROM dag_run WHERE dag_id=$1 AND (cardinality($2::text[]) = 0 OR state = ANY($2))`, dagID, states)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*DagRun
+	for rows.Next() {
+		var doc []byte
+		var ver int64
+		if err := rows.Scan(&doc, &ver); err != nil {
+			return nil, err
+		}
+		if r, err := decodeRun(doc, ver); err == nil {
+			out = append(out, r)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (p *pgBackend) runCounts(dagID string) (map[string]int, error) {
+	ctx, cancel := pgctx()
+	defer cancel()
+	rows, err := p.pool.Query(ctx, `SELECT state, count(*) FROM dag_run WHERE dag_id=$1 GROUP BY state`, dagID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var st string
+		var n int
+		if err := rows.Scan(&st, &n); err != nil {
+			return nil, err
+		}
+		out[st] = n
+	}
+	return out, rows.Err()
+}
+
+func (p *pgBackend) latestRuns(dagID string, n int) ([]*DagRun, error) {
+	ctx, cancel := pgctx()
+	defer cancel()
+	rows, err := p.pool.Query(ctx, `SELECT doc, version FROM dag_run WHERE dag_id=$1 ORDER BY logical_date DESC, queued_at DESC LIMIT $2`, dagID, n)
 	if err != nil {
 		return nil, err
 	}

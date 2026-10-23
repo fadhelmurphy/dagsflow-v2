@@ -560,20 +560,18 @@ func (s *Server) listDags(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		m := s.Store.GetDagMeta(d.ID)
-		runs, _ := s.Store.ListRuns(d.ID)
+		counts, runs, _ := s.Store.RunSummary(d.ID, 14) // counts + the latest runs only: the list refreshes every few seconds
 		it := item{DagID: d.ID, Owner: d.Owner(), Schedule: scheduleLabel(d), Description: d.Description, Tags: d.Tags,
 			Source: d.Source, IsPaused: m.IsPaused, Next: m.NextDataIntervalStart, Recent: []runSummary{},
 			RunCounts: map[string]int{}, TaskCounts: map[string]int{}, Perms: a.DagPermissions(d.ID)}
 		if it.Tags == nil {
 			it.Tags = []string{}
 		}
-		for _, run := range runs {
-			it.RunCounts[run.State]++
-			if run.State == engine.RunQueued || run.State == engine.RunRunning {
-				it.Active++
-			}
+		for st, n := range counts {
+			it.RunCounts[st] = n
 		}
-		for _, run := range lastN(runs, 14) {
+		it.Active = counts[engine.RunQueued] + counts[engine.RunRunning]
+		for _, run := range runs {
 			it.Recent = append(it.Recent, summarize(run, false))
 		}
 		if len(runs) > 0 {
