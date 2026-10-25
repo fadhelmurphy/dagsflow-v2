@@ -115,6 +115,9 @@ var migrations = []string{
 	CREATE INDEX task_job_run_idx ON task_job (dag_id, run_id);`,
 	// 2: the DAG list reads the latest runs of each DAG
 	`CREATE INDEX IF NOT EXISTS dag_run_latest_idx ON dag_run (dag_id, logical_date DESC, queued_at DESC);`,
+	// 3: large XCom values live outside the run row (lists of runs stay small)
+	`CREATE TABLE IF NOT EXISTS xcom_blob (dag_id text NOT NULL, run_id text NOT NULL, slot text NOT NULL, key text NOT NULL,
+		data jsonb NOT NULL, PRIMARY KEY (dag_id, run_id, slot, key));`,
 }
 
 // SchemaVersion is the schema this binary expects.
@@ -172,15 +175,13 @@ func (p *pgBackend) schemaVersion() (int, error) {
 
 func leaseInterval() string { return fmt.Sprintf("%d seconds", int(runLease.Seconds())) }
 
-func runCols(r *DagRun) ([]byte, error) { return json.Marshal(r) }
-
 func (p *pgBackend) saveRun(r *DagRun, me string) error {
-	doc, err := runCols(r)
+	ctx, cancel := pgctx()
+	defer cancel()
+	doc, err := p.encodeRun(ctx, r)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := pgctx()
-	defer cancel()
 	var ver int64
 	switch {
 	case r.owned:
@@ -243,7 +244,11 @@ func (p *pgBackend) loadRun(dagID, runID string) (*DagRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	return decodeRun(doc, ver)
+	r, err := decodeRun(doc, ver)
+	if err != nil {
+		return nil, err
+	}
+	return r, p.resolveXCom(ctx, r)
 }
 
 func (p *pgBackend) runExists(dagID, runID string) bool {
@@ -268,6 +273,7 @@ func (p *pgBackend) deleteRun(dagID, runID string) error {
 	}
 	_, _ = p.pool.Exec(ctx, `DELETE FROM run_command WHERE dag_id=$1 AND run_id=$2`, dagID, runID)
 	_, _ = p.pool.Exec(ctx, `DELETE FROM task_job WHERE dag_id=$1 AND run_id=$2 AND state NOT IN ('queued','running')`, dagID, runID)
+	_, _ = p.pool.Exec(ctx, `DELETE FROM xcom_blob WHERE dag_id=$1 AND run_id=$2`, dagID, runID)
 	return p.deleteLogs(dagID, runID)
 }
 
@@ -378,18 +384,18 @@ func (p *pgBackend) claimRun(dagID, runID, me string, maxActive int) (*DagRun, e
 		return nil, err
 	}
 	r.owned = true
-	return r, nil
+	return r, p.resolveXCom(ctx, r)
 }
 
 func (p *pgBackend) takeOwnership(r *DagRun, me string) error {
 	prev := r.State
 	r.State = RunRunning
-	doc, err := runCols(r)
+	ctx, cancel := pgctx()
+	defer cancel()
+	doc, err := p.encodeRun(ctx, r)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := pgctx()
-	defer cancel()
 	var ver int64
 	if r.version == 0 {
 		err = p.pool.QueryRow(ctx, `INSERT INTO dag_run (dag_id, run_id, state, run_type, logical_date, queued_at, end_date, doc, owner, lease_until)
@@ -472,6 +478,7 @@ func (p *pgBackend) deleteDagData(dagID string) error {
 		`DELETE FROM dag_run WHERE dag_id=$1`, `DELETE FROM dag_meta WHERE dag_id=$1`,
 		`DELETE FROM task_log WHERE dag_id=$1`, `DELETE FROM run_command WHERE dag_id=$1`,
 		`DELETE FROM task_job WHERE dag_id=$1 AND state NOT IN ('queued','running')`,
+		`DELETE FROM xcom_blob WHERE dag_id=$1`,
 	} {
 		if _, err := p.pool.Exec(ctx, q, dagID); err != nil {
 			return err
@@ -1066,5 +1073,6 @@ func (p *pgBackend) cleanup(before time.Time) (CleanupStats, error) {
 	}
 	st.Jobs = int(tag.RowsAffected())
 	_, _ = p.pool.Exec(ctx, `DELETE FROM run_command c WHERE NOT EXISTS (SELECT 1 FROM dag_run r WHERE r.dag_id = c.dag_id AND r.run_id = c.run_id)`)
+	_, _ = p.pool.Exec(ctx, `DELETE FROM xcom_blob b WHERE NOT EXISTS (SELECT 1 FROM dag_run r WHERE r.dag_id = b.dag_id AND r.run_id = b.run_id)`)
 	return st, nil
 }

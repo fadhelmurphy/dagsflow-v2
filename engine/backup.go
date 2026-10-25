@@ -44,6 +44,11 @@ func (s *Store) Export(auditLimit int) (*Backup, error) {
 		if err != nil {
 			return nil, fmt.Errorf("runs of %s: %w", id, err)
 		}
+		for _, r := range runs { // a backup holds the values, not references to them
+			if err := s.ResolveXCom(r); err != nil {
+				return nil, fmt.Errorf("xcom of %s/%s: %w", id, r.RunID, err)
+			}
+		}
 		b.Runs = append(b.Runs, runs...)
 	}
 	ev, err := s.AuditEvents("", "", "", auditLimit)

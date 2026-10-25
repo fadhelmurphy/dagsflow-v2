@@ -128,8 +128,9 @@ type DagRun struct {
 	Rendered map[string]map[string]string `json:"rendered_fields,omitempty"`
 	Note     string                       `json:"note,omitempty"`
 
-	version int64 // row version when loaded (Postgres optimistic concurrency)
-	owned   bool  // executed by this process
+	version int64             // row version when loaded (Postgres optimistic concurrency)
+	owned   bool              // executed by this process
+	blobs   map[string]string // Postgres: XComs kept outside the run row, slot+key -> checksum of what is stored
 }
 
 type SLAMiss struct {

@@ -820,6 +820,7 @@ dagsflow-go webserver --addr 0.0.0.0:8080   # several replicas behind a load bal
 - Set `DAGSFLOW_FERNET_KEY` (encrypted variables/connections) and `DAGSFLOW_SECRET_KEY` (the same on every webserver replica). If `SECRET_KEY` is empty, a key is generated once and stored in the metadata database.
 
 **Operations**
+- Large XComs: with Postgres, an XCom value larger than 64 KB (`DAGSFLOW_XCOM_INLINE_BYTES`) is stored in its own table (`xcom_blob`) instead of inside the run row, so listing runs (the DAG list, the grid, scheduler scans) stays fast even when tasks pass big row sets. Loading a run (to execute it, or in the run details and XCom tab) brings the values back; backups include them.
 - Retention: `--retention-days 90` / `DAGSFLOW_RETENTION_DAYS` (run by the leader every hour), or manually `dagsflow-go db clean --older-than 90d --yes`.
 - Backup/restore: `dagsflow-go db export -f backup.json` / `db import -f backup.json`. To move from JSON files to Postgres, run `db export` without `DAGSFLOW_DATABASE_URL`, then `db import` with it set. Task logs are not exported. For regular Postgres backups use `pg_dump` / managed database snapshots.
 - Upgrades: the schema is migrated automatically on start, under a lock so several processes starting together are safe. An older binary refuses to run against a newer schema. Rolling restarts of schedulers are safe (see HA above).

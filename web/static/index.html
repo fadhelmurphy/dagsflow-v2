@@ -1095,8 +1095,17 @@ function xcomTab(run, sel){
   const x = run.xcom?.[slot] || {};
   const keys = Object.keys(x);
   if(!keys.length) return `<div class="empty">No XComs pushed by this task instance.</div>`;
+  const big = v => v && typeof v==="object" && !Array.isArray(v) && "$xcom_ref" in v;
+  const mb = n => n >= 1<<20 ? `${(n/(1<<20)).toFixed(1)} MB` : `${Math.round(n/1024)} KB`;
+  const cell = k => {
+    const v = x[k];
+    if(!big(v)) return `<pre class="json inline">${esc(typeof v==="string" ? v : JSON.stringify(v,null,2))}</pre>`;
+    const href = `/api/v1/dags/${enc(current.dag_id)}/dagRuns/${enc(run.dag_run_id||run.run_id)}/xcom?slot=${enc(slot)}&key=${enc(k)}`;
+    return `<div class="sub" style="margin-bottom:6px">Large value: ${mb(v["$xcom_ref"])}${v.rows!=null?` · ${v.rows.toLocaleString()} rows`:""}${v.sample?` · first ${v.sample.length} shown`:""}.
+      <a href="${href}&download=1">Download the full value (JSON)</a></div>${v.sample?`<pre class="json inline">${esc(JSON.stringify(v.sample,null,2))}</pre>`:""}`;
+  };
   return `<table class="tbl"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>${keys.sort().map(k=>
-    `<tr><td><code>${esc(k)}</code></td><td><pre class="json inline">${esc(typeof x[k]==="string" ? x[k] : JSON.stringify(x[k],null,2))}</pre></td></tr>`).join("")}</tbody></table>`;
+    `<tr><td><code>${esc(k)}</code></td><td>${cell(k)}</td></tr>`).join("")}</tbody></table>`;
 }
 
 // ---- tab: task duration --------------------------------------------------------------

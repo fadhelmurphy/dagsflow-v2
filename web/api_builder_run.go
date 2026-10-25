@@ -245,6 +245,7 @@ func (s *Server) latestXCom(dagID string) map[string]map[string]any {
 	if best == nil {
 		return nil
 	}
+	_ = s.Store.ResolveXCom(best)
 	return best.XCom
 }
 

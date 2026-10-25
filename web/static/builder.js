@@ -783,7 +783,7 @@ const rowsOf = v => Array.isArray(v) && v.length && v.every(isObj) ? v : null;
 function outOf(id) { // [rows output, extra xcom] of a node, from the preview or else the last run
   const p = B.prev?.[id]?.res, x = B.run?.xcom?.[id];
   if (p?.status === "success" && (p.full_output !== undefined || p.output !== undefined)) return [p.full_output ?? p.output, p.xcom || {}];
-  if (x) return [x.return_value, x];
+  if (x) { const v = x.return_value; return [v && typeof v === "object" && "$xcom_ref" in v ? v.sample : v, x]; } // large values come as a preview
   return [undefined, {}];
 }
 const keysOf = rows => [...new Set((rows || []).slice(0, 500).flatMap(o => Object.keys(o)))];
@@ -1025,9 +1025,11 @@ async function runNode(id) {
 function nodeRunHtml(n) {
   const ti = B.run?.tis?.[n.id]; if (!ti) return "";
   const x = B.run.xcom?.[n.id] || {};
-  const rv = x.return_value;
+  let rv = x.return_value;
+  const big = rv && typeof rv === "object" && "$xcom_ref" in rv;
+  if (big) rv = rv.sample ?? `(${Math.round(rv["$xcom_ref"] / 1024)} KB, not shown)`;
   let out = rv === undefined ? "" : typeof rv === "string" ? rv : JSON.stringify(rv, null, 2);
-  const rows = Array.isArray(rv) ? rv.length : null;
+  const rows = big ? x.return_value.rows ?? null : Array.isArray(rv) ? rv.length : null;
   if (out.length > 6000) out = out.slice(0, 6000) + "\n… (truncated)";
   const mapped = B.run.mapped?.[n.id];
   return `<details open><summary>Last run: ${esc(ti.state || "none")}</summary>

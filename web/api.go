@@ -95,6 +95,7 @@ func (s *Server) Handler() http.Handler {
 		{"GET /api/v1/dags/{dag}/dagRuns", engine.ActDagRead, s.listRuns},
 		{"POST /api/v1/dags/{dag}/dagRuns", engine.ActDagTrigger, s.trigger},
 		{"GET /api/v1/dags/{dag}/dagRuns/{run}", engine.ActDagRead, s.getRun},
+		{"GET /api/v1/dags/{dag}/dagRuns/{run}/xcom", engine.ActDagRead, s.getXComValue},
 		{"DELETE /api/v1/dags/{dag}/dagRuns/{run}", engine.ActDagDelete, s.deleteRun},
 		{"POST /api/v1/dags/{dag}/dagRuns/{run}/clear", engine.ActDagEdit, s.clear},
 		{"GET /api/v1/dags/{dag}/dagRuns/{run}/taskInstances", engine.ActDagRead, s.listTIs},
@@ -806,10 +807,65 @@ func (s *Server) trigger(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, summarize(run, false))
 }
 
+// getRun returns the run. Large XCom values are replaced by a preview
+// ({"$xcom_ref": bytes, "rows": n, "sample": [first rows]}): the page polls this
+// every few seconds. ?xcom=full returns them whole; /xcom returns one value.
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
-	if _, run, ok := s.runOr404(w, r); ok {
-		writeJSON(w, 200, run)
+	_, run, ok := s.runOr404(w, r)
+	if !ok {
+		return
 	}
+	if r.URL.Query().Get("xcom") != "full" && len(run.XCom) > 0 {
+		cp := *run
+		cp.XCom = make(map[string]map[string]any, len(run.XCom))
+		for slot, kv := range run.XCom {
+			m := make(map[string]any, len(kv))
+			for k, v := range kv {
+				m[k] = xcomPreview(v)
+			}
+			cp.XCom[slot] = m
+		}
+		run = &cp
+	}
+	writeJSON(w, 200, run)
+}
+
+// xcomPreviewBytes: XCom values larger than this are previewed in run details.
+const xcomPreviewBytes = 64 << 10
+
+func xcomPreview(v any) any {
+	if engine.IsXComRef(v) {
+		return v
+	}
+	b, err := json.Marshal(v)
+	if err != nil || len(b) <= xcomPreviewBytes {
+		return v
+	}
+	out := map[string]any{"$xcom_ref": len(b)}
+	if list, ok := v.([]any); ok {
+		out["rows"] = len(list)
+		n := min(len(list), 50)
+		out["sample"] = list[:n]
+	}
+	return out
+}
+
+// getXComValue returns one XCom value whole (?slot=task[#mapIndex]&key=…).
+func (s *Server) getXComValue(w http.ResponseWriter, r *http.Request) {
+	_, run, ok := s.runOr404(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	v, found := run.XCom[q.Get("slot")][firstNonEmpty(q.Get("key"), "return_value")]
+	if !found {
+		fail(w, 404, "no XCom %q for %s", firstNonEmpty(q.Get("key"), "return_value"), q.Get("slot"))
+		return
+	}
+	if q.Get("download") == "1" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("%s_%s_%s.json", run.RunID, q.Get("slot"), firstNonEmpty(q.Get("key"), "return_value"))))
+	}
+	writeJSON(w, 200, v)
 }
 
 func (s *Server) deleteRun(w http.ResponseWriter, r *http.Request) {
