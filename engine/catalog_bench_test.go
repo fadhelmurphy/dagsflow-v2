@@ -58,7 +58,7 @@ func catalogScale(t *testing.T, st *Store) {
 			es = append(es, map[string]any{"from": tables[k].ID, "from_col": "column_01", "to": fmt.Sprintf("bigquery:p.mart.t%d", i%5), "to_col": "a"})
 		}
 		v["edges"] = es
-		must(st.RecordTaskLineage("d", "t", v))
+		must(st.RecordTaskLineage("d", "t", v, true))
 	})
 	timeIt("column lookup for SQL (cached)", 1000, func() { st.CatalogColumnNames(tables[123].ID) })
 	timeIt("column lookup for SQL (cold)", 3, func() { st.dropCatalogCache(); st.CatalogColumnNames(tables[123].ID) })

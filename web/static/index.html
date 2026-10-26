@@ -301,7 +301,7 @@ dialog .row{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:8px 16px;border-radius:6px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
 #toast.show{opacity:1}
 .empty{padding:40px;text-align:center;color:var(--muted)}
-body:not(.can-users-manage) .needs-users-manage, body:not(.can-roles-manage) .needs-roles-manage, body:not(.can-pools-read) .needs-pools-read, body:not(.can-pools-edit) .needs-pools-edit, body:not(.can-variables-read) .needs-variables-read, body:not(.can-variables-edit) .needs-variables-edit, body:not(.can-connections-read) .needs-connections-read, body:not(.can-connections-edit) .needs-connections-edit, body:not(.can-events-read) .needs-events-read, body:not(.can-datasets-read) .needs-datasets-read, body:not(.can-system-read) .needs-system-read, body:not(.can-builder-edit) .needs-builder-edit{display:none!important}
+body:not(.can-users-manage) .needs-users-manage, body:not(.can-roles-manage) .needs-roles-manage, body:not(.can-pools-read) .needs-pools-read, body:not(.can-pools-edit) .needs-pools-edit, body:not(.can-variables-read) .needs-variables-read, body:not(.can-variables-edit) .needs-variables-edit, body:not(.can-connections-read) .needs-connections-read, body:not(.can-connections-edit) .needs-connections-edit, body:not(.can-events-read) .needs-events-read, body:not(.can-datasets-read) .needs-datasets-read, body:not(.can-catalog-read) .needs-catalog-read, body:not(.can-system-read) .needs-system-read, body:not(.can-builder-edit) .needs-builder-edit{display:none!important}
 .forbid{display:none!important}
 .adminForm{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;padding:14px;border-top:1px solid #E7EBEF}
 .adminForm label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:3px}
@@ -406,7 +406,7 @@ td .toggle{margin-left:4px}
     <a href="#/" data-nav="dags">DAGs</a>
     <a class="needs-builder-edit" href="#/builder" data-nav="builder">Builder</a>
     <a class="needs-datasets-read" href="#/admin?tab=datasets" data-nav="datasets">Datasets</a>
-    <a class="needs-datasets-read" href="#/catalog" data-nav="catalog">Catalog</a>
+    <a class="needs-catalog-read" href="#/catalog" data-nav="catalog">Catalog</a>
     <div class="dd" data-nav="security"><button type="button" aria-haspopup="true">Security</button><div class="ddm"><a class="needs-users-manage" href="#/admin?tab=users">List Users</a><a href="#/admin?tab=roles">List Roles</a></div></div>
     <div class="dd" data-nav="browse"><button type="button" aria-haspopup="true">Browse</button><div class="ddm"><a href="#/admin?tab=tis">Task Instances</a><a class="needs-events-read" href="#/admin?tab=events">Event Log</a><a class="needs-system-read" href="#/admin?tab=errors">DAG Import Errors</a></div></div>
     <div class="dd" data-nav="admin"><button type="button" aria-haspopup="true">Admin</button><div class="ddm"><a class="needs-pools-read" href="#/admin?tab=pools">Pools</a><a class="needs-variables-read" href="#/admin?tab=variables">Variables</a><a class="needs-connections-read" href="#/admin?tab=connections">Connections</a><a class="needs-system-read" href="#/admin?tab=components">Components</a></div></div>
@@ -1518,7 +1518,8 @@ async function roleForm(r, actions){
   const perms = r?.permissions || [];
   const rules = {};
   perms.filter(p=>p.action.startsWith("dag.")).forEach(p=>{ (rules[p.resource||"*"] ||= []).push(p.action); });
-  const glob = actions.filter(a=>!a.dag_scoped);
+  const glob = actions.filter(a=>!a.dag_scoped && !a.dataset_scoped);
+  const catPats = perms.filter(p=>p.action==="catalog.read").map(p=>p.resource||"*");
   const has = a => perms.some(p=>p.action===a);
   return `<div class="formgrid">
     <label for="rName">Name</label><input id="rName" value="${esc(r?.name||"")}" ${r?.name && !r.copy ? "readonly" : 'required autocomplete="off"'}>
@@ -1529,6 +1530,9 @@ async function roleForm(r, actions){
   <table class="list ruleTable"><thead><tr><th>DAGs</th>${DAG_ACTS.map(([,l])=>`<th style="text-align:center">${l}</th>`).join("")}<th></th></tr></thead>
     <tbody id="ruleBody">${Object.entries(rules).map(([res,acts])=>dagRuleRow(res,acts)).join("") || dagRuleRow("*", ["dag.read"])}</tbody></table>
   <button type="button" class="btn light" data-rule-add style="margin-top:6px">+ Add DAG rule</button>
+  <h3 class="ph" style="margin:14px 0 6px">Catalog access</h3>
+  <label for="rCat" class="sub" style="display:block;margin-bottom:4px">Datasets this role sees in the data catalog, one pattern per line (<code>*</code> = everything, empty = no catalog). <code>*</code> matches any text, e.g. <code>bigquery:my-project.mart.*</code>, <code>redshift:*</code>, <code>gsheet:*</code>. Steps between nodes follow DAG read access.</label>
+  <textarea id="rCat" rows="3" style="width:100%;min-height:0;height:76px;font-family:var(--code)" placeholder="*">${esc(catPats.join("\n"))}</textarea>
   <h3 class="ph" style="margin:14px 0 6px">Other permissions</h3>
   <div class="permGrid">${glob.map(a=>`<label class="chk" title="${esc(a.description)}"><input type="checkbox" class="gperm" value="${esc(a.action)}" ${has(a.action)?"checked":""}> <code>${esc(a.action)}</code> <span class="muted">${esc(a.description)}</span></label>`).join("")}</div>`;
 }
@@ -1539,6 +1543,7 @@ function collectRole(dlg){
     tr.querySelectorAll("input[data-pa]:checked").forEach(c=>perms.push(`${c.dataset.pa}:${res}`));
   });
   dlg.querySelectorAll(".gperm:checked").forEach(c=>perms.push(c.value));
+  (dlg.querySelector("#rCat")?.value||"").split("\n").map(x=>x.trim()).filter(Boolean).forEach(x=>perms.push("catalog.read:"+x));
   return {name: dlg.querySelector("#rName").value.trim(), description: dlg.querySelector("#rDesc").value.trim(), permissions: perms};
 }
 async function roleAction(b){
@@ -1700,10 +1705,11 @@ document.addEventListener("input", e=>{ if(!["catQ","catEng","catDropped"].inclu
     try{ const {tables} = await api(`/catalog?q=${enc(q)}`); catHits = {q, ids:new Set(tables.map(t=>t.id))}; catFilter(); }catch{}
   }, 300); });
 document.addEventListener("change", e=>{ if(["catEng","catDropped"].includes(e.target.id)) catFilter(); });
+const ago = t => { const d = (Date.now() - new Date(t)) / 864e5; return d < 1 ? "seen today" : d < 2 ? "seen yesterday" : `seen ${Math.floor(d)} days ago`; };
 function linSteps(nodes, empty){
   if(!nodes.length) return `<p class="muted" style="margin:0 0 8px">${empty}</p>`;
   const by = {}; nodes.forEach(n => (by[n.depth] = by[n.depth] || []).push(n));
-  return Object.keys(by).sort((a,b)=>a-b).map(d => `<div class="lstep"><div class="sub">${d==1?"directly":d+" steps away"}</div>${by[d].map(n=>`<div class="lnode">${dsLink(n.dataset, n.column)}${n.expr?` <code title="How the column is computed">${esc(n.expr)}</code>`:""}${n.via?` <span class="via">${viaHtml(n.via)}</span>`:""}</div>`).join("")}</div>`).join("");
+  return Object.keys(by).sort((a,b)=>a-b).map(d => `<div class="lstep"><div class="sub">${d==1?"directly":d+" steps away"}</div>${by[d].map(n=>`<div class="lnode">${dsLink(n.dataset, n.column)}${n.expr?` <code title="How the column is computed">${esc(n.expr)}</code>`:""}${n.via?` <span class="via">${viaHtml(n.via)}</span>`:""}${n.last_seen?` <span class="via" title="Last time this step was seen (lineage not seen for DAGSFLOW_CATALOG_EDGE_TTL_DAYS is hidden)">· ${ago(n.last_seen)}</span>`:""}</div>`).join("")}</div>`).join("");
 }
 async function catalogDetail(id, col){
   const [{table:t}, lin] = await Promise.all([api(`/catalog/table?id=${enc(id)}`), api(`/catalog/lineage?id=${enc(id)}&column=${enc(col)}`)]);

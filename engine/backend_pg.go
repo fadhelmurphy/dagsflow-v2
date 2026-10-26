@@ -126,6 +126,14 @@ var migrations = []string{
 	CREATE TABLE IF NOT EXISTS catalog_edge (k text PRIMARY KEY, from_id text NOT NULL, to_id text NOT NULL, doc jsonb NOT NULL);
 	CREATE INDEX IF NOT EXISTS catalog_edge_from_idx ON catalog_edge (from_id);
 	CREATE INDEX IF NOT EXISTS catalog_edge_to_idx ON catalog_edge (to_id);`,
+	// 5: catalog edges: who made them and when they were last seen (replace / expire)
+	`ALTER TABLE catalog_edge ADD COLUMN IF NOT EXISTS via text NOT NULL DEFAULT '';
+	ALTER TABLE catalog_edge ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT '';
+	ALTER TABLE catalog_edge ADD COLUMN IF NOT EXISTS last_seen timestamptz NOT NULL DEFAULT now();
+	UPDATE catalog_edge SET via = COALESCE(doc->>'via', ''), kind = COALESCE(doc->>'kind', ''),
+		last_seen = COALESCE((doc->>'last_seen')::timestamptz, now());
+	CREATE INDEX IF NOT EXISTS catalog_edge_via_idx ON catalog_edge (via);
+	CREATE INDEX IF NOT EXISTS catalog_edge_seen_idx ON catalog_edge (last_seen);`,
 }
 
 // SchemaVersion is the schema this binary expects.

@@ -2,8 +2,10 @@ package engine
 
 import (
 	"encoding/json"
+	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,13 +71,16 @@ func (e LineageEdge) key() string {
 	return e.From + "\x1f" + e.FromCol + "\x1f" + e.To + "\x1f" + e.ToCol
 }
 
-var datePart = regexp.MustCompile(`\d{4}-\d{2}-\d{2}(T\d{2}[:\-]?\d{2}[:\-]?\d{2}(\.\d+)?Z?)?|\b\d{8}(\d{4,6})?\b`)
+var (
+	datePart    = regexp.MustCompile(`\d{4}/\d{2}/\d{2}|\d{4}-\d{2}-\d{2}(T\d{2}[:\-]?\d{2}[:\-]?\d{2}(\.\d+)?Z?)?`)
+	compactDate = regexp.MustCompile(`(^|[^0-9])(?:19|20)\d{6}(?:\d{4}|\d{6})?([^0-9]|$)`)
+)
 
 // NormalizeDatasetID folds dated file names into one dataset:
 // gcs:gs://b/x/2026-10-26/a.ndjson -> gcs:gs://b/x/{date}/a.ndjson.
 func NormalizeDatasetID(id string) string {
 	if strings.HasPrefix(id, "gcs:") || strings.HasPrefix(id, "s3:") || strings.HasPrefix(id, "file:") {
-		return datePart.ReplaceAllString(id, "{date}")
+		return compactDate.ReplaceAllString(datePart.ReplaceAllString(id, "{date}"), "${1}{date}${2}")
 	}
 	return id
 }
@@ -94,6 +99,12 @@ type CatalogUpdate struct {
 	// FullScope: Tables is everything in this scope (a full metadata scan):
 	// tables of the scope that are missing are marked dropped.
 	FullScope string
+	// ReplaceVia: Edges is everything this dag.task produces now; its other
+	// edges (from earlier versions of the task) are removed.
+	ReplaceVia string
+	// Redefined: tables a CREATE [OR REPLACE] … AS made at that time; query
+	// edges into them seen before that are removed.
+	Redefined map[string]time.Time
 }
 
 // UpdateCatalog merges tables (columns, schema changes) and lineage edges.
@@ -131,6 +142,29 @@ func (s *Store) UpdateCatalog(u CatalogUpdate) error {
 	}
 	cs := s.catalog()
 	defer s.dropCatalogCache()
+	if len(u.Redefined) > 0 {
+		kept := edges[:0]
+		for _, e := range edges { // edges of this batch from before the table was redefined
+			if at, ok := u.Redefined[e.To]; !ok || e.Kind != "query" || !e.LastSeen.Before(at) {
+				kept = append(kept, e)
+			}
+		}
+		edges = kept
+		for to, at := range u.Redefined {
+			if err := cs.dropEdgesInto(NormalizeDatasetID(to), "query", at); err != nil {
+				return err
+			}
+		}
+	}
+	if u.ReplaceVia != "" {
+		keep := map[string]bool{}
+		for _, e := range edges {
+			keep[e.key()] = true
+		}
+		if err := cs.dropEdgesVia(u.ReplaceVia, keep); err != nil {
+			return err
+		}
+	}
 	if len(ids) > 0 {
 		err := cs.updateTables(ids, func(m map[string]*CatalogTable) error {
 			for _, t := range u.Tables {
@@ -337,9 +371,54 @@ func (s *Store) CatalogTable(id string) (*CatalogTable, []LineageEdge, []Lineage
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	up, down = fresh(up), fresh(down)
 	sortEdges(up)
 	sortEdges(down)
 	return m[id], up, down, nil
+}
+
+// CatalogEdgeTTL: lineage not seen for this long is hidden, and removed by
+// `db clean` (DAGSFLOW_CATALOG_EDGE_TTL_DAYS, default 90; 0 keeps it forever).
+func CatalogEdgeTTL() time.Duration {
+	days := 90
+	if v := os.Getenv("DAGSFLOW_CATALOG_EDGE_TTL_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			days = n
+		}
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+// fresh drops edges older than the TTL.
+func fresh(l []LineageEdge) []LineageEdge {
+	ttl := CatalogEdgeTTL()
+	if ttl == 0 {
+		return l
+	}
+	cut := time.Now().Add(-ttl)
+	out := l[:0:0]
+	for _, e := range l {
+		if !e.LastSeen.Before(cut) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// CleanCatalog removes lineage not seen within edgeTTL and datasets dropped
+// longer than droppedTTL ago (0 skips that part).
+func (s *Store) CleanCatalog(edgeTTL, droppedTTL time.Duration) (edges, tables int, err error) {
+	cs := s.catalog()
+	defer s.dropCatalogCache()
+	if edgeTTL > 0 {
+		if edges, err = cs.expireEdges(time.Now().Add(-edgeTTL)); err != nil {
+			return
+		}
+	}
+	if droppedTTL > 0 {
+		tables, err = cs.purgeDropped(time.Now().Add(-droppedTTL))
+	}
+	return
 }
 
 func sortEdges(l []LineageEdge) {
@@ -348,11 +427,12 @@ func sortEdges(l []LineageEdge) {
 
 // LineageNode is one step of a column's lineage.
 type LineageNode struct {
-	Dataset string `json:"dataset"`
-	Column  string `json:"column,omitempty"`
-	Expr    string `json:"expr,omitempty"`
-	Via     string `json:"via,omitempty"`
-	Depth   int    `json:"depth"`
+	Dataset  string    `json:"dataset"`
+	Column   string    `json:"column,omitempty"`
+	Expr     string    `json:"expr,omitempty"`
+	Via      string    `json:"via,omitempty"`
+	LastSeen time.Time `json:"last_seen"`
+	Depth    int       `json:"depth"`
 }
 
 // ColumnLineage walks the column (or table, when column is "") up or down,
@@ -371,6 +451,7 @@ func (s *Store) ColumnLineage(id, column string, upstream bool, depth int) ([]Li
 		if err != nil {
 			return nil, err
 		}
+		e = fresh(e)
 		sortEdges(e)
 		byDS[ds] = e
 		return e, nil
@@ -408,7 +489,7 @@ func (s *Store) ColumnLineage(id, column string, upstream bool, depth int) ([]Li
 					continue
 				}
 				seen[lk] = true
-				n := LineageNode{Dataset: nk.ds, Column: nk.col, Expr: e.Expr, Via: e.Via, Depth: d}
+				n := LineageNode{Dataset: nk.ds, Column: nk.col, Expr: e.Expr, Via: e.Via, LastSeen: e.LastSeen, Depth: d}
 				if k.col == "" {
 					n.Expr = ""
 				}
@@ -442,7 +523,10 @@ func (s *Store) SetSyncState(scope string, at time.Time) error {
 }
 
 // RecordTaskLineage stores what a task reported in its "dagsflow_lineage" XCom.
-func (s *Store) RecordTaskLineage(dagID, taskID string, v any) error {
+//
+// replace: this is everything the task produces (not one instance of a
+// mapped task), so edges it reported before and not now are removed.
+func (s *Store) RecordTaskLineage(dagID, taskID string, v any, replace bool) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -472,6 +556,9 @@ func (s *Store) RecordTaskLineage(dagID, taskID string, v any) error {
 			}
 		}
 		u.Tables = append(u.Tables, t)
+	}
+	if replace {
+		u.ReplaceVia = via
 	}
 	writes := map[string]bool{}
 	for _, e := range rep.Edges {
@@ -549,6 +636,7 @@ func (c catalogSink) SaveCatalogScan(scan dag.CatalogScan) error {
 		u.Edges = append(u.Edges, LineageEdge{From: e.From, FromCol: e.FromCol, To: e.To, ToCol: e.ToCol, Expr: e.Expr,
 			Via: e.Via, Kind: "query", LastSeen: e.At})
 	}
+	u.Redefined = scan.Redefined
 	return c.s.UpdateCatalog(u)
 }
 

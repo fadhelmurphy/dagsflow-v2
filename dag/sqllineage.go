@@ -58,18 +58,83 @@ func ParseSQLLineage(sql string, bigquery bool, cols ColumnsOf) []SQLLineage {
 type sqlStatement []sqlTok
 
 func splitStatements(sql string, bigquery bool) []sqlStatement {
-	toks := sqlTokens(sql, bigquery)
+	return splitTokens(sqlTokens(sql, bigquery), bigquery, 0)
+}
+
+func splitTokens(toks []sqlTok, bigquery bool, depth int) []sqlStatement {
 	var out []sqlStatement
 	start := 0
 	for i := 0; i <= len(toks); i++ {
 		if i == len(toks) || toks[i].kind == tPunct && toks[i].text == ";" {
-			if i > start {
-				out = append(out, sqlStatement(toks[start:i]))
+			st := stripControl(toks[start:i])
+			// EXECUTE IMMEDIATE '<sql>': the SQL in the literal
+			if len(st) >= 3 && isWord(st[0], "EXECUTE") && isWord(st[1], "IMMEDIATE") && st[2].kind == tString && depth < 3 {
+				out = append(out, splitTokens(sqlTokens(st[2].text, bigquery), bigquery, depth+1)...)
+			} else if len(st) > 0 {
+				out = append(out, sqlStatement(st))
 			}
 			start = i + 1
 		}
 	}
 	return out
+}
+
+func isWord(t sqlTok, w string) bool { return t.kind == tIdent && strings.EqualFold(t.text, w) }
+
+// stripControl drops scripting around a statement: BEGIN, IF … THEN,
+// ELSEIF … THEN, ELSE, END IF, LOOP, WHILE … DO, EXCEPTION WHEN ERROR THEN.
+func stripControl(st []sqlTok) []sqlTok {
+	untilThen := func(i int, end string) int { // index after THEN / DO at depth 0, or -1
+		depth := 0
+		for ; i < len(st); i++ {
+			switch {
+			case st[i].kind == tPunct && st[i].text == "(":
+				depth++
+			case st[i].kind == tPunct && st[i].text == ")":
+				depth--
+			case depth == 0 && isWord(st[i], end):
+				return i + 1
+			}
+		}
+		return -1
+	}
+	for len(st) > 0 {
+		switch {
+		case isWord(st[0], "BEGIN"):
+			st = st[1:]
+			if len(st) > 0 && (isWord(st[0], "TRANSACTION") || isWord(st[0], "WORK")) {
+				st = st[1:]
+			}
+		case isWord(st[0], "END"):
+			st = st[1:]
+			if len(st) > 0 && (isWord(st[0], "IF") || isWord(st[0], "LOOP") || isWord(st[0], "WHILE") || isWord(st[0], "FOR") || isWord(st[0], "REPEAT")) {
+				st = st[1:]
+			}
+		case isWord(st[0], "ELSE"), isWord(st[0], "LOOP"), isWord(st[0], "REPEAT"):
+			st = st[1:]
+		case isWord(st[0], "IF") && !(len(st) > 1 && isWord(st[1], "EXISTS")), isWord(st[0], "ELSEIF"):
+			j := untilThen(1, "THEN")
+			if j < 0 {
+				return nil
+			}
+			st = st[j:]
+		case isWord(st[0], "WHILE"):
+			j := untilThen(1, "DO")
+			if j < 0 {
+				return nil
+			}
+			st = st[j:]
+		case isWord(st[0], "EXCEPTION") && len(st) > 1 && isWord(st[1], "WHEN"):
+			j := untilThen(2, "THEN")
+			if j < 0 {
+				return nil
+			}
+			st = st[j:]
+		default:
+			return st
+		}
+	}
+	return st
 }
 
 func (st sqlStatement) parse(cols ColumnsOf) (l SQLLineage, ok bool) {
@@ -154,7 +219,10 @@ func sqlTokens(s string, bigquery bool) []sqlTok {
 			out = append(out, sqlTok{kind: tNumber, text: s[i:j], raw: s[i:j], space: space})
 			i = j
 		case isIdentStart(rune(c)) || c >= 0x80:
-			j := i
+			j := i + 1
+			for j < len(s) && s[j] == '@' { // @@error, @@row_count
+				j++
+			}
 			for j < len(s) && (isIdentPart(rune(s[j])) || s[j] >= 0x80) {
 				j++
 			}
@@ -226,31 +294,50 @@ func isIdentPart(r rune) bool {
 // ---- parser ---------------------------------------------------------------------------
 
 type relation struct {
-	cols  []SQLColumn // output columns
-	star  bool        // unknown columns (a table whose columns we don't know)
-	table string      // base table, when this is one
+	cols     []SQLColumn // output columns
+	star     bool        // unknown columns (a table whose columns we don't know)
+	table    string      // base table, when this is one
+	unnest   []SQLRef    // UNNEST(expr) AS x: every field of x comes from expr
+	isUnnest bool
 }
 
 type scope struct {
 	aliases map[string]*relation // alias / table name -> relation
 	order   []string
+	parent  *scope // the query around a correlated subquery
 }
 
 type sqlParser struct {
-	toks    []sqlTok
-	pos     int
-	cols    ColumnsOf
-	ctes    map[string]*relation
-	sources map[string]bool
+	toks     []sqlTok
+	pos      int
+	cols     ColumnsOf
+	ctes     map[string]*relation
+	sources  map[string]bool
+	outer    *scope // scope of the query around this one (correlated subqueries)
+	into     string // SELECT … INTO t (Redshift / PostgreSQL)
+	intoTemp bool
+	steps    int // safety net: a statement the parser loops on is given up (see tick)
+}
+
+// errTooComplex is raised (and recovered by parse) when a statement takes
+// far more steps than its length: lineage is skipped, the task never hangs.
+type errTooComplex struct{}
+
+func (p *sqlParser) tick() {
+	p.steps++
+	if p.steps > 200*len(p.toks)+100000 {
+		panic(errTooComplex{})
+	}
 }
 
 func (p *sqlParser) peek(n int) sqlTok {
+	p.tick()
 	if p.pos+n < len(p.toks) {
 		return p.toks[p.pos+n]
 	}
 	return sqlTok{kind: tPunct, text: ""}
 }
-func (p *sqlParser) eof() bool { return p.pos >= len(p.toks) }
+func (p *sqlParser) eof() bool { p.tick(); return p.pos >= len(p.toks) }
 func (p *sqlParser) isKw(n int, words ...string) bool {
 	t := p.peek(n)
 	if t.kind != tIdent {
@@ -330,6 +417,9 @@ func (p *sqlParser) statement() (SQLLineage, bool) {
 	case p.isKw(0, "WITH", "SELECT") || p.isP(0, "("):
 		rel := p.query()
 		l = SQLLineage{Kind: "select", Columns: rel.cols}
+		if p.into != "" {
+			l.Kind, l.Target, l.Temp = "create", p.into, p.intoTemp
+		}
 	case p.isKw(0, "CREATE"):
 		p.pos++
 		temp := false
@@ -595,7 +685,17 @@ func (p *sqlParser) selectOrParen() *relation {
 		p.pos++
 	}
 	itemToks := p.toks[itemsStart:p.pos]
-	sc := &scope{aliases: map[string]*relation{}}
+	if p.isKw(0, "INTO") && !p.isKw(1, "OUTFILE") { // SELECT … INTO [TEMP] t FROM …
+		p.pos++
+		for p.isKw(0, "TEMP", "TEMPORARY", "UNLOGGED", "TABLE") {
+			p.intoTemp = p.intoTemp || p.isKw(0, "TEMP", "TEMPORARY")
+			p.pos++
+		}
+		if n, ok := p.name(); ok && p.into == "" {
+			p.into = n
+		}
+	}
+	sc := &scope{aliases: map[string]*relation{}, parent: p.outer}
 	if p.acceptKw("FROM") {
 		p.from(sc)
 	}
@@ -691,7 +791,12 @@ func (p *sqlParser) tableRef(sc *scope) {
 		p.from(sc)
 		p.closeParen()
 		return
-	case p.isKw(0, "UNNEST", "LATERAL", "TABLE") && p.isP(1, "("):
+	case p.isKw(0, "UNNEST") && p.isP(1, "("):
+		p.pos++
+		start := p.pos + 1
+		p.skipParens()
+		rel = &relation{star: true, isUnnest: true, unnest: p.refs(p.toks[start:p.pos-1], sc)}
+	case p.isKw(0, "LATERAL", "TABLE") && p.isP(1, "("):
 		p.pos++
 		p.skipParens()
 		rel = &relation{star: true}
@@ -1002,7 +1107,7 @@ func (p *sqlParser) refs(expr []sqlTok, sc *scope) []SQLRef {
 		if t.kind == tPunct && t.text == "(" && i+1 < len(expr) && expr[i+1].kind == tIdent && (strings.EqualFold(expr[i+1].text, "SELECT") || strings.EqualFold(expr[i+1].text, "WITH")) {
 			// scalar subquery: its tables are sources; its first column feeds this one
 			j := matchParen(expr, i)
-			sub := &sqlParser{toks: expr[i+1 : j], cols: p.cols, ctes: p.ctes, sources: p.sources}
+			sub := &sqlParser{toks: expr[i+1 : j], cols: p.cols, ctes: p.ctes, sources: p.sources, outer: sc}
 			rel := sub.query()
 			if len(rel.cols) > 0 {
 				out = mergeRefs(out, rel.cols[0].From)
@@ -1074,6 +1179,9 @@ func matchParen(toks []sqlTok, i int) int {
 // resolve a.b / b against the scope: alias.column, table.column or a column
 // of one of the sources (through subqueries and CTEs, down to base tables).
 func (p *sqlParser) resolve(parts []string, sc *scope) []SQLRef {
+	if rel := sc.aliases[strings.ToLower(parts[0])]; rel != nil && rel.isUnnest {
+		return rel.unnest // x or x.field of UNNEST(expr) AS x
+	}
 	if len(parts) >= 2 {
 		if rel := sc.aliases[strings.ToLower(parts[0])]; rel != nil {
 			return relCol(rel, parts[1])
@@ -1099,6 +1207,11 @@ func (p *sqlParser) resolve(parts []string, sc *scope) []SQLRef {
 			unknown = append(unknown, rel)
 		}
 	}
+	if len(hits) == 0 && sc.parent != nil && (len(parts) >= 2 && sc.aliases[strings.ToLower(parts[0])] == nil || len(unknown) == 0) {
+		if out := p.resolve(parts, sc.parent); len(out) > 0 { // correlated: a name of the outer query
+			return out
+		}
+	}
 	if len(hits) == 0 {
 		hits = unknown
 	}
@@ -1122,6 +1235,9 @@ func hasCol(rel *relation, name string) bool {
 }
 
 func relCol(rel *relation, name string) []SQLRef {
+	if rel.isUnnest {
+		return rel.unnest
+	}
 	for _, c := range rel.cols {
 		if strings.EqualFold(c.Name, name) {
 			return c.From

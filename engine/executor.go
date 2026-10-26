@@ -988,7 +988,7 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 			}
 			rc.mu.Unlock()
 			if hasLineage {
-				if err := e.Store.RecordTaskLineage(rc.d.ID, t.ID, lineage); err != nil {
+				if err := e.Store.RecordTaskLineage(rc.d.ID, t.ID, lineage, k.idx < 0); err != nil {
 					fmt.Fprintf(out, "WARN: lineage: %v\n", err)
 				}
 			}

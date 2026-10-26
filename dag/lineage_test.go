@@ -194,3 +194,85 @@ func TestCatalogScans(t *testing.T) {
 		t.Fatalf("%+v", scan.Edges)
 	}
 }
+
+func TestBigQueryTransferJobs(t *testing.T) {
+	pages := []string{`{"nextPageToken":"p2","jobs":[
+  {"jobReference":{"jobId":"load1"},"user_email":"etl@x.iam","statistics":{"creationTime":"1793000000000"},
+   "configuration":{"jobType":"LOAD","load":{"sourceUris":["gs://b/exports/2026-10-27/orders.csv"],"destinationTable":{"projectId":"p","datasetId":"raw","tableId":"orders"},
+     "schema":{"fields":[{"name":"id","type":"INTEGER"},{"name":"amount","type":"NUMERIC"}]}}}},
+  {"jobReference":{"jobId":"q1"},"statistics":{"creationTime":"1793000001000"},"configuration":{"jobType":"QUERY","query":{"query":"SELECT 1"}}},
+  {"jobReference":{"jobId":"bad"},"errorResult":{"message":"x"},"statistics":{"creationTime":"1793000002000"},
+   "configuration":{"jobType":"LOAD","load":{"sourceUris":["gs://b/x"],"destinationTable":{"projectId":"p","datasetId":"raw","tableId":"x"}}}}]}`,
+		`{"jobs":[
+  {"jobReference":{"jobId":"copy1"},"user_email":"ann@x.com","statistics":{"creationTime":"1792999000000"},
+   "configuration":{"jobType":"COPY","copy":{"sourceTables":[{"projectId":"p","datasetId":"raw","tableId":"orders"}],"destinationTable":{"projectId":"p","datasetId":"raw","tableId":"orders_bak"}}}},
+  {"jobReference":{"jobId":"ext1"},"statistics":{"creationTime":"1792998000000"},
+   "configuration":{"jobType":"EXTRACT","extract":{"sourceTable":{"projectId":"p","datasetId":"raw","tableId":"orders"},"destinationUris":["gs://b/out/orders-*.json"]}}},
+  {"jobReference":{"jobId":"other"},"statistics":{"creationTime":"1792997000000"},
+   "configuration":{"jobType":"LOAD","load":{"sourceUris":["gs://b/y"],"destinationTable":{"projectId":"p","datasetId":"hr","tableId":"y"}}}}]}`}
+	var tokens []string
+	list := func(tok string) (bqJobPage, error) {
+		tokens = append(tokens, tok)
+		var p bqJobPage
+		i := 0
+		if tok == "p2" {
+			i = 1
+		}
+		err := json.Unmarshal([]byte(pages[i]), &p)
+		return p, err
+	}
+	cols := func(id string) []string {
+		if id == "p.raw.orders" {
+			return []string{"id", "amount"}
+		}
+		return nil
+	}
+	scan, last, err := bqTransferScan(BigQueryCatalogSyncConfig{Datasets: []string{"raw"}}, list, cols, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range scan.Edges {
+		got = append(got, e.From+"."+e.FromCol+" -> "+e.To+"."+e.ToCol+" | "+e.Via)
+	}
+	all := strings.Join(got, "\n")
+	for _, w := range []string{
+		"gcs:gs://b/exports/2026-10-27/orders.csv.amount -> bigquery:p.raw.orders.amount | job load1 by etl@x.iam",
+		"bigquery:p.raw.orders.id -> bigquery:p.raw.orders_bak.id | job copy1 by ann@x.com",
+		"bigquery:p.raw.orders.amount -> gcs:gs://b/out/orders-*.json.amount | job ext1",
+	} {
+		if !strings.Contains(all, w) {
+			t.Fatalf("missing %q in\n%s", w, all)
+		}
+	}
+	if strings.Contains(all, "hr.y") || strings.Contains(all, "raw.x") {
+		t.Fatalf("out of scope or failed jobs kept:\n%s", all)
+	}
+	if scan.Queries != 3 || len(tokens) != 2 || last.UnixMilli() != 1793000000000 {
+		t.Fatalf("jobs %d, pages %v, last %v", scan.Queries, tokens, last)
+	}
+}
+
+func TestRedshiftCopyFromHistory(t *testing.T) {
+	since := time.Now().Add(-time.Hour)
+	rs := func(sql string) ([]any, error) {
+		switch {
+		case strings.Contains(sql, "svv_columns"):
+			return []any{
+				map[string]any{"table_catalog": "dev", "table_schema": "raw", "table_name": "events", "column_name": "id", "data_type": "integer", "table_type": "BASE TABLE"},
+				map[string]any{"table_catalog": "dev", "table_schema": "raw", "table_name": "events", "column_name": "kind", "data_type": "varchar", "table_type": "BASE TABLE"},
+			}, nil
+		case strings.Contains(sql, "sys_query_history"):
+			return []any{map[string]any{"query_id": 5.0, "session_id": 1.0, "user_id": 100.0, "database_name": "dev", "start_time": time.Now().UTC().Format("2006-01-02 15:04:05"),
+				"query_text": "COPY raw.events FROM 's3://lake/events/2026/10/27/' IAM_ROLE 'arn:aws:iam::1:role/r' FORMAT AS PARQUET", "text_len": 90.0}}, nil
+		}
+		return nil, nil
+	}
+	scan, _, err := rsCatalogScan(RedshiftCatalogSyncConfig{RedshiftConn: RedshiftConn{Database: "dev"}}, since, rs, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Edges) != 2 || scan.Edges[0].From != "s3:s3://lake/events/2026/10/27/" || scan.Edges[0].To != "redshift:dev.raw.events" || scan.Edges[0].FromCol == "" {
+		t.Fatalf("%+v", scan.Edges)
+	}
+}

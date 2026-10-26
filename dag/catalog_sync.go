@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -45,6 +46,10 @@ type CatalogScan struct {
 	FullScope bool   // Tables is every table of the scope (missing ones were dropped)
 	Tables    []ScannedTable
 	Edges     []ScannedEdge
+	Redefined map[string]time.Time // table -> when a CREATE … AS last replaced it
+	Queries   int                  // queries / jobs read
+	Unread    []string             // statements whose lineage could not be read (first 20)
+	UnreadN   int
 }
 
 // CatalogSink stores scans (the engine's store; set by the engine and workers).
@@ -120,6 +125,7 @@ func (d *DAG) NewBigQueryCatalogSyncTask(id string, cfg BigQueryCatalogSyncConfi
 			regions = []string{firstNonEmpty(conn.String("location"), "US")}
 		}
 		summary := map[string]any{}
+		known := map[string][]string{} // project.dataset.table (lower case) -> columns, from this run
 		for _, region := range regions {
 			region = strings.TrimSpace(region)
 			run := func(sql string) ([]any, error) {
@@ -153,11 +159,257 @@ func (d *DAG) NewBigQueryCatalogSyncTask(id string, cfg BigQueryCatalogSyncConfi
 					return err
 				}
 			}
-			ctx.Logf("%s: %d tables, %d lineage edges", region, len(scan.Tables), len(scan.Edges))
-			summary[region] = map[string]any{"tables": len(scan.Tables), "edges": len(scan.Edges), "jobs_until": last}
+			for _, t := range scan.Tables {
+				if len(t.Columns) > 0 {
+					known[strings.ToLower(strings.TrimPrefix(t.ID, "bigquery:"))] = names3(t.Columns)
+				}
+			}
+			ctx.Logf("%s: %d tables, %d jobs, %d lineage edges", region, len(scan.Tables), scan.Queries, len(scan.Edges))
+			logUnread(ctx, scan)
+			summary[region] = map[string]any{"tables": len(scan.Tables), "jobs": scan.Queries, "edges": len(scan.Edges), "jobs_unread": scan.UnreadN, "jobs_until": last}
+		}
+		if !cfg.NoJobs { // load, copy and extract jobs: not SQL, read from the jobs API
+			scope := "bigquery:" + project + ":transfers"
+			if len(cfg.Datasets) > 0 {
+				scope += ":" + strings.Join(cfg.Datasets, ",")
+			}
+			since, err := Catalog.CatalogSyncState(scope)
+			if err != nil {
+				return err
+			}
+			if since.IsZero() {
+				h := cfg.LookbackHours
+				if h <= 0 {
+					h = 168
+				}
+				since = time.Now().Add(-time.Duration(h) * time.Hour)
+			}
+			list := func(pageToken string) (bqJobPage, error) {
+				q := url.Values{"allUsers": {"true"}, "projection": {"full"}, "stateFilter": {"done"}, "maxResults": {"1000"},
+					"minCreationTime": {strconv.FormatInt(since.UnixMilli()+1, 10)}}
+				if pageToken != "" {
+					q.Set("pageToken", pageToken)
+				}
+				var page bqJobPage
+				err := googleCall(ctx, conn, scopeBigQuery, "GET", fmt.Sprintf("%s/projects/%s/jobs?%s", bqBase, url.PathEscape(project), q.Encode()), nil, &page)
+				return page, err
+			}
+			scan, last, err := bqTransferScan(cfg, list, func(id string) []string { return known[strings.ToLower(id)] }, ctx.Logf)
+			if err != nil {
+				return fmt.Errorf("load / copy / extract jobs (jobs.list, needs bigquery.jobs.listAll): %w", err)
+			}
+			scan.Scope = scope
+			if err := Catalog.SaveCatalogScan(scan); err != nil {
+				return err
+			}
+			if !last.IsZero() {
+				if err := Catalog.SetCatalogSyncState(scope, last); err != nil {
+					return err
+				}
+			}
+			ctx.Logf("load / copy / extract jobs: %d, %d lineage edges", scan.Queries, len(scan.Edges))
+			summary["transfer_jobs"] = map[string]any{"jobs": scan.Queries, "edges": len(scan.Edges), "jobs_until": last}
 		}
 		return ctx.XComPush("return_value", summary)
 	}, opts...)
+}
+
+// scanColumns: the columns of the tables this scan just read (resolves *
+// and unqualified names before the catalog knows them).
+func scanColumns(scan CatalogScan, d SQLDialect) ColumnsOf {
+	m := map[string][]string{}
+	for _, t := range scan.Tables {
+		if len(t.Columns) > 0 {
+			m[strings.ToLower(t.ID)] = names3(t.Columns)
+		}
+	}
+	return func(name string) []string {
+		if q := d.Qualify(name); q != "" {
+			return m[strings.ToLower(d.Engine+":"+q)]
+		}
+		return nil
+	}
+}
+
+func names3(cols []LineageColumn) []string {
+	out := make([]string, len(cols))
+	for i, c := range cols {
+		out[i] = c.Name
+	}
+	return out
+}
+
+// ---- BigQuery load / copy / extract jobs (jobs.list) -----------------------------------
+
+type bqTableRef struct {
+	ProjectID string `json:"projectId"`
+	DatasetID string `json:"datasetId"`
+	TableID   string `json:"tableId"`
+}
+
+func (r bqTableRef) id() string { return r.ProjectID + "." + r.DatasetID + "." + r.TableID }
+
+type bqJobPage struct {
+	NextPageToken string `json:"nextPageToken"`
+	Jobs          []struct {
+		JobReference struct {
+			JobID string `json:"jobId"`
+		} `json:"jobReference"`
+		ErrorResult *struct {
+			Message string `json:"message"`
+		} `json:"errorResult"`
+		UserEmail  string `json:"user_email"`
+		Statistics struct {
+			CreationTime string `json:"creationTime"` // ms since epoch
+		} `json:"statistics"`
+		Configuration struct {
+			JobType string `json:"jobType"`
+			Load    *struct {
+				SourceURIs       []string   `json:"sourceUris"`
+				DestinationTable bqTableRef `json:"destinationTable"`
+				Schema           *struct {
+					Fields []struct {
+						Name string `json:"name"`
+						Type string `json:"type"`
+					} `json:"fields"`
+				} `json:"schema"`
+			} `json:"load"`
+			Copy *struct {
+				SourceTable      *bqTableRef  `json:"sourceTable"`
+				SourceTables     []bqTableRef `json:"sourceTables"`
+				DestinationTable bqTableRef   `json:"destinationTable"`
+			} `json:"copy"`
+			Extract *struct {
+				SourceTable     *bqTableRef `json:"sourceTable"`
+				DestinationURIs []string    `json:"destinationUris"`
+			} `json:"extract"`
+		} `json:"configuration"`
+	} `json:"jobs"`
+}
+
+// bqTransferScan: lineage of load (files -> table), copy (tables -> table)
+// and extract (table -> files) jobs. jobs.list returns the newest first.
+// Columns: a load with a schema in its configuration links those columns; a
+// copy or extract links the columns of the table (same names); otherwise
+// the lineage is table to table.
+func bqTransferScan(cfg BigQueryCatalogSyncConfig, list func(pageToken string) (bqJobPage, error), cols func(id string) []string, logf func(string, ...any)) (CatalogScan, time.Time, error) {
+	scan := CatalogScan{}
+	maxJobs := cfg.MaxJobs
+	if maxJobs <= 0 {
+		maxJobs = 5000
+	}
+	inScope := func(r bqTableRef) bool {
+		if len(cfg.Datasets) == 0 {
+			return true
+		}
+		for _, ds := range cfg.Datasets {
+			if strings.EqualFold(ds, r.DatasetID) {
+				return true
+			}
+		}
+		return false
+	}
+	link := func(from, to string, names []string, via string, at time.Time) {
+		if len(names) == 0 {
+			scan.Edges = append(scan.Edges, ScannedEdge{LineageLink: LineageLink{From: from, To: to}, Via: via, At: at})
+			return
+		}
+		for _, n := range names {
+			scan.Edges = append(scan.Edges, ScannedEdge{LineageLink: LineageLink{From: from, FromCol: n, To: to, ToCol: n}, Via: via, At: at})
+		}
+	}
+	var last time.Time
+	token, seen := "", 0
+	for {
+		page, err := list(token)
+		if err != nil {
+			return scan, time.Time{}, err
+		}
+		for _, j := range page.Jobs {
+			if j.ErrorResult != nil {
+				continue
+			}
+			ms, _ := strconv.ParseInt(j.Statistics.CreationTime, 10, 64)
+			at := time.UnixMilli(ms).UTC()
+			via := "job " + j.JobReference.JobID
+			if j.UserEmail != "" {
+				via += " by " + j.UserEmail
+			}
+			c := j.Configuration
+			counted := true
+			switch {
+			case c.Load != nil && inScope(c.Load.DestinationTable):
+				to := "bigquery:" + c.Load.DestinationTable.id()
+				var names []string
+				if c.Load.Schema != nil {
+					for _, f := range c.Load.Schema.Fields {
+						names = append(names, f.Name)
+					}
+				}
+				for _, u := range c.Load.SourceURIs {
+					link(fileID(u), to, names, via, at)
+				}
+			case c.Copy != nil && inScope(c.Copy.DestinationTable):
+				to := "bigquery:" + c.Copy.DestinationTable.id()
+				srcs := c.Copy.SourceTables
+				if c.Copy.SourceTable != nil {
+					srcs = append(srcs, *c.Copy.SourceTable)
+				}
+				for _, s := range srcs {
+					link("bigquery:"+s.id(), to, intersect(cols(s.id()), cols(c.Copy.DestinationTable.id())), via, at)
+				}
+			case c.Extract != nil && c.Extract.SourceTable != nil && inScope(*c.Extract.SourceTable):
+				for _, u := range c.Extract.DestinationURIs {
+					link("bigquery:"+c.Extract.SourceTable.id(), fileID(u), cols(c.Extract.SourceTable.id()), via, at)
+				}
+			default:
+				counted = false // a query job (read from INFORMATION_SCHEMA), or out of scope
+			}
+			if counted {
+				scan.Queries++
+				if at.After(last) {
+					last = at
+				}
+			}
+			seen++
+		}
+		if page.NextPageToken == "" || seen >= max(maxJobs*20, 50000) {
+			if page.NextPageToken != "" { // newest first: what is left is older than this run reads
+				logf("WARNING: stopped after %d jobs (newest first); older load / copy jobs since the last run are skipped: run the sync more often", seen)
+			}
+			break
+		}
+		token = page.NextPageToken
+	}
+	return scan, last, nil
+}
+
+func fileID(uri string) string {
+	if i := strings.Index(uri, "://"); i > 0 {
+		eng := strings.ToLower(uri[:i])
+		if eng == "gs" {
+			eng = "gcs"
+		}
+		return eng + ":" + uri
+	}
+	return "file:" + uri
+}
+
+func intersect(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	have := map[string]bool{}
+	for _, x := range b {
+		have[strings.ToLower(x)] = true
+	}
+	var out []string
+	for _, x := range a {
+		if have[strings.ToLower(x)] {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // bqCatalogScan reads one region. It returns the time of the last job read
@@ -237,7 +489,7 @@ func bqCatalogScan(project, region string, cfg BigQueryCatalogSyncConfig, since 
 		if rowStr(j, "statement_type") == "SELECT" {
 			resultTo = dest
 		}
-		l := SQLLineageOf(rowStr(j, "query"), dialect, resultTo, nil)
+		l := SQLLineageOf(rowStr(j, "query"), dialect, resultTo, scanColumns(scan, dialect))
 		if len(l.Edges) == 0 && dest != "" { // the query could not be read: tables only
 			var refs []struct {
 				ProjectID string `json:"project_id"`
@@ -266,12 +518,25 @@ func bqKind(tableType string) string {
 
 // addQuery adds the lineage of one query (or script) someone ran.
 func (s *CatalogScan) addQuery(l Lineage, via, user string, at time.Time) {
+	s.Queries++
+	for _, u := range l.Unread {
+		s.UnreadN++
+		if len(s.Unread) < 20 {
+			s.Unread = append(s.Unread, via+": "+u)
+		}
+	}
 	for _, e := range l.Edges {
 		s.Edges = append(s.Edges, ScannedEdge{LineageLink: e, Via: via, At: at})
 	}
 	for _, id := range l.Created {
 		t := at
 		s.Tables = append(s.Tables, ScannedTable{ID: id, Creator: user, CreatedAt: &t})
+		if s.Redefined == nil {
+			s.Redefined = map[string]time.Time{}
+		}
+		if at.After(s.Redefined[id]) {
+			s.Redefined[id] = at
+		}
 	}
 }
 
@@ -340,8 +605,10 @@ func (d *DAG) NewRedshiftCatalogSyncTask(id string, cfg RedshiftCatalogSyncConfi
 				return err
 			}
 		}
-		ctx.Logf("%d tables, %d lineage edges", len(scan.Tables), len(scan.Edges))
-		return ctx.XComPush("return_value", map[string]any{"tables": len(scan.Tables), "edges": len(scan.Edges), "queries_until": last})
+		ctx.Logf("%d tables, %d sessions, %d lineage edges", len(scan.Tables), scan.Queries, len(scan.Edges))
+		logUnread(ctx, scan)
+		return ctx.XComPush("return_value", map[string]any{"tables": len(scan.Tables), "sessions": scan.Queries, "edges": len(scan.Edges),
+			"statements_unread": scan.UnreadN, "queries_until": last})
 	}, opts...)
 }
 
@@ -455,8 +722,19 @@ func rsCatalogScan(cfg RedshiftCatalogSyncConfig, since time.Time, run queryFunc
 	}
 	for _, key := range order {
 		s := sessions[key]
-		l := SQLLineageOf(strings.Join(s.sql, ";\n"), RedshiftDialect("redshift", firstNonEmpty(s.db, cfg.Database), "public"), "", nil)
+		d := RedshiftDialect("redshift", firstNonEmpty(s.db, cfg.Database), "public")
+		l := SQLLineageOf(strings.Join(s.sql, ";\n"), d, "", scanColumns(scan, d))
 		scan.addQuery(l, "query "+s.first+" by "+s.user, s.user, s.at)
 	}
 	return scan, last, nil
+}
+
+func logUnread(ctx *TaskContext, scan CatalogScan) {
+	if scan.UnreadN == 0 {
+		return
+	}
+	ctx.Logf("WARNING: %d statements may write data but could not be read (no lineage for them), e.g.:", scan.UnreadN)
+	for _, u := range scan.Unread {
+		ctx.Logf("  %s", u)
+	}
 }

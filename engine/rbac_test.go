@@ -104,3 +104,23 @@ func TestRBACRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCatalogDatasetAccess(t *testing.T) {
+	for _, c := range []struct {
+		pat, id string
+		ok      bool
+	}{{"*", "gcs:gs://b/x/{date}/a.csv", true}, {"bigquery:p.mart.*", "bigquery:p.mart.orders", true}, {"bigquery:p.mart.*", "bigquery:p.raw.x", false},
+		{"gcs:gs://b/*", "gcs:gs://b/x/y.csv", true}, {"BIGQUERY:P.*", "bigquery:p.d.t", true}, {"redshift:dev.?ublic.*", "redshift:dev.public.t", true}, {"a*b*c", "axxbyc", true}, {"a*b*c", "axxbyd", false}} {
+		if got := globMatch(c.pat, c.id); got != c.ok {
+			t.Errorf("%q ~ %q = %v", c.pat, c.id, got)
+		}
+	}
+	p, err := ParsePermission("catalog.read:bigquery:p.mart.*")
+	if err != nil || p.Resource != "bigquery:p.mart.*" {
+		t.Fatal(p, err)
+	}
+	a := AccessFor(&User{Username: "u", Roles: []string{"r"}}, map[string]*RoleDef{"r": {Permissions: []Permission{p, {Action: ActDagRead, Resource: "sales_*"}}}})
+	if !a.CanDataset("bigquery:p.mart.x") || a.CanDataset("bigquery:p.raw.x") || !a.CanDataset("task:sales_a.t") || a.CanDataset("task:hr.t") {
+		t.Fatal("dataset access")
+	}
+}

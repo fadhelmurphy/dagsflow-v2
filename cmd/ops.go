@@ -102,7 +102,7 @@ func dbCmd() *cobra.Command {
 	var olderThan string
 	var yes bool
 	clean := &cobra.Command{
-		Use: "clean", Short: "Delete finished runs, task logs, event logs and jobs older than --older-than (~ airflow db clean)",
+		Use: "clean", Short: "Delete finished runs, task logs, event logs, jobs and catalog tables dropped longer than --older-than ago (~ airflow db clean); catalog lineage not seen within DAGSFLOW_CATALOG_EDGE_TTL_DAYS (default 90)",
 		Run: func(cmd *cobra.Command, args []string) {
 			d, err := parseAge(olderThan)
 			if err != nil {
@@ -113,11 +113,20 @@ func dbCmd() *cobra.Command {
 				fmt.Printf("This deletes finished runs and logs before %s. Re-run with --yes to proceed.\n", before.Format(time.DateTime))
 				return
 			}
-			res, err := newStore().Cleanup(before)
+			st := newStore()
+			res, err := st.Cleanup(before)
 			if err != nil {
 				exitf("%v", err)
 			}
-			b, _ := json.Marshal(res)
+			edges, tables, err := st.CleanCatalog(engine.CatalogEdgeTTL(), d)
+			if err != nil {
+				exitf("catalog: %v", err)
+			}
+			out := map[string]any{}
+			raw, _ := json.Marshal(res)
+			_ = json.Unmarshal(raw, &out) // same fields as before, plus the catalog
+			out["catalog_edges"], out["catalog_tables"] = edges, tables
+			b, _ := json.Marshal(out)
 			fmt.Println(string(b))
 		},
 	}

@@ -113,7 +113,7 @@ func TestPGCatalogSinkScan(t *testing.T) { resetPG(t); catalogSinkScan(t, pgStor
 
 func catalogSinkScan(t *testing.T, st *Store) {
 	st.InstallCatalogHooks()
-	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	created := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	err := dag.Catalog.SaveCatalogScan(dag.CatalogScan{Scope: "redshift:wg:dev", FullScope: true,
 		Tables: []dag.ScannedTable{
 			{ID: "redshift:dev.public.orders", Kind: "table", Columns: []dag.LineageColumn{{Name: "id", Type: "integer"}}},
@@ -159,5 +159,121 @@ func catalogSearch(t *testing.T, st *Store) {
 	}
 	if got := st.CatalogColumnNames("bigquery:p.d.orders"); len(got) != 2 {
 		t.Fatalf("case-insensitive lookup: %v", got)
+	}
+}
+
+func TestCatalogStaleLineage(t *testing.T) { catalogStale(t, NewStore(t.TempDir())) }
+
+func TestPGCatalogStaleLineage(t *testing.T) { resetPG(t); catalogStale(t, pgStore(t)) }
+
+func catalogStale(t *testing.T, st *Store) {
+	report := func(from string, replace bool) {
+		t.Helper()
+		v := map[string]any{"edges": []any{map[string]any{"from": from, "from_col": "a", "to": "bigquery:p.d.out", "to_col": "a"}}}
+		if err := st.RecordTaskLineage("d", "t", v, replace); err != nil {
+			t.Fatal(err)
+		}
+	}
+	upstream := func() []string {
+		t.Helper()
+		_, up, _, err := st.CatalogTable("bigquery:p.d.out")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, e := range up {
+			out = append(out, e.From)
+		}
+		return out
+	}
+	report("bigquery:p.d.old", true)
+	report("bigquery:p.d.new", true) // the task changed: its old edge goes
+	if got := upstream(); len(got) != 1 || got[0] != "bigquery:p.d.new" {
+		t.Fatalf("after re-run: %v", got)
+	}
+	report("bigquery:p.d.other", false) // a mapped instance adds, never replaces
+	if got := upstream(); len(got) != 2 {
+		t.Fatalf("mapped: %v", got)
+	}
+
+	// a query that redefines a table drops the query lineage seen before it
+	t0 := time.Now().Add(-48 * time.Hour)
+	st.InstallCatalogHooks()
+	edge := func(from string, at time.Time) dag.ScannedEdge {
+		return dag.ScannedEdge{LineageLink: dag.LineageLink{From: from, FromCol: "x", To: "bigquery:p.d.mart", ToCol: "x"}, Via: "job", At: at}
+	}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(dag.Catalog.SaveCatalogScan(dag.CatalogScan{Scope: "s", Edges: []dag.ScannedEdge{edge("bigquery:p.d.v1", t0)}}))
+	t1 := t0.Add(time.Hour)
+	must(dag.Catalog.SaveCatalogScan(dag.CatalogScan{Scope: "s", Edges: []dag.ScannedEdge{edge("bigquery:p.d.v1b", t0.Add(time.Minute)), edge("bigquery:p.d.v2", t1)},
+		Redefined: map[string]time.Time{"bigquery:p.d.mart": t1}}))
+	_, up, _, _ := st.CatalogTable("bigquery:p.d.mart")
+	if len(up) != 1 || up[0].From != "bigquery:p.d.v2" {
+		t.Fatalf("redefined: %+v", up)
+	}
+
+	// expiry: hidden after the TTL, removed by clean; long-dropped tables purged
+	t.Setenv("DAGSFLOW_CATALOG_EDGE_TTL_DAYS", "1")
+	if _, up, _, _ := st.CatalogTable("bigquery:p.d.mart"); len(up) != 0 {
+		t.Fatalf("old lineage should be hidden: %+v", up)
+	}
+	if n, _ := st.ColumnLineage("bigquery:p.d.mart", "x", true, 5); len(n) != 0 {
+		t.Fatalf("old lineage in a walk: %+v", n)
+	}
+	must(st.UpdateCatalog(CatalogUpdate{FullScope: "gone", Tables: []CatalogTable{{ID: "bigquery:p.d.g", Scope: "gone", Columns: []CatalogColumn{}}}}))
+	must(st.UpdateCatalog(CatalogUpdate{FullScope: "gone"}))
+	time.Sleep(10 * time.Millisecond)
+	edges, tables, err := st.CleanCatalog(CatalogEdgeTTL(), time.Millisecond)
+	if err != nil || edges != 1 || tables != 1 {
+		t.Fatalf("clean: %d edges, %d tables, %v", edges, tables, err)
+	}
+	if g, _, _, _ := st.CatalogTable("bigquery:p.d.g"); g != nil {
+		t.Fatal("dropped table should be purged")
+	}
+}
+
+func TestPGCatalogBackupRoundTrip(t *testing.T) {
+	src := NewStore(t.TempDir())
+	if err := src.RecordTaskLineage("d", "t", map[string]any{
+		"datasets": []any{map[string]any{"id": "gsheet:x!S", "columns": []any{map[string]any{"name": "a"}}}},
+		"edges":    []any{map[string]any{"from": "gsheet:x!S", "from_col": "a", "to": "bigquery:p.d.t", "to_col": "a"}},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	_ = src.SetSyncState("bigquery:p:us", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	b, err := src.Export(10)
+	if err != nil || b.Catalog == nil || len(b.Catalog.Tables) != 2 || len(b.Catalog.Edges) != 1 {
+		t.Fatalf("export: %+v %v", b.Catalog, err)
+	}
+	resetPG(t)
+	dst := pgStore(t)
+	st, err := dst.Import(b)
+	if err != nil || st.CatalogTables != 2 || st.CatalogEdges != 1 {
+		t.Fatalf("import: %+v %v", st, err)
+	}
+	tb, up, _, _ := dst.CatalogTable("bigquery:p.d.t")
+	if tb == nil || len(up) != 1 || up[0].Via != "d.t" {
+		t.Fatalf("%+v %+v", tb, up)
+	}
+	if at, _ := dst.SyncState("bigquery:p:us"); at.Year() != 2026 {
+		t.Fatal("sync state not restored")
+	}
+}
+
+func TestNormalizeDatasetID(t *testing.T) {
+	for in, want := range map[string]string{
+		"s3:s3://lake/events/2026/10/27/":  "s3:s3://lake/events/{date}/",
+		"gcs:gs://b/x/2026-10-27/a.csv":    "gcs:gs://b/x/{date}/a.csv",
+		"gcs:gs://b/x/orders_20261027.csv": "gcs:gs://b/x/orders_{date}.csv",
+		"bigquery:p.d.orders_20261027":     "bigquery:p.d.orders_20261027",
+	} {
+		if got := NormalizeDatasetID(in); got != want {
+			t.Errorf("%s: %s, want %s", in, got, want)
+		}
 	}
 }

@@ -41,6 +41,9 @@ type Lineage struct {
 	Datasets []LineageDataset `json:"datasets,omitempty"`
 	Edges    []LineageLink    `json:"edges,omitempty"`
 	Created  []string         `json:"created,omitempty"` // tables a CREATE made (not temp tables)
+	// Unread: statements that may write data but could not be read
+	// (CALL, dynamic SQL, syntax the reader doesn't know)
+	Unread []string `json:"unread,omitempty"`
 }
 
 func (l *Lineage) add(o Lineage) {
@@ -239,6 +242,9 @@ func SQLLineageOf(sql string, d SQLDialect, resultToTask string, extra ColumnsOf
 	for i, st := range stmts {
 		s, ok := st.parse(cols)
 		if !ok {
+			if writesData(st) {
+				l.Unread = append(l.Unread, truncate(rawText(st), 200))
+			}
 			parsed = append(parsed, SQLLineage{})
 			continue
 		}
@@ -417,7 +423,12 @@ func (c *TaskContext) lineageSQL(sql string, d SQLDialect, rowsOut bool, extra C
 	if rowsOut {
 		task = c.taskDataset()
 	}
-	c.ReportLineage(SQLLineageOf(sql, d, task, extra))
+	l := SQLLineageOf(sql, d, task, extra)
+	for _, u := range l.Unread {
+		c.Logf("lineage: could not read this statement, its lineage is missing: %s", u)
+	}
+	l.Unread = nil
+	c.ReportLineage(l)
 }
 
 // lineageExternal: an external table over files, column for column.
@@ -494,4 +505,26 @@ func (c *TaskContext) lineageExternalMapped(table, fileEngine string, files []st
 		}
 	}
 	c.ReportLineage(l)
+}
+
+// writesData: a statement the reader gave up on that may move data (so
+// lineage may be missing), as opposed to DECLARE, DROP, GRANT and the like.
+func writesData(st sqlStatement) bool {
+	if len(st) == 0 || st[0].kind != tIdent {
+		return false
+	}
+	switch strings.ToUpper(st[0].text) {
+	case "DECLARE", "SET", "DROP", "TRUNCATE", "ALTER", "GRANT", "REVOKE", "DELETE", "ASSERT", "RAISE", "RETURN", "COMMIT",
+		"ROLLBACK", "ABORT", "ANALYZE", "VACUUM", "LOCK", "SHOW", "DESCRIBE", "EXPLAIN", "COMMENT", "LEAVE", "BREAK", "CONTINUE",
+		"ITERATE", "UNLOAD", "EXPORT", "SELECT":
+		return false
+	case "CREATE":
+		for _, t := range st[1:min(len(st), 6)] {
+			if isWord(t, "SCHEMA") || isWord(t, "FUNCTION") || isWord(t, "PROCEDURE") || isWord(t, "ROW") || isWord(t, "USER") ||
+				isWord(t, "DATABASE") || isWord(t, "INDEX") || isWord(t, "MODEL") || isWord(t, "SNAPSHOT") {
+				return false
+			}
+		}
+	}
+	return true
 }

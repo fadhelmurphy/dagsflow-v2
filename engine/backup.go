@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -18,9 +19,16 @@ type Backup struct {
 	DagMeta    []*DagMeta                 `json:"dag_meta"`
 	Runs       []*DagRun                  `json:"dag_runs"`
 	Audit      []AuditEvent               `json:"event_logs"`
+	Catalog    *CatalogBackup             `json:"catalog,omitempty"`
 }
 
-var backupTables = []string{"variables", "connections", "pools", "users", "datasets", "reparse_requests"}
+// CatalogBackup: the data catalog (datasets, columns, schema history, lineage).
+type CatalogBackup struct {
+	Tables []*CatalogTable `json:"tables"`
+	Edges  []LineageEdge   `json:"edges"`
+}
+
+var backupTables = []string{"variables", "connections", "pools", "users", "datasets", "reparse_requests", "catalog_sync"}
 
 // Export dumps the metadata. auditLimit caps the event log (newest first).
 func (s *Store) Export(auditLimit int) (*Backup, error) {
@@ -51,6 +59,17 @@ func (s *Store) Export(auditLimit int) (*Backup, error) {
 		}
 		b.Runs = append(b.Runs, runs...)
 	}
+	tables, edges, err := s.catalog().dump()
+	if err != nil {
+		return nil, fmt.Errorf("catalog: %w", err)
+	}
+	if len(tables)+len(edges) > 0 {
+		b.Catalog = &CatalogBackup{Edges: edges, Tables: make([]*CatalogTable, 0, len(tables))}
+		for _, t := range tables {
+			b.Catalog.Tables = append(b.Catalog.Tables, t)
+		}
+		sort.Slice(b.Catalog.Tables, func(i, j int) bool { return b.Catalog.Tables[i].ID < b.Catalog.Tables[j].ID })
+	}
 	ev, err := s.AuditEvents("", "", "", auditLimit)
 	if err != nil {
 		return nil, err
@@ -63,7 +82,7 @@ func (s *Store) Export(auditLimit int) (*Backup, error) {
 
 // ImportStats: what Import wrote.
 type ImportStats struct {
-	Tables, DagMeta, Runs, SkippedRuns, Audit int
+	Tables, DagMeta, Runs, SkippedRuns, Audit, CatalogTables, CatalogEdges int
 }
 
 // Import restores a backup. Tables and DAG metadata are replaced; runs that
@@ -105,6 +124,33 @@ func (s *Store) Import(b *Backup) (ImportStats, error) {
 	for _, ev := range b.Audit {
 		s.Audit(ev)
 		st.Audit++
+	}
+	if c := b.Catalog; c != nil { // as it was: no merge, no new schema changes
+		cs := s.catalog()
+		defer s.dropCatalogCache()
+		for start := 0; start < len(c.Tables); start += 2000 {
+			batch := c.Tables[start:min(start+2000, len(c.Tables))]
+			ids := make([]string, len(batch))
+			for i, t := range batch {
+				ids[i] = t.ID
+			}
+			if err := cs.updateTables(ids, func(m map[string]*CatalogTable) error {
+				for _, t := range batch {
+					m[t.ID] = t
+				}
+				return nil
+			}); err != nil {
+				return st, fmt.Errorf("catalog: %w", err)
+			}
+			st.CatalogTables += len(batch)
+		}
+		for start := 0; start < len(c.Edges); start += 5000 {
+			batch := c.Edges[start:min(start+5000, len(c.Edges))]
+			if err := cs.putEdges(batch); err != nil {
+				return st, fmt.Errorf("catalog lineage: %w", err)
+			}
+			st.CatalogEdges += len(batch)
+		}
 	}
 	return st, nil
 }

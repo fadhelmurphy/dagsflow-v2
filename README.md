@@ -309,6 +309,7 @@ Security → **List Roles**: built-in roles (Viewer, User, Op, Admin; read-only,
 | `events.read`, `datasets.read`, `system.read` | event log, datasets, import errors + components |
 | `users.manage`, `roles.manage` | manage users/tokens and roles |
 | `builder.edit` | use the visual builder (writes workflow files; treat like write access to DAG code) |
+| `catalog.read:<pattern>` | data catalog, for the datasets matching the pattern (`*`, `bigquery:proj.mart.*`, …), see [Data catalog](#data-catalog-and-column-lineage) |
 
 DAG permissions take a *resource*:
 - `*` for every DAG,
@@ -670,16 +671,42 @@ tasks:
     schemas: [public, mart]             # optional
 ```
 
-- **BigQuery** reads `region-x.INFORMATION_SCHEMA.TABLES` / `COLUMNS` every run, and `INFORMATION_SCHEMA.JOBS` since the last run: CREATE / INSERT / MERGE / UPDATE / scripts and SELECTs with a destination table. A table's creator is the user of the job that created it. No table data is scanned, but each INFORMATION_SCHEMA query is billed at the 10 MB minimum. Permissions: metadata viewer on the datasets, and `bigquery.jobs.listAll` on the project for lineage (`no_queries: true` skips the job history).
-- **Redshift** reads `SVV_TABLES` / `SVV_COLUMNS` and `SYS_QUERY_HISTORY` (full text from `SYS_QUERY_TEXT`) since the last run. Statements of one session are read together, so temp tables are followed. Seeing other users' queries needs a superuser or the `sys:monitor` role. Redshift keeps about 7 days of query history, so run the sync at least daily.
+- **BigQuery** reads `region-x.INFORMATION_SCHEMA.TABLES` / `COLUMNS` every run, and `INFORMATION_SCHEMA.JOBS` since the last run: CREATE / INSERT / MERGE / UPDATE / scripts and SELECTs with a destination table. A table's creator is the user of the job that created it. No table data is scanned, but each INFORMATION_SCHEMA query is billed at the 10 MB minimum. Load, copy and extract jobs (`bq load`, `bq cp`, `bq extract`, client libraries, scheduled transfers that run as load jobs) are not SQL. They are read from the jobs API (`jobs.list`) since the last run: files → table, table → table, table → files. Columns are linked by name when the load job carries a schema, or from the table's columns for copy and extract; otherwise the link is table-level. Streaming inserts, the Storage Write API and Dataflow don't leave a job: those tables still appear (columns, schema changes) but without a source. Permissions: metadata viewer on the datasets, and `bigquery.jobs.listAll` on the project for lineage (`no_queries: true` skips the job history).
+- **Redshift** reads `SVV_TABLES` / `SVV_COLUMNS` and `SYS_QUERY_HISTORY` (full text from `SYS_QUERY_TEXT`) since the last run. Statements of one session are read together, so temp tables are followed. `COPY` from S3 is in the same history, so files → table lineage is there too, column by column with the table's columns. Seeing other users' queries needs a superuser or the `sys:monitor` role. Redshift keeps about 7 days of query history, so run the sync at least daily.
 - A table that a full sync no longer finds is marked dropped (kept, with its history).
 - The first run reads `lookback_hours` of history (default 168). `max_queries` (default 5000) caps one run; the next run continues from there.
 
 Dataset ids: `bigquery:project.dataset.table`, `redshift:database.schema.table`, `athena:database.table`, `postgres:<conn_id>.schema.table`, `gsheet:<id>!<tab>`, `gcs:gs://…`, `s3:s3://…`, `file:<path>`. Dates in file paths become `{date}`, so daily files are one dataset.
 
-API: `GET /api/v1/catalog?q=` (search names and column names), `GET /api/v1/catalog/table?id=`, `GET /api/v1/catalog/lineage?id=&column=&depth=` (both directions). With Postgres the catalog has its own tables (one row per dataset and per edge, indexed), so recording a task's lineage touches a few rows. The JSON store keeps it in sharded documents, fine for smaller catalogs. Measured with 10,000 tables × 30 columns and 20,000 edges (Postgres / JSON store): recording a task's lineage 4 ms / 75 ms, catalog list 53 ms / 0.8 s, a column's lineage both ways < 1 ms / 3 ms, a full sync 2.5 s / 3–5 s.
+**What the SQL reader understands.** CREATE TABLE/VIEW … AS, INSERT … SELECT, MERGE (all WHEN forms, INSERT ROW), UPDATE … FROM, SELECT … INTO, Redshift COPY, CTEs, subqueries (correlated too), joins, UNION / EXCEPT, `*` / `* EXCEPT`, UNNEST, STRUCT paths (`props.page.url` is the column `props`), and BigQuery scripting: BEGIN/END, IF/ELSE, DECLARE, temp tables between statements, `EXECUTE IMMEDIATE '<literal SQL>'`. That covers Dataform's compiled tables and incremental tables. It gives up on SQL built at run time (`EXECUTE IMMEDIATE` of a variable), `CALL` of a procedure, and UDF bodies. Those statements are listed in the task log ("could not read this statement") and counted in the sync node's output (`jobs_unread` / `statements_unread`), so a missing step is never silent. Reading is bounded: a statement it can't follow is skipped, and a task is never slowed or failed by it.
 
-Limits: the SQL reader is best effort. Dynamic SQL (`EXECUTE IMMEDIATE`), stored procedures, UDF bodies and nested STRUCT fields give table-level lineage or none. `transform` steps that rename columns only link columns that keep their name. The sync nodes are tested against fake query results, not yet against real BigQuery or Redshift.
+**Lineage stays current.**
+- When a task runs again, the lineage it reported before and not now is removed. Mapped instances only add.
+- When a query does CREATE [OR REPLACE] … AS, the older query lineage into that table is removed.
+- Lineage not seen for `DAGSFLOW_CATALOG_EDGE_TTL_DAYS` (default 90; 0 = keep) is hidden. Each step shows when it was last seen.
+- `dagsflow-go db clean --older-than 90d --yes` deletes that lineage, and tables that a sync marked dropped longer ago than `--older-than`.
+
+**Access.** The `catalog.read` permission takes dataset patterns: `*` for everything, or for example `bigquery:my-project.mart.*`, `redshift:*`, `gsheet:*` (`*` matches any text). A user sees only matching datasets.
+- Lineage through a dataset they can't see is still followed, but that dataset is left out.
+- Steps between nodes, and "written by dag.task", follow `dag.read` on that DAG.
+- Built-in roles have `catalog.read:*`. Custom roles need it added (role editor → Catalog access, or `catalog.read:<pattern>`).
+
+**Backup.** `db export` / `db import` include the catalog (datasets, columns, schema history, lineage, sync positions), so it moves with the metadata, also from the JSON store to Postgres.
+
+API: `GET /api/v1/catalog?q=` (search names and column names), `GET /api/v1/catalog/table?id=`, `GET /api/v1/catalog/lineage?id=&column=&depth=` (both directions). With Postgres the catalog has its own tables (one row per dataset and per edge, indexed), so recording a task's lineage touches a few rows. The JSON store keeps it in sharded documents, fine for smaller catalogs.
+
+Measured with 10,000 tables × 30 columns and 20,000 edges:
+
+| | Postgres | JSON store |
+|---|---|---|
+| Recording a task's lineage | 7 ms | 130 ms |
+| Catalog list | 80 ms | 1.1 s |
+| A column's lineage, both ways | 0.5 ms | 4 ms |
+| A full sync | 4 s | 4–6 s |
+
+Run it again with `DAGSFLOW_CATALOG_BENCH=1 go test ./engine -run CatalogScale -v`.
+
+Limits: `transform` steps that rename columns only link columns that keep their name. The sync nodes are tested against fake query results, not yet against real BigQuery or Redshift.
 
 ## Visual workflow builder (drag and drop)
 

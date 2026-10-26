@@ -34,6 +34,7 @@ const (
 	ActUsersManage = "users.manage"
 	ActRolesManage = "roles.manage"
 	ActBuilderEdit = "builder.edit" // visual builder: create/change/delete YAML workflows
+	ActCatalogRead = "catalog.read" // data catalog; resource: dataset ids ("*", "bigquery:proj.mart.*")
 )
 
 // ActionInfo describes an action (for the role editor).
@@ -41,25 +42,28 @@ type ActionInfo struct {
 	Name        string `json:"action"`
 	Description string `json:"description"`
 	DagScoped   bool   `json:"dag_scoped"`
+	// DatasetScoped: the resource is a pattern of catalog dataset ids
+	DatasetScoped bool `json:"dataset_scoped,omitempty"`
 }
 
 var Actions = []ActionInfo{
-	{ActDagRead, "View DAGs, runs, task instances, logs, XComs, code", true},
-	{ActDagEdit, "Pause/unpause, clear, mark state, notes, reparse", true},
-	{ActDagTrigger, "Trigger DAG runs", true},
-	{ActDagDelete, "Delete DAG runs and DAG metadata", true},
-	{ActPoolsRead, "View pools", false},
-	{ActPoolsEdit, "Create, change and delete pools", false},
-	{ActVarsRead, "View variables", false},
-	{ActVarsEdit, "Create, change and delete variables", false},
-	{ActConnsRead, "View connections (secrets masked)", false},
-	{ActConnsEdit, "Create, change and delete connections", false},
-	{ActEventsRead, "View the event log", false},
-	{ActDatasets, "View datasets", false},
-	{ActSystemRead, "View import errors and components", false},
-	{ActUsersManage, "Manage users and API tokens", false},
-	{ActRolesManage, "Manage roles and permissions", false},
-	{ActBuilderEdit, "Use the visual builder (writes workflow files, can run shell commands and SQL: treat like write access to DAG code)", false},
+	{Name: ActDagRead, Description: "View DAGs, runs, task instances, logs, XComs, code", DagScoped: true},
+	{Name: ActDagEdit, Description: "Pause/unpause, clear, mark state, notes, reparse", DagScoped: true},
+	{Name: ActDagTrigger, Description: "Trigger DAG runs", DagScoped: true},
+	{Name: ActDagDelete, Description: "Delete DAG runs and DAG metadata", DagScoped: true},
+	{Name: ActPoolsRead, Description: "View pools", DagScoped: false},
+	{Name: ActPoolsEdit, Description: "Create, change and delete pools", DagScoped: false},
+	{Name: ActVarsRead, Description: "View variables", DagScoped: false},
+	{Name: ActVarsEdit, Description: "Create, change and delete variables", DagScoped: false},
+	{Name: ActConnsRead, Description: "View connections (secrets masked)", DagScoped: false},
+	{Name: ActConnsEdit, Description: "Create, change and delete connections", DagScoped: false},
+	{Name: ActEventsRead, Description: "View the event log", DagScoped: false},
+	{Name: ActDatasets, Description: "View datasets", DagScoped: false},
+	{Name: ActSystemRead, Description: "View import errors and components", DagScoped: false},
+	{Name: ActUsersManage, Description: "Manage users and API tokens", DagScoped: false},
+	{Name: ActRolesManage, Description: "Manage roles and permissions", DagScoped: false},
+	{Name: ActBuilderEdit, Description: "Use the visual builder (writes workflow files, can run shell commands and SQL: treat like write access to DAG code)", DagScoped: false},
+	{Name: ActCatalogRead, Description: "View the data catalog: tables, columns and lineage of the datasets matching the pattern", DatasetScoped: true},
 }
 
 func actionInfo(name string) (ActionInfo, bool) {
@@ -108,6 +112,12 @@ func (p *Permission) validate() error {
 		return fmt.Errorf("unknown action %q (one of: %s)", p.Action, strings.Join(names, ", "))
 	}
 	p.Resource = strings.TrimSpace(p.Resource)
+	if info.DatasetScoped {
+		if p.Resource == "" {
+			p.Resource = "*"
+		}
+		return nil
+	}
 	if !info.DagScoped {
 		if p.Resource != "" {
 			return fmt.Errorf("%s is not DAG-scoped: drop %q", p.Action, p.Resource)
@@ -160,7 +170,7 @@ func all(acts ...string) []Permission {
 	var out []Permission
 	for _, a := range acts {
 		p := Permission{Action: a}
-		if info, _ := actionInfo(a); info.DagScoped {
+		if info, _ := actionInfo(a); info.DagScoped || info.DatasetScoped {
 			p.Resource = "*"
 		}
 		out = append(out, p)
@@ -170,7 +180,7 @@ func all(acts ...string) []Permission {
 
 // builtinRoles: the roles every install has (not editable).
 func builtinRoles() map[string]*RoleDef {
-	viewer := []string{ActDagRead, ActPoolsRead, ActEventsRead, ActDatasets, ActSystemRead}
+	viewer := []string{ActDagRead, ActPoolsRead, ActEventsRead, ActDatasets, ActSystemRead, ActCatalogRead}
 	user := append(append([]string{}, viewer...), ActDagEdit, ActDagTrigger)
 	op := append(append([]string{}, user...), ActDagDelete, ActPoolsEdit, ActVarsEdit, ActConnsEdit)
 	admin := append(append([]string{}, op...), ActUsersManage, ActRolesManage, ActBuilderEdit)
@@ -386,6 +396,55 @@ func (a *Access) CanDAG(action, dagID string, tags []string) bool {
 	return false
 }
 
+// CanDataset: the catalog dataset id is visible. Rows passed between nodes
+// (task:<dag>.<task>) follow dag.read on their DAG.
+func (a *Access) CanDataset(id string) bool {
+	if a.all {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(id, "task:"); ok {
+		dagID, _, _ := strings.Cut(rest, ".")
+		return a.Can(ActCatalogRead) && a.DAG(ActDagRead, dagID)
+	}
+	for _, p := range a.perms {
+		if p.Action == ActCatalogRead && globMatch(p.Resource, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// globMatch: * is any run of characters (slashes and dots too), ? one
+// character; case-insensitive.
+func globMatch(pattern, s string) bool {
+	if pattern == "*" || pattern == "" {
+		return true
+	}
+	p, t := []rune(strings.ToLower(pattern)), []rune(strings.ToLower(s))
+	star, mark := -1, 0
+	i, j := 0, 0
+	for j < len(t) {
+		switch {
+		case i < len(p) && (p[i] == '?' || p[i] == t[j]):
+			i++
+			j++
+		case i < len(p) && p[i] == '*':
+			star, mark = i, j
+			i++
+		case star >= 0:
+			i = star + 1
+			mark++
+			j = mark
+		default:
+			return false
+		}
+	}
+	for i < len(p) && p[i] == '*' {
+		i++
+	}
+	return i == len(p)
+}
+
 // DAG is CanDAG for a loaded DAG (tags known); unknown DAGs match by id only.
 func (a *Access) DAG(action, dagID string) bool {
 	var tags []string
@@ -407,7 +466,7 @@ func (a *Access) DagPermissions(dagID string) map[string]bool {
 func (a *Access) Global() map[string]bool {
 	out := map[string]bool{}
 	for _, info := range Actions {
-		if !info.DagScoped {
+		if !info.DagScoped { // dataset-scoped: true when some datasets are visible
 			out[info.Name] = a.Can(info.Name)
 		}
 	}
