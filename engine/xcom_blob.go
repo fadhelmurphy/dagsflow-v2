@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"strconv"
+	"time"
 )
 
 // Large XCom values (Postgres metastore) are stored in xcom_blob, not in the
@@ -163,4 +164,47 @@ func (s *Store) ResolveXCom(r *DagRun) error {
 		return p.resolveXCom(ctx, r)
 	}
 	return nil
+}
+
+// CompactXCom moves large XCom values still stored inside run rows (runs saved
+// before xcom_blob existed) out to xcom_blob. Running runs are skipped; it is
+// safe to run any time and to run again. Returns the runs rewritten.
+func (s *Store) CompactXCom(logf func(string, ...any)) (int, error) {
+	p, ok := s.be().(*pgBackend)
+	if !ok {
+		return 0, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	rows, err := p.pool.Query(ctx, `SELECT dag_id, run_id FROM dag_run
+		WHERE owner IS NULL AND octet_length(coalesce(doc->'xcom', '{}'::jsonb)::text) > $1`, xcomInlineMax())
+	if err != nil {
+		return 0, err
+	}
+	var keys [][2]string
+	for rows.Next() {
+		var d, r string
+		if err := rows.Scan(&d, &r); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		keys = append(keys, [2]string{d, r})
+	}
+	rows.Close()
+	n := 0
+	for _, k := range keys {
+		run, err := s.LoadRun(k[0], k[1])
+		if err != nil {
+			continue
+		}
+		if err := s.SaveRun(run); err != nil {
+			logf("skip %s/%s: %v", k[0], k[1], err)
+			continue
+		}
+		n++
+		if n%100 == 0 {
+			logf("%d / %d runs", n, len(keys))
+		}
+	}
+	return n, nil
 }

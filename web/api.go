@@ -537,29 +537,54 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		"permissions": a.Permissions(), "can": a.Global(), "auth_enabled": u != anonymousAdmin})
 }
 
+type dagListEntry struct {
+	DagID       string          `json:"dag_id"`
+	Owner       string          `json:"owner"`
+	Schedule    string          `json:"schedule"`
+	Description string          `json:"description"`
+	Tags        []string        `json:"tags"`
+	Source      string          `json:"source"`
+	IsPaused    bool            `json:"is_paused"`
+	Next        *time.Time      `json:"next_data_interval_start,omitempty"`
+	Recent      []runSummary    `json:"recent_runs"`
+	Active      int             `json:"active_runs"`
+	RunCounts   map[string]int  `json:"run_counts"`
+	LastRun     *runSummary     `json:"last_run,omitempty"`
+	TaskCounts  map[string]int  `json:"recent_task_counts"`
+	Perms       map[string]bool `json:"permissions"`
+}
+
 func (s *Server) listDags(w http.ResponseWriter, r *http.Request) {
-	type item struct {
-		DagID       string          `json:"dag_id"`
-		Owner       string          `json:"owner"`
-		Schedule    string          `json:"schedule"`
-		Description string          `json:"description"`
-		Tags        []string        `json:"tags"`
-		Source      string          `json:"source"`
-		IsPaused    bool            `json:"is_paused"`
-		Next        *time.Time      `json:"next_data_interval_start,omitempty"`
-		Recent      []runSummary    `json:"recent_runs"`
-		Active      int             `json:"active_runs"`
-		RunCounts   map[string]int  `json:"run_counts"`
-		LastRun     *runSummary     `json:"last_run,omitempty"`
-		TaskCounts  map[string]int  `json:"recent_task_counts"`
-		Perms       map[string]bool `json:"permissions"`
-	}
 	a := accessFrom(r)
-	out := []item{}
+	var dags []*dag.DAG
 	for _, d := range dag.List() {
-		if !a.CanDAG(engine.ActDagRead, d.ID, d.Tags) {
-			continue
+		if a.CanDAG(engine.ActDagRead, d.ID, d.Tags) {
+			dags = append(dags, d)
 		}
+	}
+	out := make([]dagListEntry, len(dags))
+	// a few DAGs at a time: each needs its own metadata queries (round trips to the database)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for i, d := range dags {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, d *dag.DAG) {
+			defer func() { <-sem; wg.Done() }()
+			out[i] = s.dagListItem(a, d)
+		}(i, d)
+	}
+	wg.Wait()
+	errs := map[string]string{}
+	if a.Can(engine.ActSystemRead) {
+		errs = importErrMap()
+	}
+	writeJSON(w, 200, map[string]any{"dags": out, "total_entries": len(out), "import_errors": errs})
+}
+
+func (s *Server) dagListItem(a *engine.Access, d *dag.DAG) dagListEntry {
+	type item = dagListEntry
+	{
 		m := s.Store.GetDagMeta(d.ID)
 		counts, runs, _ := s.Store.RunSummary(d.ID, 14) // counts + the latest runs only: the list refreshes every few seconds
 		it := item{DagID: d.ID, Owner: d.Owner(), Schedule: scheduleLabel(d), Description: d.Description, Tags: d.Tags,
@@ -589,13 +614,8 @@ func (s *Server) listDags(w http.ResponseWriter, r *http.Request) {
 				it.TaskCounts[stateName(ti.State)]++
 			}
 		}
-		out = append(out, it)
+		return it
 	}
-	errs := map[string]string{}
-	if a.Can(engine.ActSystemRead) {
-		errs = importErrMap()
-	}
-	writeJSON(w, 200, map[string]any{"dags": out, "total_entries": len(out), "import_errors": errs})
 }
 
 func stateName(s dag.State) string {
@@ -610,7 +630,7 @@ func (s *Server) deleteDag(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	runs, _ := s.Store.ListRuns(d.ID)
+	runs, _ := s.Store.ListRunsLite(d.ID)
 	for _, run := range runs {
 		if run.State == engine.RunRunning {
 			fail(w, 409, "dag has a running run; wait for it or pause the DAG first")
@@ -703,7 +723,7 @@ func (s *Server) getDag(w http.ResponseWriter, r *http.Request) {
 			base = t
 		}
 	}
-	runs, _ := s.Store.ListRuns(d.ID)
+	runs, _ := s.Store.ListRunsLite(d.ID)
 	counts := map[string]int{}
 	var filtered []*engine.DagRun
 	for _, run := range runs {
@@ -760,7 +780,7 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	runs, _ := s.Store.ListRuns(d.ID)
+	runs, _ := s.Store.ListRunsLite(d.ID)
 	state := r.URL.Query().Get("state")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
@@ -1033,7 +1053,7 @@ func (s *Server) listPools(w http.ResponseWriter, r *http.Request) {
 	// occupancy from task instances of active runs
 	running, queued := map[string]int{}, map[string]int{}
 	for _, d := range dag.List() {
-		runs, _ := s.Store.ListRuns(d.ID)
+		runs, _ := s.Store.ListRunsLite(d.ID)
 		for _, run := range runs {
 			if run.State != engine.RunRunning {
 				continue

@@ -309,7 +309,7 @@ func (s *Server) taskInstances(w http.ResponseWriter, r *http.Request) {
 		if !a.CanDAG(engine.ActDagRead, d.ID, d.Tags) {
 			continue
 		}
-		runs, _ := s.Store.ListRuns(d.ID)
+		runs, _ := s.Store.ListRunsLite(d.ID)
 		for i := len(runs) - 1; i >= 0; i-- {
 			run := runs[i]
 			for _, t := range d.Tasks() {

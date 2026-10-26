@@ -325,7 +325,31 @@ func (p *pgBackend) runCounts(dagID string) (map[string]int, error) {
 func (p *pgBackend) latestRuns(dagID string, n int) ([]*DagRun, error) {
 	ctx, cancel := pgctx()
 	defer cancel()
-	rows, err := p.pool.Query(ctx, `SELECT doc, version FROM dag_run WHERE dag_id=$1 ORDER BY logical_date DESC, queued_at DESC LIMIT $2`, dagID, n)
+	rows, err := p.pool.Query(ctx, `SELECT doc - 'xcom' - 'rendered_fields', version FROM dag_run WHERE dag_id=$1 ORDER BY logical_date DESC, queued_at DESC LIMIT $2`, dagID, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*DagRun
+	for rows.Next() {
+		var doc []byte
+		var ver int64
+		if err := rows.Scan(&doc, &ver); err != nil {
+			return nil, err
+		}
+		if r, err := decodeRun(doc, ver); err == nil {
+			out = append(out, r)
+		}
+	}
+	return out, rows.Err()
+}
+
+// listRunsLite: the runs without their XComs and rendered fields (what the
+// grid and run lists show), so old runs with big inline values stay cheap.
+func (p *pgBackend) listRunsLite(dagID string) ([]*DagRun, error) {
+	ctx, cancel := pgctx()
+	defer cancel()
+	rows, err := p.pool.Query(ctx, `SELECT doc - 'xcom' - 'rendered_fields', version FROM dag_run WHERE dag_id=$1`, dagID)
 	if err != nil {
 		return nil, err
 	}

@@ -445,6 +445,27 @@ type runSummarizer interface {
 	latestRuns(dagID string, n int) ([]*DagRun, error)
 }
 
+// ListRunsLite is ListRuns without XComs and rendered fields (Postgres; the
+// JSON store returns full runs). For lists that show states and times only:
+// never save a run read this way.
+func (s *Store) ListRunsLite(dagID string) ([]*DagRun, error) {
+	p, ok := s.be().(*pgBackend)
+	if !ok {
+		return s.ListRuns(dagID)
+	}
+	out, err := p.listRunsLite(dagID)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].LogicalDate.Equal(out[j].LogicalDate) {
+			return out[i].QueuedAt.Before(out[j].QueuedAt)
+		}
+		return out[i].LogicalDate.Before(out[j].LogicalDate)
+	})
+	return out, nil
+}
+
 // RunSummary returns the number of runs per state and the n latest runs
 // (oldest first): what the DAG list shows, without reading every run.
 func (s *Store) RunSummary(dagID string, n int) (map[string]int, []*DagRun, error) {

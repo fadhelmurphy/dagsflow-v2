@@ -79,3 +79,38 @@ func TestPGXComBlob(t *testing.T) {
 		t.Fatalf("blobs after delete: %d", blobs)
 	}
 }
+
+func TestPGCompactXCom(t *testing.T) {
+	resetPG(t)
+	st := pgStore(t)
+	pg := st.b.(*pgBackend)
+	d := dag.NewDAG("compact_dag", "")
+	d.NewTask("read", func(*dag.TaskContext) error { return nil })
+	big := make([]any, 5000)
+	for i := range big {
+		big[i] = map[string]any{"id": float64(i), "name": strings.Repeat("y", 20)}
+	}
+	t.Setenv("DAGSFLOW_XCOM_INLINE_BYTES", "1000000000") // an old binary: everything inline
+	r := NewDagRun(d, "manual", "old", time.Now(), time.Now(), time.Now(), nil)
+	r.State = RunSuccess
+	r.XCom["read"] = map[string]any{"return_value": big}
+	if _, err := st.CreateRun(r); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DAGSFLOW_XCOM_INLINE_BYTES", "")
+	n, err := st.CompactXCom(t.Logf)
+	if err != nil || n != 1 {
+		t.Fatalf("compacted %d %v", n, err)
+	}
+	var docLen int
+	_ = pg.pool.QueryRow(context.Background(), `SELECT length(doc::text) FROM dag_run WHERE dag_id='compact_dag'`).Scan(&docLen)
+	if docLen > 10000 {
+		t.Fatalf("row still %d bytes", docLen)
+	}
+	if got, _ := st.LoadRun("compact_dag", "old"); len(got.XCom["read"]["return_value"].([]any)) != 5000 {
+		t.Fatal("value lost")
+	}
+	if n, _ := st.CompactXCom(t.Logf); n != 0 {
+		t.Fatalf("second pass rewrote %d", n)
+	}
+}

@@ -179,7 +179,17 @@ func dbCmd() *cobra.Command {
 	}
 	imp.Flags().StringVarP(&file, "file", "f", "-", "input file (- = stdin)")
 
-	c.AddCommand(check, migrate, clean, export, imp)
+	compact := &cobra.Command{
+		Use: "compact-xcom", Short: "Move large XCom values out of old run rows into xcom_blob (Postgres; speeds up run lists)",
+		Run: func(cmd *cobra.Command, args []string) {
+			n, err := newStore().CompactXCom(func(f string, a ...any) { fmt.Printf(f+"\n", a...) })
+			if err != nil {
+				exitf("%v", err)
+			}
+			fmt.Printf("%d runs compacted\n", n)
+		},
+	}
+	c.AddCommand(check, migrate, clean, export, imp, compact)
 	return c
 }
 
