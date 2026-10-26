@@ -436,6 +436,7 @@ func (d *DAG) NewBigQueryLoadTableTask(id string, cfg BigQueryLoadConfig, opts .
 		if err != nil {
 			return err
 		}
+		ctx.lineageSQL(script, BigQueryDialect(project), false, tableCols(map[string][]string{src: names2(si.cols), dst: names2(ti.cols)}))
 		n := int64(-1)
 		if len(rows) > 0 {
 			if rm, ok := rows[len(rows)-1].(map[string]any); ok {

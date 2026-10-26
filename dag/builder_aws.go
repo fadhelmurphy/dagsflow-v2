@@ -123,5 +123,13 @@ func awsWarehouseNodes() []NodeType {
 		{Type: "redshift_delete_table", Operator: "redshift_delete_table", Label: "Redshift delete table", Category: "Destinations", Icon: "bq",
 			Description: "Drop Redshift tables.",
 			Fields:      cat(tablesFields("schema.table"), rs)},
+		{Type: "redshift_catalog_sync", Operator: "redshift_catalog_sync", Label: "Redshift catalog sync", Category: "Catalog", Icon: "bq",
+			Description: "Read Redshift's metadata into the data catalog: tables and columns (SVV_TABLES / SVV_COLUMNS), schema changes, and the column lineage of the queries people ran since the last run (SYS_QUERY_HISTORY). Schedule it, e.g. hourly.",
+			Fields: cat([]NodeField{
+				{Name: "schemas", Label: "Schemas", Kind: "list", Help: "One per line. Default: every user schema of the database"},
+				{Name: "lookback_hours", Label: "First run: hours of queries", Kind: "number", Placeholder: "168", Help: "Redshift keeps about 7 days of query history: run the sync at least daily"},
+				{Name: "max_queries", Label: "Max queries per run", Kind: "number", Placeholder: "5000", Help: "The rest is read by the next run"},
+				{Name: "no_queries", Label: "Tables and columns only", Kind: "bool", Help: "No query lineage (no access to SYS_QUERY_HISTORY needed)"},
+			}, rs)},
 	}
 }

@@ -40,6 +40,7 @@ func NewEngine(store *Store, parallelism int) *Engine {
 		parallelism = 16
 	}
 	e := &Engine{Store: store, active: map[string]chan struct{}{}}
+	store.InstallCatalogHooks()
 	e.slots = newSlotManager(parallelism, e.poolSize)
 	return e
 }
@@ -977,7 +978,20 @@ func (rc *runCtx) runTask(k tiKey, item any) {
 			rc.mu.Lock()
 			extras := rc.outletX[k]
 			delete(rc.outletX, k)
+			slot := t.ID
+			if k.idx >= 0 {
+				slot = mappedKey(t.ID, k.idx)
+			}
+			lineage, hasLineage := rc.r.XCom[slot][dag.LineageXCom]
+			if hasLineage {
+				delete(rc.r.XCom[slot], dag.LineageXCom)
+			}
 			rc.mu.Unlock()
+			if hasLineage {
+				if err := e.Store.RecordTaskLineage(rc.d.ID, t.ID, lineage); err != nil {
+					fmt.Fprintf(out, "WARN: lineage: %v\n", err)
+				}
+			}
 			for _, uri := range t.Outlets() {
 				if err := e.Store.AddDatasetEvent(uri, DatasetEvent{Timestamp: time.Now(), SourceDag: rc.d.ID,
 					SourceTask: t.ID, SourceRunID: rc.r.RunID, Extra: extras[uri]}); err != nil {

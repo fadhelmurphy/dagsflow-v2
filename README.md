@@ -636,6 +636,51 @@ BigQuery and Google Sheets as source or destination (plain REST, no extra depend
 
 Credentials come from the `google_cloud_default` connection (or `conn_id`): `credentials_path` or `credentials_json` of a service account, else `GOOGLE_APPLICATION_CREDENTIALS`, else the GCE/GKE metadata server. Share the sheet with the service account's email. These four operators are covered by tests against a fake Google API, not yet against a real GCP project.
 
+## Data catalog and column lineage
+
+The **Catalog** page lists the tables, files and sheets your pipelines read and write, with their columns, schema changes (added, removed, type changed), who created them, which nodes write them, and the lineage of each column: where it comes from and what reads it, through every step in between.
+
+Two things fill it, without Dataplex or another paid service:
+
+1. **dagsflow nodes record what they run.** When a task succeeds its lineage is stored:
+   - `gsheet_read` / `file_read`: the sheet or file columns, renamed by `rename`.
+   - `gcs_write` / `s3_write`: the file written.
+   - `bigquery_external_table` / `athena_external_table`: file → table.
+   - `bigquery_insert`, `gsheet_write`, `postgres` (insert): node rows → table.
+   - `merge` / `transform`: columns with the same name pass through.
+   - SQL nodes (`bigquery`, `bigquery_query`, `bigquery_load_table`, `athena_query`, `athena_load_table`, `redshift_query`, `redshift_load_table`, `postgres`): the SQL is read for column lineage. That covers CREATE TABLE/VIEW … AS, INSERT … SELECT, MERGE, UPDATE … FROM, Redshift COPY, CTEs, subqueries, joins, UNION, `*` / `* EXCEPT`, and temp tables between the statements of a script.
+
+   Rows passed from one node to the next appear as a step (`node dag › task`), so a chain like sheet → GCS file → external table → table links up column by column.
+
+2. **Catalog sync nodes read the warehouse's own metadata**, for tables made outside dagsflow (the console, dbt, notebooks). Schedule them, e.g. hourly. Each run reads only what changed since the last one.
+
+```yaml
+dag_id: catalog_sync
+schedule: "0 * * * *"
+tasks:
+  - id: bq
+    operator: bigquery_catalog_sync
+    project_id: my-project
+    regions: [US, asia-southeast2]      # default: the connection's location, else US
+    datasets: [raw, mart]               # optional; default every dataset
+  - id: rs
+    operator: redshift_catalog_sync
+    database: dev
+    workgroup_name: my-wg               # or cluster_identifier + db_user / secret_arn
+    schemas: [public, mart]             # optional
+```
+
+- **BigQuery** reads `region-x.INFORMATION_SCHEMA.TABLES` / `COLUMNS` every run, and `INFORMATION_SCHEMA.JOBS` since the last run: CREATE / INSERT / MERGE / UPDATE / scripts and SELECTs with a destination table. A table's creator is the user of the job that created it. No table data is scanned, but each INFORMATION_SCHEMA query is billed at the 10 MB minimum. Permissions: metadata viewer on the datasets, and `bigquery.jobs.listAll` on the project for lineage (`no_queries: true` skips the job history).
+- **Redshift** reads `SVV_TABLES` / `SVV_COLUMNS` and `SYS_QUERY_HISTORY` (full text from `SYS_QUERY_TEXT`) since the last run. Statements of one session are read together, so temp tables are followed. Seeing other users' queries needs a superuser or the `sys:monitor` role. Redshift keeps about 7 days of query history, so run the sync at least daily.
+- A table that a full sync no longer finds is marked dropped (kept, with its history).
+- The first run reads `lookback_hours` of history (default 168). `max_queries` (default 5000) caps one run; the next run continues from there.
+
+Dataset ids: `bigquery:project.dataset.table`, `redshift:database.schema.table`, `athena:database.table`, `postgres:<conn_id>.schema.table`, `gsheet:<id>!<tab>`, `gcs:gs://…`, `s3:s3://…`, `file:<path>`. Dates in file paths become `{date}`, so daily files are one dataset.
+
+API: `GET /api/v1/catalog?q=` (search names and column names), `GET /api/v1/catalog/table?id=`, `GET /api/v1/catalog/lineage?id=&column=&depth=` (both directions). With Postgres the catalog has its own tables (one row per dataset and per edge, indexed), so recording a task's lineage touches a few rows. The JSON store keeps it in sharded documents, fine for smaller catalogs. Measured with 10,000 tables × 30 columns and 20,000 edges (Postgres / JSON store): recording a task's lineage 4 ms / 75 ms, catalog list 53 ms / 0.8 s, a column's lineage both ways < 1 ms / 3 ms, a full sync 2.5 s / 3–5 s.
+
+Limits: the SQL reader is best effort. Dynamic SQL (`EXECUTE IMMEDIATE`), stored procedures, UDF bodies and nested STRUCT fields give table-level lineage or none. `transform` steps that rename columns only link columns that keep their name. The sync nodes are tested against fake query results, not yet against real BigQuery or Redshift.
+
 ## Visual workflow builder (drag and drop)
 
 ![Visual workflow builder: drag nodes, connect, configure, run; BigQuery to Google Sheets](docs/builder-demo.gif)
@@ -772,7 +817,7 @@ curl -H "$H" $B/dags/custom_dag/dagRuns/<run_id>/taskInstances
 curl -H "$H" "$B/dags/custom_dag/dagRuns/<run_id>/taskInstances/<task>/logs/1?map_index=0"
 curl -H "$H" -X PATCH $B/dags/custom_dag -d '{"is_paused":true}'
 ```
-Other endpoints: `dagRuns/{run}/clear`, `DELETE dagRuns/{run}`, `pools`, `variables`, `connections` (sensitive values masked), `datasets`, `importErrors`, `components`, `users`, `users/{u}/tokens`, `roles`, `health`, `me`.
+Other endpoints: `dagRuns/{run}/clear`, `DELETE dagRuns/{run}`, `pools`, `variables`, `connections` (sensitive values masked), `datasets`, `catalog`, `importErrors`, `components`, `users`, `users/{u}/tokens`, `roles`, `health`, `me`.
 
 ## Production
 

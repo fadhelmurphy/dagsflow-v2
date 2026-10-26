@@ -101,6 +101,7 @@ func (d *DAG) NewBigQueryExternalTableTask(id string, cfg BigQueryExternalConfig
 		for i, c := range cols {
 			schema[i] = map[string]any{"name": c.Name, "type": c.Type}
 		}
+		ctx.lineageExternal("bigquery:"+table, "gcs", src.origin, cols)
 		return ctx.XComPush("return_value", map[string]any{"table": table, "uris": src.uris, "format": src.format, "columns": schema})
 	}, opts...)
 }
@@ -110,8 +111,9 @@ type extSource struct {
 	format     string // csv | tsv | ndjson
 	delimiter  string
 	gzip       bool
-	expiration string  // SQL for expiration_timestamp
-	cols       []bqCol // name + guessed type
+	expiration string   // SQL for expiration_timestamp
+	cols       []bqCol  // name + guessed type
+	origin     []string // the files as written (before all_files), for lineage
 }
 
 // externalSource reads the output of the GCS dump node, or the files listed on the node.
@@ -159,6 +161,7 @@ func externalSource(ctx *TaskContext, cfg BigQueryExternalConfig) (extSource, er
 			return s, fmt.Errorf("%q wrote no columns (no rows?): nothing to describe", id)
 		}
 	}
+	s.origin = append([]string(nil), s.uris...)
 	if cfg.AllFiles {
 		for i, u := range s.uris {
 			if !strings.HasSuffix(u, "*") {

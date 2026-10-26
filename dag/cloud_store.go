@@ -218,6 +218,13 @@ func (d *DAG) newStoreTask(id, op, opName, scheme string, cfg StoreWriteConfig,
 			return err
 		}
 		ctx.Logf("written: %s", uri)
+		if up, err := upstreamInput(ctx, cfg.RowsFrom); err == nil {
+			eng := map[string]string{"gs": "gcs", "s3": "s3"}[scheme]
+			if eng == "" {
+				eng = scheme
+			}
+			ctx.lineageWrite(up, rows, cfg.Columns, eng+":"+uri, "file", true)
+		}
 		_ = ctx.XComPush("rows_affected", int64(len(rows)))
 		return ctx.XComPush("return_value", storeOutput(cfg, uri, rows, len(data)))
 	}, opts...)

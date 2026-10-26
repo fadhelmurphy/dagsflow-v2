@@ -49,9 +49,10 @@ type TaskContext struct {
 	Task   *Task
 	Params map[string]any // dag params overridden by dag_run.conf
 
-	run    RunState
-	out    io.Writer
-	logger *log.Logger
+	run     RunState
+	out     io.Writer
+	logger  *log.Logger
+	lineage *Lineage
 }
 
 func NewTaskContext(parent context.Context, t *Task, info RunInfo, rs RunState, logOut io.Writer) *TaskContext {

@@ -128,6 +128,12 @@ type yamlTask struct {
 	DistKey                 string                `yaml:"dist_key"`
 	SortKey                 []string              `yaml:"sort_key"`
 	CastMode                string                `yaml:"cast_mode"`
+	Regions                 []string              `yaml:"regions"` // bigquery_catalog_sync / redshift_catalog_sync
+	Datasets                []string              `yaml:"datasets"`
+	Schemas                 []string              `yaml:"schemas"`
+	LookbackHours           int                   `yaml:"lookback_hours"`
+	MaxQueries              int                   `yaml:"max_queries"`
+	NoQueries               bool                  `yaml:"no_queries"`
 	Metadata                []string              `yaml:"metadata"`
 	MetadataPrefix          string                `yaml:"metadata_prefix"`
 	MetadataNames           map[string]string     `yaml:"metadata_names"`
@@ -409,8 +415,11 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			Table: yt.Table, RowsFrom: yt.RowsFrom, AllFiles: yt.AllFiles, DefaultType: yt.DefaultType, ColumnTypes: yt.ColumnTypes,
 			IfNotExists: yt.IfNotExists, Expiration: yt.Expiration, URIs: yt.URIs, Format: yt.Format, Columns: yt.Columns}, opts...)
 	case "athena_query", "athena_external_table", "athena_load_table", "athena_delete_table",
-		"redshift_query", "redshift_load_table", "redshift_delete_table":
+		"redshift_query", "redshift_load_table", "redshift_delete_table", "redshift_catalog_sync":
 		yt.addAWS(d, opts)
+	case "bigquery_catalog_sync":
+		d.NewBigQueryCatalogSyncTask(yt.ID, BigQueryCatalogSyncConfig{ConnID: yt.ConnID, ProjectID: yt.ProjectID, Regions: yt.Regions,
+			Datasets: yt.Datasets, LookbackHours: yt.LookbackHours, MaxJobs: yt.MaxQueries, NoJobs: yt.NoQueries}, opts...)
 	case "bigquery_delete_table":
 		d.NewBigQueryDeleteTableTask(yt.ID, BigQueryDeleteConfig{ConnID: yt.ConnID, ProjectID: yt.ProjectID,
 			Tables: yt.Tables, FailIfMissing: yt.FailIfMissing}, opts...)
@@ -458,7 +467,7 @@ func (yt yamlTask) add(d *DAG, baseDir string, opts []TaskOption) error {
 			d.NewHTTPSensor(yt.ID, yt.httpReq(), cfg, opts...)
 		}
 	default:
-		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, branch, gcs_write, s3_write, bigquery_external_table, bigquery_load_table, bigquery_delete_table, athena_query, athena_external_table, athena_load_table, athena_delete_table, redshift_query, redshift_load_table, redshift_delete_table, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
+		return fmt.Errorf("unknown operator %q (empty, bash, go, bigquery, http, postgres, transform, bigquery_query, bigquery_insert, gsheet_read, gsheet_write, file_read, merge, branch, gcs_write, s3_write, bigquery_external_table, bigquery_load_table, bigquery_delete_table, bigquery_catalog_sync, athena_query, athena_external_table, athena_load_table, athena_delete_table, redshift_query, redshift_load_table, redshift_delete_table, redshift_catalog_sync, trigger_dagrun, file_sensor, time_delta_sensor, external_task_sensor, http_sensor, custom)", yt.Operator)
 	}
 	return nil
 }
@@ -555,6 +564,9 @@ func (yt yamlTask) addAWS(d *DAG, opts []TaskOption) {
 	case "redshift_load_table":
 		d.NewRedshiftLoadTableTask(yt.ID, RedshiftLoadConfig{RedshiftConn: rs, LoadOptions: lo, Table: yt.Table, IAMRole: yt.IAMRole, RowsFrom: yt.RowsFrom,
 			SourceTable: yt.SourceTable, AllFiles: yt.AllFiles, S3Region: yt.S3Region, DistKey: yt.DistKey, SortKey: yt.SortKey}, opts...)
+	case "redshift_catalog_sync":
+		d.NewRedshiftCatalogSyncTask(yt.ID, RedshiftCatalogSyncConfig{RedshiftConn: rs, Schemas: yt.Schemas, LookbackHours: yt.LookbackHours,
+			MaxQueries: yt.MaxQueries, NoQueries: yt.NoQueries}, opts...)
 	case "redshift_delete_table":
 		d.NewRedshiftDeleteTableTask(yt.ID, RedshiftDeleteConfig{RedshiftConn: rs, Tables: yt.Tables, FailIfMissing: yt.FailIfMissing}, opts...)
 	}

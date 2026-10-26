@@ -233,6 +233,17 @@ var Nodes = []NodeType{
 			{Name: "location", Label: "Location", Kind: "text", Placeholder: "US"},
 			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default"},
 		}},
+	{Type: "bigquery_catalog_sync", Operator: "bigquery_catalog_sync", Label: "BigQuery catalog sync", Category: "Catalog", Icon: "bq",
+		Description: "Read BigQuery's metadata into the data catalog: tables and columns (INFORMATION_SCHEMA), schema changes, who created a table, and the column lineage of the queries people ran since the last run (INFORMATION_SCHEMA.JOBS). No table data is read. Schedule it, e.g. hourly.",
+		Fields: []NodeField{
+			{Name: "project_id", Label: "Project", Kind: "text", Help: "Default: the connection or the credentials"},
+			{Name: "regions", Label: "Regions", Kind: "list", Placeholder: "US", Help: "One per line, e.g. US, EU, asia-southeast2. Default: the connection's location, else US"},
+			{Name: "datasets", Label: "Datasets", Kind: "list", Help: "One per line. Default: every dataset"},
+			{Name: "lookback_hours", Label: "First run: hours of jobs", Kind: "number", Placeholder: "168"},
+			{Name: "max_queries", Label: "Max jobs per run", Kind: "number", Placeholder: "5000", Help: "Per region; the rest is read by the next run"},
+			{Name: "no_queries", Label: "Tables and columns only", Kind: "bool", Help: "No query lineage (no bigquery.jobs.listAll needed)"},
+			{Name: "conn_id", Label: "Connection", Kind: "conn", Help: "Default: google_cloud_default (needs bigquery.tables.list / metadata, and bigquery.jobs.listAll for lineage)"},
+		}},
 	{Type: "bigquery_delete_table", Operator: "bigquery_delete_table", Label: "BigQuery delete table", Category: "Destinations", Icon: "bq",
 		Description: "Delete BigQuery tables, views or external tables. A table that is not there is skipped.",
 		Fields: []NodeField{

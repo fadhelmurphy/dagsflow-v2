@@ -242,6 +242,7 @@ func (d *DAG) NewRedshiftQueryTask(id string, cfg RedshiftQueryConfig, opts ...T
 			_ = ctx.XComPush("rows_affected", st.ResultRows)
 		}
 		ctx.Logf("%d rows returned", len(rows))
+		ctx.lineageSQL(q, RedshiftDialect("redshift", cfg.Database, "public"), st.HasResultSet, nil)
 		return ctx.XComPush("return_value", rows)
 	}, opts...)
 }
@@ -324,6 +325,12 @@ func (d *DAG) NewRedshiftLoadTableTask(id string, cfg RedshiftLoadConfig, opts .
 				}
 			}
 		}
+		srcCols := map[string][]string{ts + "." + tt: names2(tgt)}
+		if cfg.SourceTable != "" {
+			ss, st, _ := rsSplit(cfg.SourceTable)
+			srcCols[ss+"."+st] = names2(s.cols)
+		}
+		ctx.lineageSQL(strings.Join(append(append([]string{}, pre...), batch...), ";\n"), RedshiftDialect("redshift", cfg.Database, "public"), false, tableCols(srcCols))
 		if n >= 0 {
 			ctx.Logf("%d rows %s into %s.%s", n, map[string]string{"append": "added", "replace": "loaded", "merge": "merged"}[cfg.mode()], ts, tt)
 			_ = ctx.XComPush("rows_affected", n)

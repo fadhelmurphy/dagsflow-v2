@@ -244,6 +244,7 @@ func (d *DAG) NewAthenaQueryTask(id string, cfg AthenaQueryConfig, opts ...TaskO
 			_ = ctx.XComPush("rows_affected", n)
 		}
 		ctx.Logf("%d rows returned", len(rows))
+		ctx.lineageSQL(q, AthenaDialect(cfg.Database), true, nil)
 		return ctx.XComPush("return_value", rows)
 	}, opts...)
 }
@@ -349,6 +350,7 @@ func (d *DAG) NewAthenaExternalTableTask(id string, cfg AthenaExternalConfig, op
 			return err
 		}
 		ctx.Logf("external table %s.%s: %d columns over %s (every file in that folder)", db, tb, len(cols), loc)
+		ctx.lineageExternalMapped("athena:"+db+"."+tb, "s3", s.uris, s.cols, cols)
 		schema := make([]any, len(cols))
 		for i, c := range cols {
 			schema[i] = map[string]any{"name": c.Name, "type": c.Type}
@@ -542,6 +544,8 @@ func (d *DAG) NewAthenaLoadTableTask(id string, cfg AthenaLoadConfig, opts ...Ta
 		if err != nil {
 			return err
 		}
+		ctx.lineageSQL(strings.Join(stmts, ";\n"), AthenaDialect(cfg.Database), false,
+			tableCols(map[string][]string{sdb + "." + stb: names2(src), ddb + "." + dtb: names2(tgt)}))
 		n := int64(-1)
 		for _, s := range stmts {
 			id, err := c.run(ctx, s)

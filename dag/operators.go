@@ -75,7 +75,13 @@ func (d *DAG) NewBigQueryTask(id, sqlPath string, params map[string]any, opts ..
 			_ = ctx.XComPush("job_id", jobID)
 			_ = ctx.XComPush("bigquery_job_url", fmt.Sprintf("https://console.cloud.google.com/bigquery?project=%s&j=bq:%s:%s&page=queryresults", op.ProjectID, location, jobID))
 		}
-		return op.Execute(ctx)
+		if err := op.Execute(ctx); err != nil {
+			return err
+		}
+		if op.ProjectID != "" {
+			ctx.lineageSQL(query, BigQueryDialect(op.ProjectID), false, nil)
+		}
+		return nil
 	}, opts...)
 }
 

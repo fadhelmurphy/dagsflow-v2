@@ -396,6 +396,7 @@ func (d *DAG) NewTransformTask(id string, cfg TransformConfig, opts ...TaskOptio
 			return err
 		}
 		ctx.Logf("transform: %d steps, %d rows out", len(cfg.Steps), len(res))
+		ctx.lineagePass([]string{from}, res)
 		return ctx.XComPush("return_value", res)
 	}, opts...)
 }
@@ -563,6 +564,7 @@ func (d *DAG) NewPostgresTask(id string, cfg PostgresConfig, opts ...TaskOption)
 			ctx.Logf("WARNING: result cut at %d rows (set a higher limit)", cfg.Limit)
 		}
 		ctx.Logf("%d rows returned, %d affected", len(out), affected)
+		ctx.lineageSQL(query, RedshiftDialect("postgres", cfg.ConnID, "public"), len(out) > 0, nil)
 		_ = ctx.XComPush("rows_affected", affected)
 		return ctx.XComPush("return_value", out)
 	}, opts...)
@@ -656,6 +658,13 @@ func pgInsert(ctx *TaskContext, pg *pgx.Conn, cfg PostgresConfig) error {
 		return err
 	}
 	ctx.Logf("%d rows inserted", affected)
+	if up, err := upstreamInput(ctx, cfg.RowsFrom); err == nil {
+		name := strings.ToLower(cfg.Table)
+		if !strings.Contains(name, ".") {
+			name = "public." + name
+		}
+		ctx.lineageWrite(up, list, cols, "postgres:"+strings.ToLower(cfg.ConnID)+"."+name, "table", false)
+	}
 	_ = ctx.XComPush("rows_affected", affected)
 	return ctx.XComPush("return_value", map[string]any{"rows_inserted": affected})
 }

@@ -91,6 +91,11 @@ func (d *DAG) NewFileReadTask(id string, cfg FileReadConfig, opts ...TaskOption)
 			where += fmt.Sprintf(" (sheets: %s)", strings.Join(info.Sheets, ", "))
 		}
 		ctx.Logf("%d rows read from %s", len(rows), where)
+		src := "file:" + name
+		if sheet != "" {
+			src += "!" + sheet
+		}
+		ctx.lineageRead(src, "file", rows, cfg.Rename)
 		return pushRenamed(ctx, rows, cfg.Rename)
 	}, opts...)
 }
@@ -162,6 +167,7 @@ func (d *DAG) NewMergeTask(id string, cfg MergeConfig, opts ...TaskOption) *Task
 				out = append(out, l...)
 			}
 			ctx.Logf("union of %d inputs: %d rows", len(lists), len(out))
+			ctx.lineagePass(ids, out)
 			return ctx.XComPush("return_value", out)
 		}
 		if len(lists) != 2 {

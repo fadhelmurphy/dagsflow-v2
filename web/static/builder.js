@@ -5,7 +5,7 @@
 "use strict";
 
 const W = 230, H = 64, GRID = 10;
-const CAT_COLOR = { Sources: "#2F7BD9", Transform: "#8B5CF6", Destinations: "#2E9B57", Control: "#64748B", Sensors: "#D9971A", Custom: "#0E9AA7", Missing: "#D23B3B" };
+const CAT_COLOR = { Sources: "#2F7BD9", Transform: "#8B5CF6", Destinations: "#2E9B57", Control: "#64748B", Sensors: "#D9971A", Catalog: "#C2410C", Custom: "#0E9AA7", Missing: "#D23B3B" };
 const ICONS = {
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>',
   db: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',

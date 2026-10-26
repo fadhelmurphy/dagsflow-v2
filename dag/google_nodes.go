@@ -138,6 +138,7 @@ func (d *DAG) NewBigQueryQueryTask(id string, cfg BigQueryQueryConfig, opts ...T
 			return err
 		}
 		ctx.Logf("%d rows returned", len(rows))
+		ctx.lineageSQL(query, BigQueryDialect(project), true, nil)
 		return ctx.XComPush("return_value", rows)
 	}, opts...)
 }
@@ -268,6 +269,9 @@ func (d *DAG) NewBigQueryInsertTask(id string, cfg BigQueryInsertConfig, opts ..
 			}
 		}
 		ctx.Logf("%d rows inserted", len(rows))
+		if up, err := upstreamInput(ctx, cfg.RowsFrom); err == nil {
+			ctx.lineageWrite(up, rows, nil, "bigquery:"+project+"."+cfg.Dataset+"."+cfg.Table, "table", false)
+		}
 		_ = ctx.XComPush("rows_affected", int64(len(rows)))
 		return ctx.XComPush("return_value", map[string]any{"rows_inserted": len(rows)})
 	}, opts...)
@@ -359,8 +363,17 @@ func (d *DAG) NewGSheetReadTask(id string, cfg GSheetReadConfig, opts ...TaskOpt
 			rows = rows[:cfg.Limit]
 		}
 		ctx.Logf("%d rows read", len(rows))
+		ctx.lineageRead(sheetDataset(SheetID(cfg.SpreadsheetID), rng), "sheet", rows, cfg.Rename)
 		return pushRenamed(ctx, rows, cfg.Rename)
 	}, opts...)
+}
+
+// sheetDataset: gsheet:<id>!<tab> (the tab, not the cell range).
+func sheetDataset(id, rng string) string {
+	if tab := strings.TrimSuffix(sheetTab(rng), "!"); tab != "" {
+		return "gsheet:" + id + "!" + strings.Trim(tab, "'")
+	}
+	return "gsheet:" + id
 }
 
 func sheetRows(values [][]any, header, normalize bool) []any {
@@ -476,6 +489,9 @@ func (d *DAG) NewGSheetWriteTask(id string, cfg GSheetWriteConfig, opts ...TaskO
 			if err := googleCall(ctx, conn, scopeSheets, "POST", u, map[string]any{"values": out}, nil); err != nil {
 				return err
 			}
+		}
+		if up, err := upstreamInput(ctx, cfg.RowsFrom); err == nil {
+			ctx.lineageWrite(up, list, cols, sheetDataset(id, rng), "sheet", cfg.Mode == "overwrite")
 		}
 		_ = ctx.XComPush("rows_affected", int64(len(values)))
 		return ctx.XComPush("return_value", map[string]any{"rows_written": len(values)})

@@ -42,6 +42,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	if !w.Store.Distributed() {
 		return fmt.Errorf("worker: %w", ErrNeedsDatabase)
 	}
+	w.Store.InstallCatalogHooks()
 	if w.Concurrency < 1 {
 		w.Concurrency = 8
 	}
@@ -107,6 +108,7 @@ func (w *Worker) RunJob(ctx context.Context, id int64) error {
 	if !w.Store.Distributed() {
 		return fmt.Errorf("worker: %w", ErrNeedsDatabase)
 	}
+	w.Store.InstallCatalogHooks()
 	w.Store.Register("worker", map[string]any{"job": id})
 	j, err := w.Store.be().claimJob(nil, w.Store.ID, id)
 	if err != nil {

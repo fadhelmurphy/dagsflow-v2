@@ -118,6 +118,14 @@ var migrations = []string{
 	// 3: large XCom values live outside the run row (lists of runs stay small)
 	`CREATE TABLE IF NOT EXISTS xcom_blob (dag_id text NOT NULL, run_id text NOT NULL, slot text NOT NULL, key text NOT NULL,
 		data jsonb NOT NULL, PRIMARY KEY (dag_id, run_id, slot, key));`,
+	// 4: data catalog: one row per dataset and per lineage edge
+	`CREATE TABLE IF NOT EXISTS catalog_table (id text PRIMARY KEY, lid text NOT NULL, scope text NOT NULL DEFAULT '',
+		doc jsonb NOT NULL, summary jsonb NOT NULL, colnames text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now());
+	CREATE INDEX IF NOT EXISTS catalog_table_lid_idx ON catalog_table (lid);
+	CREATE INDEX IF NOT EXISTS catalog_table_scope_idx ON catalog_table (scope);
+	CREATE TABLE IF NOT EXISTS catalog_edge (k text PRIMARY KEY, from_id text NOT NULL, to_id text NOT NULL, doc jsonb NOT NULL);
+	CREATE INDEX IF NOT EXISTS catalog_edge_from_idx ON catalog_edge (from_id);
+	CREATE INDEX IF NOT EXISTS catalog_edge_to_idx ON catalog_edge (to_id);`,
 }
 
 // SchemaVersion is the schema this binary expects.

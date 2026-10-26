@@ -374,6 +374,28 @@ td .toggle{margin-left:4px}
   .sched span{display:none}
   table.list td,table.list th{padding:10px 8px}
 }
+/* data catalog */
+.catBar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+.catBar input[type=search]{flex:1;min-width:200px;max-width:420px}
+.catBar label{display:flex;align-items:center;gap:6px}
+.lin .linTitle{font-size:14px;font-weight:600;margin:0 0 10px;word-break:break-word}
+@media (max-width:760px){.catHide{display:none}}
+.catGrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:900px){.catGrid{grid-template-columns:minmax(0,1fr)}}
+.catGrid .panel{margin:0}
+.catCols td a{color:inherit;text-decoration:none}
+.catCols tr.on td{background:#EAF2FD}
+.catCols tr.gone td{color:var(--muted);text-decoration:line-through}
+.lin{padding:10px 14px}
+.lin h4{margin:10px 0 6px;font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.03em}
+.lin h4:first-child{margin-top:0}
+.lstep{border-left:2px solid var(--line);padding-left:10px;margin:0 0 8px}
+.lstep > .sub{font-size:11px;margin-bottom:2px}
+.lnode{padding:3px 0;font-size:13px;word-break:break-word}
+.lnode code{font-size:12px;background:#F2F4F6;padding:0 4px;border-radius:3px}
+.lnode .via{color:var(--muted);font-size:12px}
+.catInfo{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;margin:6px 0 14px}
+.catInfo b{font-weight:600;color:var(--muted);font-weight:500}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.cell:hover{transform:none}}
 </style>
 </head>
@@ -384,6 +406,7 @@ td .toggle{margin-left:4px}
     <a href="#/" data-nav="dags">DAGs</a>
     <a class="needs-builder-edit" href="#/builder" data-nav="builder">Builder</a>
     <a class="needs-datasets-read" href="#/admin?tab=datasets" data-nav="datasets">Datasets</a>
+    <a class="needs-datasets-read" href="#/catalog" data-nav="catalog">Catalog</a>
     <div class="dd" data-nav="security"><button type="button" aria-haspopup="true">Security</button><div class="ddm"><a class="needs-users-manage" href="#/admin?tab=users">List Users</a><a href="#/admin?tab=roles">List Roles</a></div></div>
     <div class="dd" data-nav="browse"><button type="button" aria-haspopup="true">Browse</button><div class="ddm"><a href="#/admin?tab=tis">Task Instances</a><a class="needs-events-read" href="#/admin?tab=events">Event Log</a><a class="needs-system-read" href="#/admin?tab=errors">DAG Import Errors</a></div></div>
     <div class="dd" data-nav="admin"><button type="button" aria-haspopup="true">Admin</button><div class="ddm"><a class="needs-pools-read" href="#/admin?tab=pools">Pools</a><a class="needs-variables-read" href="#/admin?tab=variables">Variables</a><a class="needs-connections-read" href="#/admin?tab=connections">Connections</a><a class="needs-system-read" href="#/admin?tab=components">Components</a></div></div>
@@ -1626,6 +1649,84 @@ document.addEventListener("keydown", e=>{
   if((e.key==="Enter"||e.key===" ") && e.target.matches("g.node")){ e.preventDefault(); e.target.dispatchEvent(new MouseEvent("click",{bubbles:true})); }
 });
 
+// ---- data catalog ------------------------------------------------------------
+let CATALOG = [], catHits = {q:"", ids:new Set()}, catTimer = null;
+const CAT_ENGINES = {bigquery:"BigQuery", redshift:"Redshift", athena:"Athena", postgres:"Postgres", gsheet:"Google Sheets", gcs:"GCS", s3:"S3", file:"File", task:"Node output"};
+const dsShort = id => id.slice(id.indexOf(":")+1);
+function dsLink(id, col){
+  if(id.startsWith("task:")){ const n = dsShort(id), i = n.indexOf(".");
+    return `<span class="badge grey" title="Rows passed from one node to the next">node</span><a class="id" href="#/dags/${enc(n.slice(0,i))}">${esc(n.slice(0,i))}</a> › <span class="id">${esc(n.slice(i+1))}</span>${col?` · <b>${esc(col)}</b>`:""}`; }
+  const eng = id.slice(0, id.indexOf(":"));
+  return `<span class="badge grey">${esc(CAT_ENGINES[eng]||eng)}</span><a class="id" href="#/catalog?id=${enc(id)}${col?"&col="+enc(col):""}">${esc(dsShort(id))}</a>${col?` · <b>${esc(col)}</b>`:""}`;
+}
+function viaHtml(v){
+  if(!v) return "";
+  const m = /^([^ ]+)\.([^ .]+)$/.exec(v); // dag.task
+  if(m && !v.startsWith("job ") && !v.startsWith("query ")) return `by node <a class="id" href="#/dags/${enc(m[1])}">${esc(v)}</a>`;
+  return esc(v);
+}
+async function viewCatalog(q){
+  const id = q.get("id");
+  if(id) return catalogDetail(id, q.get("col")||"");
+  const {tables, engines} = await api("/catalog");
+  CATALOG = tables;
+  const opts = Object.keys(engines).sort().map(e=>`<option value="${esc(e)}">${esc(CAT_ENGINES[e]||e)} (${engines[e]})</option>`).join("");
+  $app.innerHTML = `<h1 class="pageTitle">Data catalog</h1>
+    <p class="sub" style="margin-top:-6px">Tables, files and sheets your pipelines read and write, with their columns, schema changes and column lineage. dagsflow nodes record what they run; the BigQuery / Redshift catalog sync nodes add tables made outside dagsflow and the lineage of the queries people ran.</p>
+    <div class="catBar"><input id="catQ" type="search" placeholder="Search a table or a column name" aria-label="Search the catalog" value="${esc(q.get("q")||"")}">
+      <select id="catEng" aria-label="Engine"><option value="">All engines</option>${opts}</select>
+      <label class="sub"><input type="checkbox" id="catDropped"> show dropped</label></div>
+    <div class="panel"><table class="list"><thead><tr><th>Table</th><th>Kind</th><th>Columns</th><th class="catHide">Created by</th><th class="catHide">Last schema change</th><th class="catHide">Found by</th></tr></thead><tbody id="catRows"></tbody></table></div>`;
+  catFilter();
+}
+function catFilter(){
+  const el = document.getElementById("catRows"); if(!el) return;
+  const q = (document.getElementById("catQ").value||"").toLowerCase().trim(), eng = document.getElementById("catEng").value, dropped = document.getElementById("catDropped").checked;
+  const hit = t => !q || t.id.toLowerCase().includes(q) || (catHits.q===q && catHits.ids.has(t.id));
+  const rows = CATALOG.filter(t => (!eng || t.engine===eng) && (dropped || !t.dropped) && hit(t));
+  const colHits = "";
+  el.innerHTML = rows.length ? rows.slice(0, 1000).map(t=>`<tr${t.dropped?' class="paused"':""}><td>${dsLink(t.id)}${t.dropped?` <span class="badge grey">dropped ${fmt(t.dropped).slice(0,10)}</span>`:""}</td>
+      <td>${esc(t.kind)}</td><td>${t.columns||"–"}</td><td class="catHide">${esc(t.creator||"–")}</td>
+      <td class="catHide">${t.last_change?fmt(t.last_change):"–"}${t.changes?` <span class="muted">(${t.changes})</span>`:""}</td>
+      <td class="catHide">${t.source==="scan"?"catalog sync":"dagsflow nodes"}</td></tr>`).join("")
+    : `<tr><td colspan="6" class="muted">${CATALOG.length ? "Nothing matches."+colHits : "The catalog is empty. Run a DAG with BigQuery, Redshift, Athena, Sheets or file nodes, or add a BigQuery / Redshift catalog sync node and schedule it."}</td></tr>`;
+}
+document.addEventListener("input", e=>{ if(!["catQ","catEng","catDropped"].includes(e.target.id)) return;
+  catFilter();
+  if(e.target.id!=="catQ") return;
+  clearTimeout(catTimer); const q = e.target.value.toLowerCase().trim();
+  if(q.length < 2) return;
+  catTimer = setTimeout(async ()=>{ // tables with a matching column
+    try{ const {tables} = await api(`/catalog?q=${enc(q)}`); catHits = {q, ids:new Set(tables.map(t=>t.id))}; catFilter(); }catch{}
+  }, 300); });
+document.addEventListener("change", e=>{ if(["catEng","catDropped"].includes(e.target.id)) catFilter(); });
+function linSteps(nodes, empty){
+  if(!nodes.length) return `<p class="muted" style="margin:0 0 8px">${empty}</p>`;
+  const by = {}; nodes.forEach(n => (by[n.depth] = by[n.depth] || []).push(n));
+  return Object.keys(by).sort((a,b)=>a-b).map(d => `<div class="lstep"><div class="sub">${d==1?"directly":d+" steps away"}</div>${by[d].map(n=>`<div class="lnode">${dsLink(n.dataset, n.column)}${n.expr?` <code title="How the column is computed">${esc(n.expr)}</code>`:""}${n.via?` <span class="via">${viaHtml(n.via)}</span>`:""}</div>`).join("")}</div>`).join("");
+}
+async function catalogDetail(id, col){
+  const [{table:t}, lin] = await Promise.all([api(`/catalog/table?id=${enc(id)}`), api(`/catalog/lineage?id=${enc(id)}&column=${enc(col)}`)]);
+  const live = t.columns.filter(c=>!c.removed), gone = t.columns.filter(c=>c.removed);
+  const colRow = c => `<tr class="${c.name.toLowerCase()===col.toLowerCase()?"on":""} ${c.removed?"gone":""}"><td><a class="id" href="#/catalog?id=${enc(id)}&col=${enc(c.name)}" title="Show the lineage of this column">${esc(c.name)}</a></td><td class="id">${esc(c.type||"–")}</td><td class="catHide">${fmt(c.first_seen).slice(0,10)}</td><td class="catHide">${c.removed?"removed "+fmt(c.removed).slice(0,10):""}</td></tr>`;
+  const changes = (t.changes||[]).slice().reverse();
+  const eng = t.engine;
+  $app.innerHTML = `<p class="sub"><a href="#/catalog">Data catalog</a> › ${esc(CAT_ENGINES[eng]||eng)}</p>
+    <h1 class="pageTitle" style="word-break:break-all">${esc(t.name)}</h1>
+    ${t.dropped?`<div class="banner warn">Not found by the last catalog sync (${fmt(t.dropped)}): the table was dropped or renamed.</div>`:""}
+    <div class="catInfo"><span><b>Kind</b> ${esc(t.kind)}</span>${t.created_at?`<span><b>Created</b> ${fmt(t.created_at)}${t.creator?" by "+esc(t.creator):""}</span>`:t.creator?`<span><b>Created by</b> ${esc(t.creator)}</span>`:""}
+      ${t.writers?.length?`<span><b>Written by</b> ${t.writers.map(w=>viaHtml(w).replace(/^by /,"")).join(", ")}</span>`:""}<span><b>Last seen</b> ${fmt(t.seen_at)}</span><span><b>Found by</b> ${t.source==="scan"?"catalog sync":"dagsflow nodes"}</span></div>
+    <div class="catGrid">
+      <div class="panel"><table class="list catCols"><thead><tr><th>Column (${live.length})</th><th>Type</th><th class="catHide">First seen</th><th class="catHide"></th></tr></thead><tbody>${t.columns.length?live.concat(gone).map(colRow).join(""):`<tr><td colspan="4" class="muted">No columns known yet.</td></tr>`}</tbody></table></div>
+      <div class="panel lin"><div class="linTitle">Lineage of ${col?`column <span class="id">${esc(col)}</span> <a class="sub" href="#/catalog?id=${enc(id)}" style="font-weight:400">show the whole table</a>`:"the whole table"}</div>
+        <h4>Comes from ↑</h4>${linSteps(lin.upstream, col?"No known source for this column.":"No known sources.")}
+        <h4>Feeds ↓</h4>${linSteps(lin.downstream, col?"Nothing known reads this column.":"Nothing known reads this table.")}
+        ${col?"":`<p class="sub" style="margin:4px 0 0">Click a column for its own lineage.</p>`}</div>
+    </div>
+    <h2 style="font-size:16px;margin:20px 0 8px">Schema changes</h2>
+    <div class="panel"><table class="list"><thead><tr><th>When</th><th>Added</th><th>Removed</th><th>Type changed</th></tr></thead><tbody>${changes.length?changes.map(c=>`<tr><td>${fmt(c.at)}</td><td class="id">${esc((c.added||[]).join(", ")||"–")}</td><td class="id">${esc((c.removed||[]).join(", ")||"–")}</td><td class="id">${esc(Object.entries(c.retyped||{}).map(([k,v])=>k+": "+v).join(", ")||"–")}</td></tr>`).join(""):`<tr><td colspan="4" class="muted">No changes since the catalog first saw this table.</td></tr>`}</tbody></table></div>`;
+}
+
 function loadScript(src){ return new Promise((ok,bad)=>{ if(window.Builder) return ok(); const el=document.createElement("script"); el.src=src; el.onload=ok; el.onerror=()=>bad(new Error("Could not load the workflow builder")); document.head.appendChild(el); }); }
 async function viewBuilder(arg, q){ await loadScript("/builder.js"); await window.Builder.view(arg, q); }
 
@@ -1643,19 +1744,20 @@ async function renderNow(){
   const {parts, q} = route();
   try{
     const tab = q.get("tab")||"pools";
-    const navKey = parts[0]==="builder" ? "builder" : parts[0]!=="admin" ? "dags" : tab==="datasets" ? "datasets" : ["users","roles"].includes(tab) ? "security" : ["errors","events","tis"].includes(tab) ? "browse" : "admin";
+    const navKey = parts[0]==="builder" ? "builder" : parts[0]==="catalog" ? "catalog" : parts[0]!=="admin" ? "dags" : tab==="datasets" ? "datasets" : ["users","roles"].includes(tab) ? "security" : ["errors","events","tis"].includes(tab) ? "browse" : "admin";
     document.querySelectorAll("[data-nav]").forEach(n=>n.classList.toggle("on", n.dataset.nav===navKey));
     if(parts[0]!=="builder") window.Builder?.leave?.();
     if(parts[0]==="builder"){ current=null; await viewBuilder(parts[1], q); }
     else if(parts[0]==="dags" && parts[1] && parts[2]==="ti") await viewTI(parts[1], q);
     else if(parts[0]==="dags" && parts[1]) await viewDag(parts[1], q);
     else if(parts[0]==="admin"){ current=null; await viewAdmin(q.get("tab")||"pools"); }
+    else if(parts[0]==="catalog"){ current=null; await viewCatalog(q); }
     else { current=null; await viewList(); }
   }catch(e){ $app.innerHTML = `<div class="banner err"><b>Could not load this page.</b> ${esc(e.message)}. <a href="#/">Back to DAGs</a></div>`; }
 }
 function refreshLoop(){ // live refresh, paused while the user is in a dialog or has text selected
   clearInterval(refreshTimer);
-  refreshTimer = setInterval(()=>{ if(rendering || !autoRefresh() || route().parts[0]==="builder" || document.querySelector(".noteEdit") || document.querySelector(".dd.open") || document.hidden || document.querySelector("dialog[open]") || String(getSelection()) || document.activeElement?.closest?.(".adminForm")) return;
+  refreshTimer = setInterval(()=>{ if(rendering || !autoRefresh() || route().parts[0]==="builder" || route().parts[0]==="catalog" || document.querySelector(".noteEdit") || document.querySelector(".dd.open") || document.hidden || document.querySelector("dialog[open]") || String(getSelection()) || document.activeElement?.closest?.(".adminForm")) return;
     const y = scrollY; render().then(()=>scrollTo(0,y)); health(); }, 4000);
 }
 let lastPath = location.hash.split("?")[0];

@@ -48,7 +48,7 @@ func resetPG(t *testing.T) {
 	st := pgStore(t)
 	pg := st.b.(*pgBackend)
 	ctx := context.Background()
-	if _, err := pg.pool.Exec(ctx, `TRUNCATE dag_run, dag_meta, kv_table, run_command, audit_log, task_log, component, lease, pool_slot, task_job`); err != nil {
+	if _, err := pg.pool.Exec(ctx, `TRUNCATE dag_run, dag_meta, kv_table, run_command, audit_log, task_log, component, lease, pool_slot, task_job, catalog_table, catalog_edge`); err != nil {
 		t.Fatal(err)
 	}
 }
