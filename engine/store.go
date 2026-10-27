@@ -452,11 +452,16 @@ type runSummarizer interface {
 // JSON store returns full runs). For lists that show states and times only:
 // never save a run read this way.
 func (s *Store) ListRunsLite(dagID string) ([]*DagRun, error) {
-	p, ok := s.be().(*pgBackend)
-	if !ok {
+	var out []*DagRun
+	var err error
+	switch b := s.be().(type) {
+	case *pgBackend:
+		out, err = b.listRunsLite(dagID)
+	case *jsonBackend:
+		out, err = b.listRunsShared(dagID) // shared, cached: read-only
+	default:
 		return s.ListRuns(dagID)
 	}
-	out, err := p.listRunsLite(dagID)
 	if err != nil {
 		return nil, err
 	}
@@ -467,6 +472,42 @@ func (s *Store) ListRunsLite(dagID string) ([]*DagRun, error) {
 		return out[i].LogicalDate.Before(out[j].LogicalDate)
 	})
 	return out, nil
+}
+
+// RunFilter selects runs for a page (zero values: no filter).
+type RunFilter struct {
+	Before  time.Time // logical date at or before
+	RunType string
+	State   string
+}
+
+func (f RunFilter) match(r *DagRun) bool {
+	return (f.Before.IsZero() || !r.LogicalDate.After(f.Before)) && (f.RunType == "" || r.RunType == f.RunType) && (f.State == "" || r.State == f.State)
+}
+
+// RunPage: the n latest runs matching f (oldest first, without XComs and
+// rendered fields), how many match, and the runs per state of the whole DAG.
+// Postgres reads only those n rows; this is what the DAG page polls.
+func (s *Store) RunPage(dagID string, f RunFilter, n int) (runs []*DagRun, matching int, counts map[string]int, err error) {
+	if p, ok := s.be().(*pgBackend); ok {
+		return p.runPage(dagID, f, n)
+	}
+	all, err := s.ListRunsLite(dagID)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	counts = map[string]int{}
+	for _, r := range all {
+		counts[r.State]++
+		if f.match(r) {
+			runs = append(runs, r)
+		}
+	}
+	matching = len(runs)
+	if n > 0 && len(runs) > n {
+		runs = runs[len(runs)-n:]
+	}
+	return runs, matching, counts, nil
 }
 
 // RunSummary returns the number of runs per state and the n latest runs

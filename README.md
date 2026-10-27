@@ -892,6 +892,7 @@ dagsflow-go webserver --addr 0.0.0.0:8080   # several replicas behind a load bal
 - Set `DAGSFLOW_FERNET_KEY` (encrypted variables/connections) and `DAGSFLOW_SECRET_KEY` (the same on every webserver replica). If `SECRET_KEY` is empty, a key is generated once and stored in the metadata database.
 
 **Operations**
+- The DAG page reads only the runs it shows (25 by default) plus a count per state, not every run of the DAG. Pages refresh every 4 s while something on them is running or queued, otherwise every 30 s, and not at all in a hidden tab.
 - Large XComs: an XCom value larger than 64 KB (`DAGSFLOW_XCOM_INLINE_BYTES`) is stored apart from the run, in its own table (`xcom_blob`) with Postgres or as files under `state/xcom/<dag>/<run>/` with the JSON store. Listing runs (the DAG list, the grid, scheduler scans) stays fast even when tasks pass big row sets.
   - Run details, task instances and rendered fields don't read those values: the XCom tab shows the row count and the first 50 rows, stored when the value is written. The full value is read only on *Download*, or when a task needs it.
   - The scheduler doesn't encode an unchanged large value again on every save of the run.

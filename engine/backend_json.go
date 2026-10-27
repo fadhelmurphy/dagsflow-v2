@@ -526,3 +526,49 @@ func (j *jsonBackend) cleanup(before time.Time) (CleanupStats, error) {
 	}
 	return st, nil
 }
+
+// runCache: decoded run files by path, reused while the file is unchanged
+// (same size and modification time). Only for read-only lists (ListRunsLite):
+// the DAG page polls every few seconds and most runs never change.
+var runCache sync.Map // path -> cachedRun
+
+type cachedRun struct {
+	size int64
+	mod  time.Time
+	run  *DagRun
+}
+
+func (j *jsonBackend) listRunsShared(dagID string) ([]*DagRun, error) {
+	dir := j.runsDir(dagID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]*DagRun, 0, len(entries))
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		fi, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if c, ok := runCache.Load(path); ok {
+			if c := c.(cachedRun); c.size == fi.Size() && c.mod.Equal(fi.ModTime()) {
+				out = append(out, c.run)
+				continue
+			}
+		}
+		var r DagRun
+		if err := readJSON(path, &r); err != nil {
+			continue
+		}
+		runCache.Store(path, cachedRun{fi.Size(), fi.ModTime(), &r})
+		out = append(out, &r)
+	}
+	return out, nil
+}

@@ -490,13 +490,6 @@ func summarize(r *engine.DagRun, withTasks bool) runSummary {
 	return s
 }
 
-func lastN(runs []*engine.DagRun, n int) []*engine.DagRun {
-	if n > 0 && len(runs) > n {
-		return runs[len(runs)-n:]
-	}
-	return runs
-}
-
 func scheduleLabel(d *dag.DAG) string {
 	if d.IsDatasetScheduled() {
 		return "datasets: " + strings.Join(d.Datasets, ", ")
@@ -741,19 +734,17 @@ func (s *Server) getDag(w http.ResponseWriter, r *http.Request) {
 			base = t
 		}
 	}
-	runs, _ := s.Store.ListRunsLite(d.ID)
-	counts := map[string]int{}
-	var filtered []*engine.DagRun
-	for _, run := range runs {
-		counts[run.State]++
-		if (base.IsZero() || !run.LogicalDate.After(base)) &&
-			(q.Get("run_type") == "" || run.RunType == q.Get("run_type")) &&
-			(q.Get("state") == "" || run.State == q.Get("state")) {
-			filtered = append(filtered, run)
-		}
+	page, matching, counts, err := s.Store.RunPage(d.ID, engine.RunFilter{Before: base, RunType: q.Get("run_type"), State: q.Get("state")}, n)
+	if err != nil {
+		fail(w, 500, "%v", err)
+		return
+	}
+	total := 0
+	for _, c := range counts {
+		total += c
 	}
 	rs := []runSummary{}
-	for _, run := range lastN(filtered, n) {
+	for _, run := range page {
 		rs = append(rs, summarize(run, true))
 	}
 	m := s.Store.GetDagMeta(d.ID)
@@ -762,7 +753,7 @@ func (s *Server) getDag(w http.ResponseWriter, r *http.Request) {
 		"source": d.Source, "file": d.File, "is_file_source": d.IsFileSource(), "parsed_at": d.ParsedAt,
 		"catchup": d.Catchup, "max_active_runs": d.MaxActiveRuns, "params": d.Params,
 		"datasets": d.Datasets, "is_paused": m.IsPaused, "next_data_interval_start": m.NextDataIntervalStart,
-		"tasks": describeTasks(d), "runs": rs, "total_runs": len(runs), "filtered_runs": len(filtered), "run_counts": counts,
+		"tasks": describeTasks(d), "runs": rs, "total_runs": total, "filtered_runs": matching, "run_counts": counts,
 		"permissions": accessFrom(r).DagPermissions(d.ID),
 	})
 }
@@ -798,19 +789,24 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	runs, _ := s.Store.ListRunsLite(d.ID)
-	state := r.URL.Query().Get("state")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
 		limit = 100
 	}
-	out := []runSummary{}
-	for i := len(runs) - 1; i >= 0 && len(out) < limit; i-- {
-		if state == "" || runs[i].State == state {
-			out = append(out, summarize(runs[i], false))
-		}
+	runs, _, counts, err := s.Store.RunPage(d.ID, engine.RunFilter{State: r.URL.Query().Get("state")}, limit)
+	if err != nil {
+		fail(w, 500, "%v", err)
+		return
 	}
-	writeJSON(w, 200, map[string]any{"dag_runs": out, "total_entries": len(runs)})
+	total := 0
+	for _, c := range counts {
+		total += c
+	}
+	out := []runSummary{}
+	for i := len(runs) - 1; i >= 0; i-- { // newest first
+		out = append(out, summarize(runs[i], false))
+	}
+	writeJSON(w, 200, map[string]any{"dag_runs": out, "total_entries": total})
 }
 
 func (s *Server) trigger(w http.ResponseWriter, r *http.Request) {

@@ -379,6 +379,49 @@ func (p *pgBackend) latestRuns(dagID string, n int) ([]*DagRun, error) {
 	return out, rows.Err()
 }
 
+// runPage: see Store.RunPage. Uses the state / run_type / logical_date columns.
+func (p *pgBackend) runPage(dagID string, f RunFilter, n int) ([]*DagRun, int, map[string]int, error) {
+	counts, err := p.runCounts(dagID)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	ctx, cancel := pgctx()
+	defer cancel()
+	var before *time.Time
+	if !f.Before.IsZero() {
+		before = &f.Before
+	}
+	const where = `dag_id=$1 AND ($2::timestamptz IS NULL OR logical_date <= $2) AND ($3 = '' OR run_type = $3) AND ($4 = '' OR state = $4)`
+	var matching int
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM dag_run WHERE `+where, dagID, before, f.RunType, f.State).Scan(&matching); err != nil {
+		return nil, 0, nil, err
+	}
+	if n <= 0 {
+		n = matching
+	}
+	rows, err := p.pool.Query(ctx, `SELECT doc - 'xcom' - 'rendered_fields', version FROM dag_run WHERE `+where+`
+		ORDER BY logical_date DESC, queued_at DESC LIMIT $5`, dagID, before, f.RunType, f.State, n)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer rows.Close()
+	var out []*DagRun
+	for rows.Next() {
+		var doc []byte
+		var ver int64
+		if err := rows.Scan(&doc, &ver); err != nil {
+			return nil, 0, nil, err
+		}
+		if r, err := decodeRun(doc, ver); err == nil {
+			out = append(out, r)
+		}
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 { // oldest first
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, matching, counts, rows.Err()
+}
+
 // listRunsLite: the runs without their XComs and rendered fields (what the
 // grid and run lists show), so old runs with big inline values stay cheap.
 func (p *pgBackend) listRunsLite(dagID string) ([]*DagRun, error) {

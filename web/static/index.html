@@ -522,6 +522,7 @@ function listHref(changes){
 }
 async function viewList(){
   listData = await api("/dags");
+  liveBusy = listData.dags.some(d=>d.active_runs>0);
   const tb = document.getElementById("dagToolbar"), f = document.activeElement;
   if(tb && f && tb.contains(f) && f.tagName==="INPUT"){ renderListTable(); return; } // keep focus while typing
   const errs = Object.entries(listData.import_errors||{});
@@ -671,6 +672,7 @@ async function viewDag(id, q){
   if(q.get("run_type")) p.set("run_type", q.get("run_type"));
   if(q.get("run_state")) p.set("state", q.get("run_state"));
   const d = current = DV.data = await api(`/dags/${enc(id)}?${p}`);
+  liveBusy = d.runs.some(r=>r.state==="running"||r.state==="queued") || (d.run_counts?.running||0)+(d.run_counts?.queued||0) > 0;
   let page = document.getElementById("dagPage");
   if(!page || page.dataset.dag !== id){ $app.innerHTML = dagSkeleton(d, q); DV.paneKey = ""; DV.first = true; DV.code = null; }
   applyGridW();
@@ -1365,6 +1367,7 @@ async function viewTI(id, q){
   const t = d.tasks.find(x=>x.task_id===sel.task);
   if(!t) throw new Error(`task ${sel.task} not found in ${id}`);
   const run = DV.run = await api(`/dags/${enc(id)}/dagRuns/${enc(sel.run)}`);
+  liveBusy = run.state==="running" || run.state==="queued";
   const ti = sel.mi>=0 ? (run.mapped_task_instances?.[sel.task]||[])[sel.mi] : run.task_instances[sel.task];
   const tab = ["details","rendered","logs","xcom"].includes(q.get("tab")) ? q.get("tab") : "details";
   const key = JSON.stringify([id, sel, tab]);
@@ -1761,10 +1764,14 @@ async function renderNow(){
     else { current=null; await viewList(); }
   }catch(e){ $app.innerHTML = `<div class="banner err"><b>Could not load this page.</b> ${esc(e.message)}. <a href="#/">Back to DAGs</a></div>`; }
 }
+// liveBusy: the page shows something running. Then it refreshes every 4 s;
+// otherwise every 30 s (nothing changes until a run starts).
+let liveBusy = true, lastRefresh = 0;
 function refreshLoop(){ // live refresh, paused while the user is in a dialog or has text selected
   clearInterval(refreshTimer);
-  refreshTimer = setInterval(()=>{ if(rendering || !autoRefresh() || route().parts[0]==="builder" || route().parts[0]==="catalog" || document.querySelector(".noteEdit") || document.querySelector(".dd.open") || document.hidden || document.querySelector("dialog[open]") || String(getSelection()) || document.activeElement?.closest?.(".adminForm")) return;
-    const y = scrollY; render().then(()=>scrollTo(0,y)); health(); }, 4000);
+  refreshTimer = setInterval(()=>{ if(!liveBusy && Date.now() - lastRefresh < 30000) return;
+    if(rendering || !autoRefresh() || route().parts[0]==="builder" || route().parts[0]==="catalog" || document.querySelector(".noteEdit") || document.querySelector(".dd.open") || document.hidden || document.querySelector("dialog[open]") || String(getSelection()) || document.activeElement?.closest?.(".adminForm")) return;
+    lastRefresh = Date.now(); const y = scrollY; render().then(()=>scrollTo(0,y)); health(); }, 4000);
 }
 let lastPath = location.hash.split("?")[0];
 window.addEventListener("hashchange", ev=>{
@@ -1773,7 +1780,7 @@ window.addEventListener("hashchange", ev=>{
   if(g && typeof g.then === "function"){ // unsaved builder changes: ask, stay meanwhile
     const to = location.hash; history.replaceState(null,"",ev.oldURL);
     g.then(ok => { if(ok) location.hash = to; }); return; }
-  const p = location.hash.split("?")[0]; if(p!==lastPath) scrollTo(0,0); lastPath = p; render(); });
+  const p = location.hash.split("?")[0]; if(p!==lastPath) scrollTo(0,0); lastPath = p; liveBusy = true; render(); });
 async function whoami(){ Object.assign(ME, await api("/me"));
   const all = ME.permissions.includes("*");
   Object.entries(ME.can||{}).forEach(([k,v])=>document.body.classList.toggle("can-"+k.replace(".","-"), all || !!v));
