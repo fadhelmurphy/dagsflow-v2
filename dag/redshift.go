@@ -331,6 +331,9 @@ func (d *DAG) NewRedshiftLoadTableTask(id string, cfg RedshiftLoadConfig, opts .
 			srcCols[ss+"."+st] = names2(s.cols)
 		}
 		ctx.lineageSQL(strings.Join(append(append([]string{}, pre...), batch...), ";\n"), RedshiftDialect("redshift", cfg.Database, "public"), false, tableCols(srcCols))
+		if after, err := c.columns(ctx, ts, tt); err == nil { // column types for the catalog
+			ctx.lineageSchema("redshift:"+strings.ToLower(cfg.Database)+"."+ts+"."+tt, after)
+		}
 		if n >= 0 {
 			ctx.Logf("%d rows %s into %s.%s", n, map[string]string{"append": "added", "replace": "loaded", "merge": "merged"}[cfg.mode()], ts, tt)
 			_ = ctx.XComPush("rows_affected", n)

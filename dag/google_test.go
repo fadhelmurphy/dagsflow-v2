@@ -87,6 +87,8 @@ func (f *fakeGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"jobComplete":true,"rows":[{"f":[{"v":"2"},{"v":null},{"v":"false"}]}]}`))
 	case r.Method == "DELETE" && strings.HasSuffix(p, "/projects/prj/datasets/stg/tables/old_20260131"):
 		w.WriteHeader(204)
+	case r.Method == "GET" && strings.Contains(p, "/datasets/") && strings.Contains(p, "/tables/"): // tables.get
+		_, _ = w.Write([]byte(`{"schema":{"fields":[{"name":"order_id","type":"STRING"},{"name":"qty","type":"INTEGER"},{"name":"tags","type":"STRING","mode":"REPEATED"}]}}`))
 	case strings.HasSuffix(p, "/tables/t/insertAll"):
 		var in struct {
 			Rows []struct {

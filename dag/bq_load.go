@@ -336,6 +336,40 @@ type tableInfo struct {
 }
 
 // bqTableInfo reads the columns (in order) and the type of a table.
+// bqTableSchema reads a table's top-level columns with tables.get (free,
+// unlike an INFORMATION_SCHEMA query). table is project.dataset.table.
+func bqTableSchema(ctx *TaskContext, conn Connection, table string) ([]bqCol, error) {
+	p := strings.SplitN(table, ".", 3)
+	if len(p) != 3 {
+		return nil, fmt.Errorf("%q is not project.dataset.table", table)
+	}
+	var res struct {
+		Schema struct {
+			Fields []struct {
+				Name string `json:"name"`
+				Type string `json:"type"`
+				Mode string `json:"mode"`
+			} `json:"fields"`
+		} `json:"schema"`
+	}
+	u := fmt.Sprintf("%s/projects/%s/datasets/%s/tables/%s?fields=schema", bqBase, url.PathEscape(p[0]), url.PathEscape(p[1]), url.PathEscape(p[2]))
+	if err := googleCall(ctx, conn, scopeBigQuery, "GET", u, nil, &res); err != nil {
+		return nil, err
+	}
+	out := make([]bqCol, 0, len(res.Schema.Fields))
+	for _, f := range res.Schema.Fields {
+		t := map[string]string{"INTEGER": "INT64", "FLOAT": "FLOAT64", "BOOLEAN": "BOOL", "RECORD": "STRUCT"}[f.Type]
+		if t == "" {
+			t = f.Type
+		}
+		if f.Mode == "REPEATED" {
+			t = "ARRAY<" + t + ">"
+		}
+		out = append(out, bqCol{f.Name, t})
+	}
+	return out, nil
+}
+
 func bqTableInfo(ctx *TaskContext, conn Connection, project, location, table string) (tableInfo, error) {
 	m := bqTableRe.FindStringSubmatch(table)
 	ds := bqIdent(m[1] + "." + m[2])
@@ -437,6 +471,9 @@ func (d *DAG) NewBigQueryLoadTableTask(id string, cfg BigQueryLoadConfig, opts .
 			return err
 		}
 		ctx.lineageSQL(script, BigQueryDialect(project), false, tableCols(map[string][]string{src: names2(si.cols), dst: names2(ti.cols)}))
+		if after, err := bqTableSchema(ctx, conn, dst); err == nil { // column types for the catalog (tables.get: no query cost)
+			ctx.lineageSchema("bigquery:"+dst, after)
+		}
 		n := int64(-1)
 		if len(rows) > 0 {
 			if rm, ok := rows[len(rows)-1].(map[string]any); ok {

@@ -436,6 +436,21 @@ func (c *TaskContext) lineageExternal(table, fileEngine string, files []string, 
 	c.lineageExternalMapped(table, fileEngine, files, cols, cols)
 }
 
+// lineageSchema reports a table's columns with their types, as the
+// warehouse has them after the load (SQL alone gives names, not types).
+func (c *TaskContext) lineageSchema(id string, cols []bqCol) { c.lineageSchemaKind(id, "table", cols) }
+
+func (c *TaskContext) lineageSchemaKind(id, kind string, cols []bqCol) {
+	if len(cols) == 0 {
+		return
+	}
+	lc := make([]LineageColumn, len(cols))
+	for i, col := range cols {
+		lc[i] = LineageColumn{Name: col.Name, Type: col.Type}
+	}
+	c.ReportLineage(Lineage{Datasets: []LineageDataset{{ID: id, Kind: kind, Columns: lc}}})
+}
+
 // tableCols: known columns by table name (as the SQL writes it).
 func tableCols(m map[string][]string) ColumnsOf {
 	return func(t string) []string {

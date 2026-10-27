@@ -225,8 +225,17 @@ func (d *DAG) newStoreTask(id, op, opName, scheme string, cfg StoreWriteConfig,
 			}
 			ctx.lineageWrite(up, rows, cfg.Columns, eng+":"+uri, "file", true)
 		}
+		out := storeOutput(cfg, uri, rows, len(data))
+		if eng := map[string]string{"gs": "gcs", "s3": "s3"}[scheme]; eng != "" { // types as guessed from the values
+			var cols []bqCol
+			for _, c := range out["columns"].([]any) {
+				m := c.(map[string]any)
+				cols = append(cols, bqCol{m["name"].(string), m["type"].(string)})
+			}
+			ctx.lineageSchemaKind(eng+":"+uri, "file", cols)
+		}
 		_ = ctx.XComPush("rows_affected", int64(len(rows)))
-		return ctx.XComPush("return_value", storeOutput(cfg, uri, rows, len(data)))
+		return ctx.XComPush("return_value", out)
 	}, opts...)
 }
 

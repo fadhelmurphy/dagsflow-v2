@@ -560,6 +560,9 @@ func (d *DAG) NewAthenaLoadTableTask(id string, cfg AthenaLoadConfig, opts ...Ta
 			ctx.Logf("%d rows written to %s.%s", n, ddb, dtb)
 			_ = ctx.XComPush("rows_affected", n)
 		}
+		if after, err := c.columns(ctx, ddb, dtb); err == nil { // column types for the catalog
+			ctx.lineageSchema("athena:"+ddb+"."+dtb, after)
+		}
 		return ctx.XComPush("return_value", map[string]any{"table": ddb + "." + dtb, "source": sdb + "." + stb, "mode": cfg.mode(), "rows": n, "engine": "athena"})
 	}, opts...)
 }

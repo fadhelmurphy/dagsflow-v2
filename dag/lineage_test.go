@@ -87,6 +87,15 @@ func TestLoadTableReportsLineage(t *testing.T) {
 	runDAG(t, d, rs)
 	l := lineageOf(t, rs, "load")
 	hasEdge(t, l, "bigquery:prj.stg.ext.order_id -> bigquery:prj.dw.orders.order_id", "bigquery:prj.stg.ext.status -> bigquery:prj.dw.orders.status")
+	for _, d := range l.Datasets { // types from the table after the load
+		if d.ID == "bigquery:prj.dw.orders" {
+			if len(d.Columns) != 3 || d.Columns[1].Type != "INT64" || d.Columns[2].Type != "ARRAY<STRING>" {
+				t.Fatalf("schema: %+v", d.Columns)
+			}
+			return
+		}
+	}
+	t.Fatal("no dataset for the target")
 }
 
 func TestSheetsReportLineage(t *testing.T) {
