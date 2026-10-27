@@ -94,7 +94,11 @@ func readJSON(path string, v any) error {
 // ---- runs ---------------------------------------------------------------------
 
 func (j *jsonBackend) saveRun(r *DagRun, _ string) error {
-	return writeJSONAtomic(j.runPath(r.DagID, r.RunID), r)
+	b, err := j.encodeRun(r)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(j.runPath(r.DagID, r.RunID), b)
 }
 
 func (j *jsonBackend) loadRun(dagID, runID string) (*DagRun, error) {
@@ -105,7 +109,7 @@ func (j *jsonBackend) loadRun(dagID, runID string) (*DagRun, error) {
 		}
 		return nil, err
 	}
-	return &r, nil
+	return &r, j.resolveXCom(&r)
 }
 
 func (j *jsonBackend) runExists(dagID, runID string) bool {
@@ -117,6 +121,7 @@ func (j *jsonBackend) deleteRun(dagID, runID string) error {
 	if err := os.Remove(j.runPath(dagID, runID)); err != nil {
 		return err
 	}
+	_ = os.RemoveAll(j.xcomDir(dagID, runID))
 	return j.deleteLogs(dagID, runID)
 }
 
@@ -174,7 +179,7 @@ func (j *jsonBackend) requeueOrphans() ([]string, error)                     { r
 func (j *jsonBackend) renewLeases(string, []string) (map[string]bool, error) { return nil, nil }
 
 func (j *jsonBackend) deleteDagData(dagID string) error {
-	for _, p := range []string{j.runsDir(dagID), j.metaPath(dagID), filepath.Join(j.logsDir(), "dag_id="+dagID)} {
+	for _, p := range []string{j.runsDir(dagID), j.metaPath(dagID), j.state("xcom", dagID), filepath.Join(j.logsDir(), "dag_id="+dagID)} {
 		if err := os.RemoveAll(p); err != nil {
 			return err
 		}

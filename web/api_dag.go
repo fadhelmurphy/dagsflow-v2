@@ -68,7 +68,7 @@ func (s *Server) reparse(w http.ResponseWriter, r *http.Request) {
 // ---- rendered template ----------------------------------------------------------------
 
 func (s *Server) rendered(w http.ResponseWriter, r *http.Request) {
-	d, run, ok := s.runOr404(w, r)
+	d, run, ok := s.runLite404(w, r)
 	if !ok {
 		return
 	}

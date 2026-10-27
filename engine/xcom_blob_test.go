@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -112,5 +113,158 @@ func TestPGCompactXCom(t *testing.T) {
 	}
 	if n, _ := st.CompactXCom(t.Logf); n != 0 {
 		t.Fatalf("second pass rewrote %d", n)
+	}
+}
+
+// A large XCom that didn't change is not encoded again on every save, run
+// details read only its preview, and a new value is still written.
+func TestPGXComBlobFastPaths(t *testing.T) {
+	t.Setenv("DAGSFLOW_XCOM_INLINE_BYTES", "")
+	resetPG(t)
+	st := pgStore(t)
+	pg := st.b.(*pgBackend)
+	d := dag.NewDAG("blob_fast", "")
+	d.NewTask("read", func(*dag.TaskContext) error { return nil })
+	r := NewDagRun(d, "manual", "r1", time.Now(), time.Now(), time.Now(), nil)
+	mk := func(name string) []any {
+		big := make([]any, 60000)
+		for i := range big {
+			big[i] = map[string]any{"id": float64(i), "name": name, "notes": strings.Repeat("n", 200)}
+		}
+		return big
+	}
+	r.XCom["read"] = map[string]any{"return_value": mk("a")}
+	if _, err := st.CreateRun(r); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	start := time.Now()
+	for i := 0; i < 5; i++ {
+		if _, err := pg.encodeRun(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if el := time.Since(start); el > 200*time.Millisecond {
+		t.Fatalf("5 saves of an unchanged 15 MB value took %v", el)
+	}
+	// replaced by a value of the same length: written
+	r.XCom["read"]["return_value"] = mk("b")
+	if err := st.SaveRun(r); err != nil {
+		t.Fatal(err)
+	}
+	v, ok, err := st.XComValue("blob_fast", "r1", "read", "return_value")
+	if err != nil || !ok || v.([]any)[0].(map[string]any)["name"] != "b" {
+		t.Fatalf("new value not stored: %v %v", ok, err)
+	}
+	lite, err := st.LoadRunLite("blob_fast", "r1")
+	if err != nil || !IsXComRef(lite.XCom["read"]["return_value"]) {
+		t.Fatalf("lite load read the value: %v", err)
+	}
+	prev, err := st.XComPreviews(lite)
+	p := prev["read\x00return_value"]
+	if err != nil || p["rows"] != float64(60000) || len(p["sample"].([]any)) != PreviewRows {
+		t.Fatalf("preview: %v %v", p["rows"], err)
+	}
+	// blobs stored before previews existed get one computed
+	if _, err := pg.pool.Exec(ctx, `UPDATE xcom_blob SET preview = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	prev, _ = st.XComPreviews(lite)
+	if prev["read\x00return_value"]["rows"] != float64(60000) {
+		t.Fatalf("backfilled preview: %v", prev)
+	}
+}
+
+// JSON store: large XComs are files next to the run, like xcom_blob.
+func TestJSONXComBlob(t *testing.T) {
+	t.Setenv("DAGSFLOW_XCOM_INLINE_BYTES", "")
+	home := t.TempDir()
+	st := NewStore(home)
+	d := dag.NewDAG("jblob", "")
+	d.NewTask("read", func(*dag.TaskContext) error { return nil })
+	r := NewDagRun(d, "manual", "r:1", time.Now(), time.Now(), time.Now(), nil)
+	mk := func(name string) []any {
+		big := make([]any, 5000)
+		for i := range big {
+			big[i] = map[string]any{"id": float64(i), "name": name + strings.Repeat("x", 30)}
+		}
+		return big
+	}
+	r.XCom["read"] = map[string]any{"return_value": mk("a"), "n": float64(1)}
+	if _, err := st.CreateRun(r); err != nil {
+		t.Fatal(err)
+	}
+	j := st.b.(*jsonBackend)
+	if fi, err := os.Stat(j.runPath("jblob", "r:1")); err != nil || fi.Size() > 4000 {
+		t.Fatalf("run file should stay small: %v %v", fi.Size(), err)
+	}
+	runs, _ := st.ListRuns("jblob")
+	if !IsXComRef(runs[0].XCom["read"]["return_value"]) || runs[0].XCom["read"]["n"] != float64(1) {
+		t.Fatal("list should keep the reference")
+	}
+	full, err := st.LoadRun("jblob", "r:1")
+	if err != nil || len(full.XCom["read"]["return_value"].([]any)) != 5000 {
+		t.Fatalf("load: %v", err)
+	}
+	lite, _ := st.LoadRunLite("jblob", "r:1")
+	prev, _ := st.XComPreviews(lite)
+	if p := prev["read\x00return_value"]; p["rows"] != float64(5000) || len(p["sample"].([]any)) != PreviewRows {
+		t.Fatalf("preview %v", p)
+	}
+	full.XCom["read"]["return_value"] = mk("b")
+	if err := st.SaveRun(full); err != nil {
+		t.Fatal(err)
+	}
+	v, ok, err := st.XComValue("jblob", "r:1", "read", "return_value")
+	if err != nil || !ok || !strings.HasPrefix(v.([]any)[0].(map[string]any)["name"].(string), "b") {
+		t.Fatalf("value: %v %v", ok, err)
+	}
+	delete(full.XCom["read"], "return_value") // removed: its file goes
+	if err := st.SaveRun(full); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := os.ReadDir(j.xcomDir("jblob", "r:1")); len(e) != 0 {
+		t.Fatalf("stale blob files: %v", e)
+	}
+	full.XCom["read"]["return_value"] = mk("c")
+	_ = st.SaveRun(full)
+	b, err := st.Export(10)
+	if err != nil || len(b.Runs[0].XCom["read"]["return_value"].([]any)) != 5000 {
+		t.Fatalf("export should hold the value: %v", err)
+	}
+	if err := st.DeleteRun("jblob", "r:1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(j.xcomDir("jblob", "r:1")); !os.IsNotExist(err) {
+		t.Fatal("blob dir should go with the run")
+	}
+}
+
+func TestJSONCompactXCom(t *testing.T) {
+	t.Setenv("DAGSFLOW_XCOM_INLINE_BYTES", "")
+	st := NewStore(t.TempDir())
+	j := st.b.(*jsonBackend)
+	d := dag.NewDAG("jcompact", "")
+	d.NewTask("read", func(*dag.TaskContext) error { return nil })
+	r := NewDagRun(d, "manual", "old", time.Now(), time.Now(), time.Now(), nil)
+	r.State = RunSuccess
+	big := make([]any, 5000)
+	for i := range big {
+		big[i] = map[string]any{"id": float64(i), "name": strings.Repeat("x", 30)}
+	}
+	r.XCom["read"] = map[string]any{"return_value": big}
+	if err := writeJSONAtomic(j.runPath("jcompact", "old"), r); err != nil { // as an older version wrote it
+		t.Fatal(err)
+	}
+	n, err := st.CompactXCom(nil)
+	if err != nil || n != 1 {
+		t.Fatalf("compact: %d %v", n, err)
+	}
+	if fi, _ := os.Stat(j.runPath("jcompact", "old")); fi.Size() > 4000 {
+		t.Fatalf("still %d bytes", fi.Size())
+	}
+	got, err := st.LoadRun("jcompact", "old")
+	if err != nil || len(got.XCom["read"]["return_value"].([]any)) != 5000 {
+		t.Fatalf("value lost: %v", err)
 	}
 }

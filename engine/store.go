@@ -131,6 +131,9 @@ type DagRun struct {
 	version int64             // row version when loaded (Postgres optimistic concurrency)
 	owned   bool              // executed by this process
 	blobs   map[string]string // Postgres: XComs kept outside the run row, slot+key -> checksum of what is stored
+	// blobSeen: slot+key -> identity of the value the checksum was computed
+	// for, so an unchanged large value is not marshalled again on every save
+	blobSeen map[string]valueID
 }
 
 type SLAMiss struct {

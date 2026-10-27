@@ -134,6 +134,9 @@ var migrations = []string{
 		last_seen = COALESCE((doc->>'last_seen')::timestamptz, now());
 	CREATE INDEX IF NOT EXISTS catalog_edge_via_idx ON catalog_edge (via);
 	CREATE INDEX IF NOT EXISTS catalog_edge_seen_idx ON catalog_edge (last_seen);`,
+	// 6: a small preview of each large XCom (row count + first rows), so run
+	// details don't read the whole value
+	`ALTER TABLE xcom_blob ADD COLUMN IF NOT EXISTS preview jsonb;`,
 }
 
 // SchemaVersion is the schema this binary expects.
@@ -265,6 +268,22 @@ func (p *pgBackend) loadRun(dagID, runID string) (*DagRun, error) {
 		return nil, err
 	}
 	return r, p.resolveXCom(ctx, r)
+}
+
+// loadRunLite: the run with large XComs left as references (not read).
+func (p *pgBackend) loadRunLite(dagID, runID string) (*DagRun, error) {
+	ctx, cancel := pgctx()
+	defer cancel()
+	var doc []byte
+	var ver int64
+	err := p.pool.QueryRow(ctx, `SELECT doc, version FROM dag_run WHERE dag_id=$1 AND run_id=$2`, dagID, runID).Scan(&doc, &ver)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("dag run %s/%s not found", dagID, runID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return decodeRun(doc, ver)
 }
 
 func (p *pgBackend) runExists(dagID, runID string) bool {

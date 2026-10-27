@@ -1124,7 +1124,7 @@ function xcomTab(run, sel){
     const v = x[k];
     if(!big(v)) return `<pre class="json inline">${esc(typeof v==="string" ? v : JSON.stringify(v,null,2))}</pre>`;
     const href = `/api/v1/dags/${enc(current.dag_id)}/dagRuns/${enc(run.dag_run_id||run.run_id)}/xcom?slot=${enc(slot)}&key=${enc(k)}`;
-    return `<div class="sub" style="margin-bottom:6px">Large value: ${mb(v["$xcom_ref"])}${v.rows!=null?` · ${v.rows.toLocaleString()} rows`:""}${v.sample?` · first ${v.sample.length} shown`:""}.
+    return `<div class="sub" style="margin-bottom:6px">Large value${v["$xcom_ref"]>0?": "+mb(v["$xcom_ref"]):""}${v.rows!=null?` · ${v.rows.toLocaleString()} rows`:""}${v.sample?` · first ${v.sample.length} shown`:""}.
       <a href="${href}&download=1">Download the full value (JSON)</a></div>${v.sample?`<pre class="json inline">${esc(JSON.stringify(v.sample,null,2))}</pre>`:""}`;
   };
   return `<table class="tbl"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>${keys.sort().map(k=>

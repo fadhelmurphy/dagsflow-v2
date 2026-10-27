@@ -431,6 +431,21 @@ func (s *Server) runOr404(w http.ResponseWriter, r *http.Request) (*dag.DAG, *en
 	return d, run, true
 }
 
+// runLite404: the run without its large XCom values (pages that only show
+// states, notes, rendered fields: reading an 80 MB XCom there made them slow).
+func (s *Server) runLite404(w http.ResponseWriter, r *http.Request) (*dag.DAG, *engine.DagRun, bool) {
+	d, ok := s.dagOr404(w, r)
+	if !ok {
+		return nil, nil, false
+	}
+	run, err := s.Store.LoadRunLite(d.ID, r.PathValue("run"))
+	if err != nil {
+		fail(w, 404, "%v", err)
+		return nil, nil, false
+	}
+	return d, run, true
+}
+
 func readBody(r *http.Request, v any) error {
 	b, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil || len(b) == 0 {
@@ -834,16 +849,42 @@ func (s *Server) trigger(w http.ResponseWriter, r *http.Request) {
 // ({"$xcom_ref": bytes, "rows": n, "sample": [first rows]}): the page polls this
 // every few seconds. ?xcom=full returns them whole; /xcom returns one value.
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
-	_, run, ok := s.runOr404(w, r)
+	if r.URL.Query().Get("xcom") == "full" {
+		_, run, ok := s.runOr404(w, r)
+		if ok {
+			writeJSON(w, 200, run)
+		}
+		return
+	}
+	_, run, ok := s.runLite404(w, r)
 	if !ok {
 		return
 	}
-	if r.URL.Query().Get("xcom") != "full" && len(run.XCom) > 0 {
+	if len(run.XCom) > 0 {
+		var previews map[string]map[string]any
 		cp := *run
 		cp.XCom = make(map[string]map[string]any, len(run.XCom))
 		for slot, kv := range run.XCom {
 			m := make(map[string]any, len(kv))
 			for k, v := range kv {
+				if engine.IsXComRef(v) { // stored apart: its preview, not the value
+					if previews == nil {
+						var err error
+						if previews, err = s.Store.XComPreviews(run); err != nil {
+							fail(w, 500, "%v", err)
+							return
+						}
+					}
+					ref := map[string]any{}
+					for pk, pv := range v.(map[string]any) {
+						ref[pk] = pv
+					}
+					for pk, pv := range previews[slot+"\x00"+k] {
+						ref[pk] = pv
+					}
+					m[k] = ref
+					continue
+				}
 				m[k] = xcomPreview(v)
 			}
 			cp.XCom[slot] = m
@@ -860,6 +901,9 @@ func xcomPreview(v any) any {
 	if engine.IsXComRef(v) {
 		return v
 	}
+	if list, ok := v.([]any); ok && len(list) > 2000 { // surely large: don't encode it just to measure it
+		return map[string]any{"$xcom_ref": -1, "rows": len(list), "sample": list[:engine.PreviewRows]}
+	}
 	b, err := json.Marshal(v)
 	if err != nil || len(b) <= xcomPreviewBytes {
 		return v
@@ -875,12 +919,17 @@ func xcomPreview(v any) any {
 
 // getXComValue returns one XCom value whole (?slot=task[#mapIndex]&key=…).
 func (s *Server) getXComValue(w http.ResponseWriter, r *http.Request) {
-	_, run, ok := s.runOr404(w, r)
+	d, ok := s.dagOr404(w, r)
 	if !ok {
 		return
 	}
 	q := r.URL.Query()
-	v, found := run.XCom[q.Get("slot")][firstNonEmpty(q.Get("key"), "return_value")]
+	run := struct{ RunID string }{r.PathValue("run")}
+	v, found, err := s.Store.XComValue(d.ID, run.RunID, q.Get("slot"), firstNonEmpty(q.Get("key"), "return_value"))
+	if err != nil {
+		fail(w, 404, "%v", err)
+		return
+	}
 	if !found {
 		fail(w, 404, "no XCom %q for %s", firstNonEmpty(q.Get("key"), "return_value"), q.Get("slot"))
 		return
@@ -949,7 +998,7 @@ func (s *Server) clear(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listTIs(w http.ResponseWriter, r *http.Request) {
-	d, run, ok := s.runOr404(w, r)
+	d, run, ok := s.runLite404(w, r)
 	if !ok {
 		return
 	}
